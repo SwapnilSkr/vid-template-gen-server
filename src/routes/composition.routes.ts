@@ -1,17 +1,26 @@
 import { Elysia, t } from "elysia";
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
-import { createComposition, getJob, listJobs } from "../services";
-import { fileExists } from "../utils";
+import {
+  createComposition,
+  getComposition,
+  listCompositions,
+} from "../services";
 
 export const compositionRoutes = new Elysia({ prefix: "/api/compositions" })
-  // Create a new composition
+  // Create a new composition (one-command generation)
   .post(
     "/",
     async ({ body }) => {
       try {
-        const job = await createComposition(body as any);
-        return { success: true, data: job };
+        const job = await createComposition(
+          body.templateId,
+          body.plot,
+          body.title
+        );
+        return {
+          success: true,
+          data: job,
+          message: "Composition started! Check status for progress.",
+        };
       } catch (error: any) {
         return { success: false, error: error.message };
       }
@@ -19,58 +28,39 @@ export const compositionRoutes = new Elysia({ prefix: "/api/compositions" })
     {
       body: t.Object({
         templateId: t.String(),
-        title: t.String(),
-        dialogue: t.Array(
-          t.Object({
-            characterId: t.String(),
-            text: t.String(),
-            startTime: t.Number(),
-            duration: t.Optional(t.Number()),
-            position: t.Optional(
-              t.Object({
-                x: t.Number(),
-                y: t.Number(),
-                scale: t.Number(),
-                anchor: t.String(),
-              })
-            ),
-          })
-        ),
-        outputSettings: t.Optional(
-          t.Object({
-            resolution: t.Optional(
-              t.Union([t.Literal("720p"), t.Literal("1080p"), t.Literal("4k")])
-            ),
-            format: t.Optional(t.Union([t.Literal("mp4"), t.Literal("webm")])),
-            quality: t.Optional(
-              t.Union([
-                t.Literal("low"),
-                t.Literal("medium"),
-                t.Literal("high"),
-              ])
-            ),
-          })
-        ),
+        plot: t.String(),
+        title: t.Optional(t.String()),
       }),
     }
   )
 
-  // List all composition jobs
-  .get("/", ({ query }) => {
+  // List all compositions
+  .get("/", async ({ query }) => {
     const limit = query.limit ? parseInt(query.limit) : 50;
-    const jobs = listJobs(limit);
-    return { success: true, data: jobs };
+    const compositions = await listCompositions(limit);
+    return { success: true, data: compositions };
   })
 
   // Get composition status
   .get(
     "/:id/status",
-    ({ params }) => {
-      const job = getJob(params.id);
-      if (!job) {
-        return { success: false, error: "Job not found" };
+    async ({ params }) => {
+      const composition = await getComposition(params.id);
+      if (!composition) {
+        return { success: false, error: "Composition not found" };
       }
-      return { success: true, data: job };
+      return {
+        success: true,
+        data: {
+          id: composition._id,
+          status: composition.status,
+          progress: composition.progress,
+          title: composition.title,
+          script: composition.generatedScript,
+          outputUrl: composition.outputUrl,
+          error: composition.error,
+        },
+      };
     },
     {
       params: t.Object({
@@ -83,38 +73,95 @@ export const compositionRoutes = new Elysia({ prefix: "/api/compositions" })
   .get(
     "/:id/download",
     async ({ params, set }) => {
-      const job = getJob(params.id);
-      if (!job) {
+      const composition = await getComposition(params.id);
+      if (!composition) {
         set.status = 404;
-        return { success: false, error: "Job not found" };
+        return { success: false, error: "Composition not found" };
       }
 
-      if (job.status !== "completed") {
+      if (composition.status !== "completed") {
         set.status = 400;
         return {
           success: false,
-          error: `Job not completed. Current status: ${job.status}`,
-          progress: job.progress,
+          error: `Composition not completed. Current status: ${composition.status}`,
+          progress: composition.progress,
         };
       }
 
-      if (!job.outputPath || !(await fileExists(job.outputPath))) {
+      if (!composition.outputUrl) {
         set.status = 404;
-        return { success: false, error: "Output file not found" };
+        return { success: false, error: "Output not available" };
       }
 
-      const stats = await stat(job.outputPath);
-      const filename = job.outputPath.split("/").pop() || "output.mp4";
-
-      set.headers["Content-Type"] = "video/mp4";
-      set.headers["Content-Disposition"] = `attachment; filename="${filename}"`;
-      set.headers["Content-Length"] = String(stats.size);
-
-      return new Response(Bun.file(job.outputPath));
+      // Return S3 URL for download
+      return {
+        success: true,
+        data: {
+          downloadUrl: composition.outputUrl,
+          subtitlesUrl: composition.subtitlesUrl,
+        },
+      };
     },
     {
       params: t.Object({
         id: t.String(),
       }),
+    }
+  );
+
+// Alias for simpler one-command generation
+export const generateRoutes = new Elysia({ prefix: "/api/generate" })
+  .post(
+    "/",
+    async ({ body }) => {
+      try {
+        const job = await createComposition(
+          body.templateId,
+          body.plot,
+          body.title
+        );
+        return {
+          success: true,
+          data: {
+            id: job._id,
+            status: job.status,
+            message: "AI is generating the script...",
+          },
+        };
+      } catch (error: any) {
+        return { success: false, error: error.message };
+      }
+    },
+    {
+      body: t.Object({
+        templateId: t.String(),
+        plot: t.String(),
+        title: t.Optional(t.String()),
+      }),
+    }
+  )
+  .get(
+    "/:id",
+    async ({ params }) => {
+      const composition = await getComposition(params.id);
+      if (!composition) {
+        return { success: false, error: "Not found" };
+      }
+      return {
+        success: true,
+        data: {
+          id: composition._id,
+          status: composition.status,
+          progress: composition.progress,
+          title: composition.title,
+          script: composition.generatedScript,
+          outputUrl: composition.outputUrl,
+          subtitlesUrl: composition.subtitlesUrl,
+          error: composition.error,
+        },
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
     }
   );

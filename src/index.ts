@@ -1,9 +1,13 @@
 import { Elysia } from "elysia";
 import { cors } from "@elysiajs/cors";
-import { staticPlugin } from "@elysiajs/static";
 import { config, validateConfig } from "./config";
-import { templateRoutes, characterRoutes, compositionRoutes } from "./routes";
-import { loadTemplates, loadCharacters } from "./services";
+import { connectDatabase } from "./db";
+import {
+  templateRoutes,
+  characterRoutes,
+  compositionRoutes,
+  generateRoutes,
+} from "./routes";
 import { initializeStorage } from "./utils";
 
 // Initialize application
@@ -13,12 +17,11 @@ async function initialize() {
   // Validate configuration
   validateConfig();
 
+  // Connect to MongoDB
+  await connectDatabase();
+
   // Initialize storage directories
   await initializeStorage();
-
-  // Load existing data
-  await loadTemplates();
-  await loadCharacters();
 }
 
 // Create Elysia app
@@ -44,14 +47,6 @@ const app = new Elysia()
     })
   )
 
-  // Serve static files from storage/output
-  .use(
-    staticPlugin({
-      assets: config.outputPath,
-      prefix: "/files",
-    })
-  )
-
   // Health check
   .get("/health", () => ({
     status: "ok",
@@ -62,40 +57,58 @@ const app = new Elysia()
   // API info
   .get("/", () => ({
     name: "Video Generator API",
-    version: "1.0.0",
+    version: "2.0.0",
     endpoints: {
       templates: "/api/templates",
       characters: "/api/characters",
       compositions: "/api/compositions",
+      generate: "/api/generate",
       health: "/health",
+    },
+    usage: {
+      step1: "POST /api/templates - Upload a background video template",
+      step2:
+        "POST /api/characters - Create characters with images and voice IDs",
+      step3: "POST /api/templates/:id/characters - Add characters to template",
+      step4:
+        "POST /api/generate - Generate video with just templateId and plot!",
     },
   }))
 
   // Mount routes
   .use(templateRoutes)
   .use(characterRoutes)
-  .use(compositionRoutes);
+  .use(compositionRoutes)
+  .use(generateRoutes);
 
 // Start server
-initialize().then(() => {
-  app.listen(config.port);
+initialize()
+  .then(() => {
+    app.listen(config.port);
 
-  console.log(`
-╔════════════════════════════════════════════════════╗
-║     🎬 Video Generator Service                     ║
-╠════════════════════════════════════════════════════╣
-║  Server: http://${config.host}:${config.port}                    ║
-║                                                    ║
-║  Endpoints:                                        ║
-║    • POST   /api/templates          Upload template║
-║    • GET    /api/templates          List templates ║
-║    • POST   /api/characters         Create char    ║
-║    • GET    /api/characters         List chars     ║
-║    • POST   /api/compositions       Start render   ║
-║    • GET    /api/compositions/:id/status           ║
-║    • GET    /api/compositions/:id/download         ║
-╚════════════════════════════════════════════════════╝
+    console.log(`
+╔════════════════════════════════════════════════════════╗
+║     🎬 Video Generator API v2.0                        ║
+╠════════════════════════════════════════════════════════╣
+║  Server: http://${config.host}:${config.port}                          ║
+║  MongoDB: Connected                                    ║
+║                                                        ║
+║  One-Command Generation:                               ║
+║    POST /api/generate                                  ║
+║    { "templateId": "...", "plot": "Your story..." }    ║
+║                                                        ║
+║  Endpoints:                                            ║
+║    • POST   /api/templates           Upload template   ║
+║    • POST   /api/templates/:id/characters  Add chars   ║
+║    • POST   /api/characters          Create character  ║
+║    • POST   /api/generate            One-command gen   ║
+║    • GET    /api/generate/:id        Check status      ║
+╚════════════════════════════════════════════════════════╝
   `);
-});
+  })
+  .catch((error) => {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  });
 
 export type App = typeof app;

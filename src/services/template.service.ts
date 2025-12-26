@@ -1,43 +1,10 @@
-import { v4 as uuidv4 } from "uuid";
-import { join } from "node:path";
-import { writeFile, readFile, unlink, readdir } from "node:fs/promises";
+import { Template, type ITemplate, Character } from "../models";
+import { uploadVideo, uploadImage, deleteFromS3 } from "./s3.service";
+import { getVideoMetadata } from "./ffmpeg.service";
+import { ensureDir } from "../utils";
 import { config } from "../config";
-import type { VideoTemplate } from "../types";
-import { getVideoMetadata, extractThumbnail } from "./ffmpeg.service";
-import { ensureDir, fileExists, generateFilename } from "../utils";
-
-// In-memory template storage (could be replaced with DB)
-const templates = new Map<string, VideoTemplate>();
-const TEMPLATES_JSON = "templates.json";
-
-/**
- * Load templates from disk on startup
- */
-export async function loadTemplates(): Promise<void> {
-  try {
-    const filePath = join(config.templatesPath, TEMPLATES_JSON);
-    if (await fileExists(filePath)) {
-      const data = await readFile(filePath, "utf-8");
-      const loaded = JSON.parse(data) as VideoTemplate[];
-      for (const template of loaded) {
-        template.createdAt = new Date(template.createdAt);
-        templates.set(template.id, template);
-      }
-      console.log(`📂 Loaded ${templates.size} templates`);
-    }
-  } catch (error) {
-    console.warn("Could not load templates:", error);
-  }
-}
-
-/**
- * Save templates to disk
- */
-async function saveTemplates(): Promise<void> {
-  const filePath = join(config.templatesPath, TEMPLATES_JSON);
-  const data = JSON.stringify(Array.from(templates.values()), null, 2);
-  await writeFile(filePath, data);
-}
+import { writeFile, unlink } from "node:fs/promises";
+import { join } from "node:path";
 
 /**
  * Create a new template from uploaded video
@@ -47,89 +14,126 @@ export async function createTemplate(
   filename: string,
   name: string,
   description: string = ""
-): Promise<VideoTemplate> {
-  await ensureDir(config.templatesPath);
-
-  const id = uuidv4();
-  const ext = filename.split(".").pop() || "mp4";
-  const videoFilename = `${id}.${ext}`;
-  const filePath = join(config.templatesPath, videoFilename);
-
-  // Save video file
-  await writeFile(filePath, videoBuffer);
-
-  // Get video metadata
-  const metadata = await getVideoMetadata(filePath);
-
-  // Generate thumbnail
-  let thumbnailPath: string | undefined;
-  try {
-    const thumbFilename = `${id}_thumb.jpg`;
-    thumbnailPath = join(config.templatesPath, thumbFilename);
-    await extractThumbnail(filePath, thumbnailPath);
-  } catch (error) {
-    console.warn("Could not generate thumbnail:", error);
-  }
-
-  const template: VideoTemplate = {
-    id,
-    name,
-    description,
-    filePath,
-    duration: metadata.duration,
-    width: metadata.width,
-    height: metadata.height,
-    frameRate: metadata.frameRate,
-    createdAt: new Date(),
-    thumbnailPath,
-  };
-
-  templates.set(id, template);
-  await saveTemplates();
-
-  console.log(
-    `📹 Created template: ${name} (${metadata.duration.toFixed(1)}s)`
+): Promise<ITemplate> {
+  // Save temporarily to get metadata
+  await ensureDir(config.processingPath);
+  const tempPath = join(
+    config.processingPath,
+    `temp_${Date.now()}_${filename}`
   );
+  await writeFile(tempPath, videoBuffer);
 
-  return template;
+  try {
+    // Get video metadata
+    const metadata = await getVideoMetadata(tempPath);
+
+    // Upload to S3
+    const videoUrl = await uploadVideo(videoBuffer, "templates", filename);
+
+    // Create template in DB
+    const template = new Template({
+      name,
+      description,
+      videoUrl,
+      duration: metadata.duration,
+      dimensions: {
+        width: metadata.width,
+        height: metadata.height,
+      },
+      frameRate: metadata.frameRate,
+      characters: [],
+    });
+
+    await template.save();
+
+    console.log(
+      `📹 Created template: ${name} (${metadata.duration.toFixed(1)}s)`
+    );
+
+    return template;
+  } finally {
+    // Clean up temp file
+    await unlink(tempPath).catch(() => {});
+  }
 }
 
 /**
  * Get a template by ID
  */
-export function getTemplate(id: string): VideoTemplate | undefined {
-  return templates.get(id);
+export async function getTemplate(id: string): Promise<ITemplate | null> {
+  return Template.findById(id);
 }
 
 /**
  * List all templates
  */
-export function listTemplates(): VideoTemplate[] {
-  return Array.from(templates.values()).sort(
-    (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+export async function listTemplates(): Promise<ITemplate[]> {
+  return Template.find().sort({ createdAt: -1 });
+}
+
+/**
+ * Add characters to a template
+ */
+export async function addCharactersToTemplate(
+  templateId: string,
+  characterIds: string[]
+): Promise<ITemplate | null> {
+  const template = await Template.findById(templateId);
+  if (!template) return null;
+
+  // Verify characters exist
+  const characters = await Character.find({ _id: { $in: characterIds } });
+  if (characters.length !== characterIds.length) {
+    throw new Error("Some characters not found");
+  }
+
+  // Add unique characters
+  const existingIds = new Set(template.characters.map((c) => c.toString()));
+  for (const id of characterIds) {
+    if (!existingIds.has(id)) {
+      template.characters.push(id as any);
+    }
+  }
+
+  await template.save();
+  return Template.findById(templateId); // Re-fetch to populate
+}
+
+/**
+ * Remove characters from a template
+ */
+export async function removeCharactersFromTemplate(
+  templateId: string,
+  characterIds: string[]
+): Promise<ITemplate | null> {
+  const template = await Template.findById(templateId);
+  if (!template) return null;
+
+  const removeSet = new Set(characterIds);
+  template.characters = template.characters.filter(
+    (c) => !removeSet.has(c.toString())
   );
+
+  await template.save();
+  return Template.findById(templateId);
 }
 
 /**
  * Delete a template
  */
 export async function deleteTemplate(id: string): Promise<boolean> {
-  const template = templates.get(id);
+  const template = await Template.findById(id);
   if (!template) return false;
 
-  // Delete video file
-  try {
-    await unlink(template.filePath);
-    if (template.thumbnailPath) {
-      await unlink(template.thumbnailPath);
-    }
-  } catch (error) {
-    console.warn("Could not delete template files:", error);
+  // Delete from S3
+  if (template.videoUrl) {
+    await deleteFromS3(template.videoUrl).catch(console.error);
+  }
+  if (template.thumbnailUrl) {
+    await deleteFromS3(template.thumbnailUrl).catch(console.error);
   }
 
-  templates.delete(id);
-  await saveTemplates();
-
+  await Template.findByIdAndDelete(id);
   console.log(`🗑️  Deleted template: ${id}`);
 
   return true;

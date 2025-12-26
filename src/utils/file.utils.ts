@@ -76,11 +76,6 @@ export async function listFiles(dirPath: string): Promise<string[]> {
  * Initialize storage directories
  */
 export async function initializeStorage(): Promise<void> {
-  await Promise.all([
-    ensureDir(config.templatesPath),
-    ensureDir(config.charactersPath),
-    ensureDir(config.processingPath),
-    ensureDir(config.outputPath),
-  ]);
+  await ensureDir(config.processingPath);
   console.log("📁 Storage directories initialized");
 }

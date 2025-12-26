@@ -302,7 +302,7 @@ export async function finalizeVideo(
   outputPath: string,
   settings?: { quality?: "low" | "medium" | "high" }
 ): Promise<string> {
-  await ensureDir(config.outputPath);
+  await ensureDir(config.processingPath);
 
   const crf =
     settings?.quality === "high" ? 18 : settings?.quality === "low" ? 28 : 23;
@@ -355,5 +355,46 @@ export async function extractThumbnail(
       .on("error", (err) =>
         reject(new Error(`Thumbnail extraction failed: ${err.message}`))
       );
+  });
+}
+
+/**
+ * Add subtitles to video (burn in)
+ */
+export async function addSubtitlesToVideo(
+  videoPath: string,
+  srtContent: string,
+  outputPath?: string
+): Promise<string> {
+  await ensureDir(config.processingPath);
+  const output =
+    outputPath ||
+    join(config.processingPath, generateFilename("subtitled", "mp4"));
+
+  // Write SRT to temp file
+  const srtPath = join(config.processingPath, `temp_${Date.now()}.srt`);
+  const { writeFile, unlink } = await import("node:fs/promises");
+  await writeFile(srtPath, srtContent, "utf-8");
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(videoPath)
+      .outputOptions([
+        "-vf",
+        `subtitles='${srtPath.replace(
+          /'/g,
+          "\\'"
+        )}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`,
+      ])
+      .output(output)
+      .on("end", async () => {
+        await unlink(srtPath).catch(() => {});
+        console.log(`📝 Subtitles added to video`);
+        resolve(output);
+      })
+      .on("error", async (err) => {
+        await unlink(srtPath).catch(() => {});
+        reject(new Error(`Subtitle burn failed: ${err.message}`));
+      })
+      .run();
   });
 }

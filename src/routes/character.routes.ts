@@ -54,8 +54,8 @@ export const characterRoutes = new Elysia({ prefix: "/api/characters" })
         name: t.String(),
         displayName: t.String(),
         voiceId: t.String(),
-        positionX: t.Optional(t.Number({ default: 10 })),
-        positionY: t.Optional(t.Number({ default: 70 })),
+        positionX: t.Optional(t.Number({ default: 50 })),
+        positionY: t.Optional(t.Number({ default: 75 })),
         scale: t.Optional(t.Number({ default: 0.25 })),
         anchor: t.Optional(t.String({ default: "bottom-left" })),
       }),
@@ -63,16 +63,16 @@ export const characterRoutes = new Elysia({ prefix: "/api/characters" })
   )
 
   // List all characters
-  .get("/", () => {
-    const characters = listCharacters();
+  .get("/", async () => {
+    const characters = await listCharacters();
     return { success: true, data: characters };
   })
 
-  // Get character by ID
+  // Get character by ID or name
   .get(
     "/:id",
-    ({ params }) => {
-      const character = getCharacter(params.id);
+    async ({ params }) => {
+      const character = await getCharacter(params.id);
       if (!character) {
         return { success: false, error: "Character not found" };
       }
@@ -96,13 +96,11 @@ export const characterRoutes = new Elysia({ prefix: "/api/characters" })
       return { success: true, data: updated };
     },
     {
-      params: t.Object({
-        id: t.String(),
-      }),
+      params: t.Object({ id: t.String() }),
       body: t.Object({
         displayName: t.Optional(t.String()),
         voiceId: t.Optional(t.String()),
-        defaultPosition: t.Optional(
+        position: t.Optional(
           t.Object({
             x: t.Number(),
             y: t.Number(),

@@ -4,6 +4,8 @@ import {
   getTemplate,
   listTemplates,
   deleteTemplate,
+  addCharactersToTemplate,
+  removeCharactersFromTemplate,
 } from "../services";
 
 export const templateRoutes = new Elysia({ prefix: "/api/templates" })
@@ -41,16 +43,16 @@ export const templateRoutes = new Elysia({ prefix: "/api/templates" })
   )
 
   // List all templates
-  .get("/", () => {
-    const templates = listTemplates();
+  .get("/", async () => {
+    const templates = await listTemplates();
     return { success: true, data: templates };
   })
 
   // Get template by ID
   .get(
     "/:id",
-    ({ params }) => {
-      const template = getTemplate(params.id);
+    async ({ params }) => {
+      const template = await getTemplate(params.id);
       if (!template) {
         return { success: false, error: "Template not found" };
       }
@@ -60,6 +62,52 @@ export const templateRoutes = new Elysia({ prefix: "/api/templates" })
       params: t.Object({
         id: t.String(),
       }),
+    }
+  )
+
+  // Add characters to template
+  .post(
+    "/:id/characters",
+    async ({ params, body }) => {
+      try {
+        const template = await addCharactersToTemplate(
+          params.id,
+          body.characterIds
+        );
+        if (!template) {
+          return { success: false, error: "Template not found" };
+        }
+        return { success: true, data: template };
+      } catch (error: any) {
+        return { success: false, error: error.message };
+      }
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({ characterIds: t.Array(t.String()) }),
+    }
+  )
+
+  // Remove characters from template
+  .delete(
+    "/:id/characters",
+    async ({ params, body }) => {
+      try {
+        const template = await removeCharactersFromTemplate(
+          params.id,
+          body.characterIds
+        );
+        if (!template) {
+          return { success: false, error: "Template not found" };
+        }
+        return { success: true, data: template };
+      } catch (error: any) {
+        return { success: false, error: error.message };
+      }
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({ characterIds: t.Array(t.String()) }),
     }
   )
 
