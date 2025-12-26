@@ -43,9 +43,7 @@ export const CreateCharacterBody = t.Object({
  * Update character request body
  */
 export const UpdateCharacterBody = t.Object({
-  image: t.Optional(t.File()),
-  displayName: t.Optional(t.String()),
-  voiceId: t.Optional(t.String()),
+  ...t.Partial(t.Omit(CreateCharacterBody, ["name"])).properties,
   position: t.Optional(CharacterPositionSchema),
 });
 

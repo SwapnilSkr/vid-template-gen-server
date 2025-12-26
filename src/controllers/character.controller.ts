@@ -105,10 +105,24 @@ export async function updateCharacterController({
     const updates: any = {
       displayName: body.displayName,
       voiceId: body.voiceId,
-      position: body.position,
     };
 
-    // If image was uploaded, use the S3 URL from middleware
+    if (body.position) {
+      updates.position = body.position;
+    } else if (
+      body.positionX !== undefined ||
+      body.positionY !== undefined ||
+      body.scale !== undefined ||
+      body.anchor !== undefined
+    ) {
+      updates.position = {
+        x: body.positionX,
+        y: body.positionY,
+        scale: body.scale,
+        anchor: body.anchor,
+      };
+    }
+
     if (uploadedFiles.image) {
       updates.imageUrl = uploadedFiles.image;
     }
