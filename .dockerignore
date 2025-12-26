@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+bun.lock
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+*.log
+
+# Environment files (handled separately)
+.env
+.env.local
+.env.*.local
+
+# Storage (mounted as volumes)
+storage/
+
+# Documentation
+README.md
+docs/
+
+# Tests
+*.test.ts
+*.spec.ts
+__tests__/
+coverage/
