@@ -9,26 +9,17 @@ import { join } from "node:path";
 /**
  * Create a new template from uploaded video
  */
+/**
+ * Create a new template from uploaded video
+ */
 export async function createTemplate(
-  videoBuffer: Buffer,
-  filename: string,
+  videoUrl: string,
   name: string,
   description: string = ""
 ): Promise<ITemplate> {
-  // Save temporarily to get metadata
-  await ensureDir(config.processingPath);
-  const tempPath = join(
-    config.processingPath,
-    `temp_${Date.now()}_${filename}`
-  );
-  await writeFile(tempPath, videoBuffer);
-
   try {
-    // Get video metadata
-    const metadata = await getVideoMetadata(tempPath);
-
-    // Upload to S3
-    const videoUrl = await uploadVideo(videoBuffer, "templates", filename);
+    // Get video metadata from URL (ffprobe supports URLs)
+    const metadata = await getVideoMetadata(videoUrl);
 
     // Create template in DB
     const template = new Template({
@@ -51,9 +42,9 @@ export async function createTemplate(
     );
 
     return template;
-  } finally {
-    // Clean up temp file
-    await unlink(tempPath).catch(() => {});
+  } catch (error: any) {
+    console.error(`Failed to create template: ${error.message}`);
+    throw error;
   }
 }
 

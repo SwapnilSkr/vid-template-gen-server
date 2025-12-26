@@ -11,16 +11,14 @@ export interface CharacterPosition {
 /**
  * Create a new character
  */
-export async function createCharacter(
-  imageBuffer: Buffer,
-  filename: string,
-  name: string,
-  displayName: string,
-  voiceId: string,
-  position?: Partial<CharacterPosition>
-): Promise<ICharacter> {
-  // Upload image to S3
-  const imageUrl = await uploadImage(imageBuffer, "characters", filename);
+export async function createCharacter(data: {
+  name: string;
+  displayName: string;
+  voiceId: string;
+  imageUrl: string;
+  position?: Partial<CharacterPosition>;
+}): Promise<ICharacter> {
+  const { name, displayName, voiceId, imageUrl, position } = data;
 
   // Create character in DB
   const character = new Character({
@@ -70,8 +68,18 @@ export async function listCharacters(): Promise<ICharacter[]> {
  */
 export async function updateCharacter(
   id: string,
-  updates: Partial<Pick<ICharacter, "displayName" | "voiceId" | "position">>
+  updates: Partial<
+    Pick<ICharacter, "displayName" | "voiceId" | "position" | "imageUrl">
+  >
 ): Promise<ICharacter | null> {
+  // If updating image, delete old one from S3 first
+  if (updates.imageUrl) {
+    const existing = await Character.findById(id);
+    if (existing?.imageUrl && existing.imageUrl !== updates.imageUrl) {
+      await deleteFromS3(existing.imageUrl).catch(console.error);
+    }
+  }
+
   const character = await Character.findByIdAndUpdate(
     id,
     { $set: updates },
