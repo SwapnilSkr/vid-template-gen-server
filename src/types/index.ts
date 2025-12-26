@@ -11,4 +11,4 @@ export * from "./composition.types";
 export * from "./api.types";
 
 // Guard types (validation schemas)
-export * from "./guards";
+export * from "./guards/index";

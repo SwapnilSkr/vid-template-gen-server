@@ -3,12 +3,14 @@ import { fileUpload } from "../middlewares";
 import {
   IdParams,
   CreateTemplateBody,
+  UpdateTemplateBody,
   TemplateCharactersBody,
 } from "../types/guards";
 import {
   createTemplateController,
   listTemplatesController,
   getTemplateController,
+  updateTemplateController,
   addCharactersToTemplateController,
   removeCharactersFromTemplateController,
   deleteTemplateController,
@@ -42,6 +44,16 @@ export const templateRoutes = new Elysia({ prefix: "/api/templates" })
   .get("/:id", getTemplateController, {
     params: IdParams,
   })
+
+  // Update template
+  .guard(
+    {
+      params: IdParams,
+      body: UpdateTemplateBody,
+    },
+    (app) =>
+      app.use(videoUploadMiddleware).put("/:id", updateTemplateController)
+  )
 
   // Add characters to template
   .post("/:id/characters", addCharactersToTemplateController, {

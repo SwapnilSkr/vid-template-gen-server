@@ -12,6 +12,7 @@ export {
   createTemplateController,
   listTemplatesController,
   getTemplateController,
+  updateTemplateController,
   addCharactersToTemplateController,
   removeCharactersFromTemplateController,
   deleteTemplateController,

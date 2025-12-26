@@ -3,6 +3,7 @@ import {
   createTemplate,
   getTemplate,
   listTemplates,
+  updateTemplate,
   deleteTemplate,
   addCharactersToTemplate,
   removeCharactersFromTemplate,
@@ -10,6 +11,7 @@ import {
 import type {
   TIdParams,
   TCreateTemplateBody,
+  TUpdateTemplateBody,
   TTemplateCharactersBody,
 } from "../types/guards";
 
@@ -24,6 +26,12 @@ interface UploadedFiles {
 
 interface CreateTemplateContext extends Context {
   body: TCreateTemplateBody;
+  uploadedFiles: UploadedFiles;
+}
+
+interface UpdateTemplateContext extends Context {
+  params: TIdParams;
+  body: TUpdateTemplateBody;
   uploadedFiles: UploadedFiles;
 }
 
@@ -122,6 +130,34 @@ export async function removeCharactersFromTemplateController({
       return { success: false, error: "Template not found" };
     }
     return { success: true, data: template };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Update a template
+ */
+export async function updateTemplateController({
+  params,
+  body,
+  uploadedFiles,
+}: UpdateTemplateContext) {
+  try {
+    const updates: any = {
+      name: body.name,
+      description: body.description,
+    };
+
+    if (uploadedFiles.video) {
+      updates.videoUrl = uploadedFiles.video;
+    }
+
+    const updated = await updateTemplate(params.id, updates);
+    if (!updated) {
+      return { success: false, error: "Template not found" };
+    }
+    return { success: true, data: updated };
   } catch (error: any) {
     return { success: false, error: error.message };
   }

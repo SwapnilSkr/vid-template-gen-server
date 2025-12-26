@@ -110,6 +110,43 @@ export async function removeCharactersFromTemplate(
 }
 
 /**
+ * Update a template
+ */
+export async function updateTemplate(
+  id: string,
+  updates: Partial<{
+    name: string;
+    description: string;
+    videoUrl: string;
+    thumbnailUrl: string;
+  }>
+): Promise<ITemplate | null> {
+  const existing = await Template.findById(id);
+  if (!existing) return null;
+
+  // If updating video, delete old one and get new metadata
+  if (updates.videoUrl && updates.videoUrl !== existing.videoUrl) {
+    await deleteFromS3(existing.videoUrl).catch(console.error);
+    const metadata = await getVideoMetadata(updates.videoUrl);
+    (updates as any).duration = metadata.duration;
+    (updates as any).dimensions = {
+      width: metadata.width,
+      height: metadata.height,
+    };
+    (updates as any).frameRate = metadata.frameRate;
+  }
+
+  // If updating thumbnail, delete old one
+  if (updates.thumbnailUrl && updates.thumbnailUrl !== existing.thumbnailUrl) {
+    if (existing.thumbnailUrl) {
+      await deleteFromS3(existing.thumbnailUrl).catch(console.error);
+    }
+  }
+
+  return Template.findByIdAndUpdate(id, { $set: updates }, { new: true });
+}
+
+/**
  * Delete a template
  */
 export async function deleteTemplate(id: string): Promise<boolean> {
