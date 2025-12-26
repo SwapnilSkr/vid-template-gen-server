@@ -127,4 +127,24 @@ export const characterRoutes = new Elysia({ prefix: "/api/characters" })
         id: t.String(),
       }),
     }
+  )
+
+  // Update character voice ID specifically
+  .patch(
+    "/:id/voice",
+    async ({ params, body }) => {
+      const updated = await updateCharacter(params.id, {
+        voiceId: body.voiceId,
+      });
+      if (!updated) {
+        return { success: false, error: "Character not found" };
+      }
+      return { success: true, data: updated };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({
+        voiceId: t.String(),
+      }),
+    }
   );

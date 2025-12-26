@@ -7,6 +7,7 @@ import {
   characterRoutes,
   compositionRoutes,
   generateRoutes,
+  voiceRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
 
@@ -62,6 +63,7 @@ const app = new Elysia()
       templates: "/api/templates",
       characters: "/api/characters",
       compositions: "/api/compositions",
+      voices: "/api/voices",
       generate: "/api/generate",
       health: "/health",
     },
@@ -70,7 +72,9 @@ const app = new Elysia()
       step2:
         "POST /api/characters - Create characters with images and voice IDs",
       step3: "POST /api/templates/:id/characters - Add characters to template",
-      step4:
+      step4: "GET /api/voices - List available ElevenLabs voices",
+      step5: "PATCH /api/characters/:id/voice - Update character voice ID",
+      step6:
         "POST /api/generate - Generate video with just templateId and plot!",
     },
   }))
@@ -79,7 +83,8 @@ const app = new Elysia()
   .use(templateRoutes)
   .use(characterRoutes)
   .use(compositionRoutes)
-  .use(generateRoutes);
+  .use(generateRoutes)
+  .use(voiceRoutes);
 
 // Start server
 initialize()
