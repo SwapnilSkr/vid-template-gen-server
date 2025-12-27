@@ -9,18 +9,26 @@ import { unlink, readFile } from "node:fs/promises";
 export async function createTemplateWithProcessing(
   localPath: string,
   data: { name: string; description: string; originalName: string },
-  options: { trimStart?: number; keepDuration?: number }
+  options: { trimStart?: number; keepDuration?: number; removeAudio?: boolean }
 ): Promise<ITemplate> {
   let processedPath: string | null = null;
 
   try {
-    const { trimStart, keepDuration } = options;
+    const { trimStart, keepDuration, removeAudio } = options;
     let finalVideoUrl: string;
 
     // 1. Process video if needed
-    if ((trimStart && trimStart > 0) || (keepDuration && keepDuration > 0)) {
+    if (
+      (trimStart && trimStart > 0) ||
+      (keepDuration && keepDuration > 0) ||
+      removeAudio
+    ) {
       console.log(`✂️  Processing video in service...`);
-      processedPath = await trimVideo(localPath, { trimStart, keepDuration });
+      processedPath = await trimVideo(localPath, {
+        trimStart,
+        keepDuration,
+        removeAudio,
+      });
 
       const buffer = await readFile(processedPath);
       finalVideoUrl = await uploadVideo(
@@ -54,10 +62,10 @@ export async function updateTemplateWithProcessing(
     localPath?: string;
     originalName?: string;
   },
-  options: { trimStart?: number; keepDuration?: number }
+  options: { trimStart?: number; keepDuration?: number; removeAudio?: boolean }
 ): Promise<ITemplate | null> {
   const { localPath, name, description, originalName } = data;
-  const { trimStart, keepDuration } = options;
+  const { trimStart, keepDuration, removeAudio } = options;
   let processedPath: string | null = null;
 
   try {
@@ -66,8 +74,16 @@ export async function updateTemplateWithProcessing(
     if (localPath) {
       let finalVideoUrl: string;
 
-      if ((trimStart && trimStart > 0) || (keepDuration && keepDuration > 0)) {
-        processedPath = await trimVideo(localPath, { trimStart, keepDuration });
+      if (
+        (trimStart && trimStart > 0) ||
+        (keepDuration && keepDuration > 0) ||
+        removeAudio
+      ) {
+        processedPath = await trimVideo(localPath, {
+          trimStart,
+          keepDuration,
+          removeAudio,
+        });
         const buffer = await readFile(processedPath);
         finalVideoUrl = await uploadVideo(
           buffer,

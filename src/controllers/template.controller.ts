@@ -64,7 +64,7 @@ export async function createTemplateController({
   localFiles,
 }: CreateTemplateContext) {
   const { name, description, video } = body;
-  const { trimStart, keepDuration } = query;
+  const { trimStart, keepDuration, removeAudio } = query;
   const localPath = localFiles.video;
 
   if (!localPath) {
@@ -75,7 +75,7 @@ export async function createTemplateController({
     const template = await createTemplateWithProcessing(
       localPath,
       { name, description: description || "", originalName: video.name },
-      { trimStart, keepDuration }
+      { trimStart, keepDuration, removeAudio }
     );
 
     return { success: true, data: template };
@@ -155,7 +155,7 @@ export async function updateTemplateController({
   localFiles,
 }: UpdateTemplateContext) {
   const { name, description, video } = body;
-  const { trimStart, keepDuration } = query;
+  const { trimStart, keepDuration, removeAudio } = query;
   const localPath = localFiles.video;
 
   try {
@@ -167,7 +167,7 @@ export async function updateTemplateController({
         localPath,
         originalName: video?.name,
       },
-      { trimStart, keepDuration }
+      { trimStart, keepDuration, removeAudio }
     );
 
     if (!updated) {

@@ -402,23 +402,24 @@ export async function addSubtitlesToVideo(
 /**
  * Trim video by removing the first N seconds and/or keeping only the first N seconds
  * @param inputPath - Path or URL to the input video
- * @param options - Trimming options
+ * @param options - Processing options
  * @param options.trimStart - Number of seconds to trim from the start (default: 0)
  * @param options.keepDuration - Maximum duration to keep in seconds (optional)
+ * @param options.removeAudio - Whether to remove audio (optional)
  * @param outputPath - Optional output path (defaults to processing directory)
- * @returns Path to the trimmed video file
+ * @returns Path to the processed video file
  */
 export async function trimVideo(
   inputPath: string,
-  options: { trimStart?: number; keepDuration?: number },
+  options: { trimStart?: number; keepDuration?: number; removeAudio?: boolean },
   outputPath?: string
 ): Promise<string> {
   await ensureDir(config.processingPath);
   const output =
     outputPath ||
-    join(config.processingPath, generateFilename("trimmed", "mp4"));
+    join(config.processingPath, generateFilename("processed", "mp4"));
 
-  const { trimStart = 0, keepDuration } = options;
+  const { trimStart = 0, keepDuration, removeAudio = false } = options;
 
   return new Promise((resolve, reject) => {
     let command = ffmpeg(inputPath);
@@ -433,30 +434,48 @@ export async function trimVideo(
       command = command.setDuration(keepDuration);
     }
 
+    const outputOptions = [
+      "-c:v",
+      "libx264",
+      "-preset",
+      "fast",
+      "-movflags",
+      "+faststart",
+    ];
+
+    if (removeAudio) {
+      outputOptions.push("-an");
+    } else {
+      outputOptions.push("-c:a", "aac");
+    }
+
     command
-      .outputOptions([
-        "-c:v",
-        "libx264",
-        "-c:a",
-        "aac",
-        "-preset",
-        "fast",
-        "-movflags",
-        "+faststart",
-      ])
+      .outputOptions(outputOptions)
       .output(output)
       .on("end", () => {
         const trimMsg = trimStart > 0 ? `trimmed ${trimStart}s from start` : "";
         const durationMsg = keepDuration ? `kept ${keepDuration}s` : "";
-        const separator = trimMsg && durationMsg ? ", " : "";
-        console.log(
-          `✂️  Video processed: ${trimMsg}${separator}${durationMsg}`
-        );
+        const audioMsg = removeAudio ? "audio removed" : "";
+        const parts = [trimMsg, durationMsg, audioMsg].filter(Boolean);
+        console.log(`✂️  Video processed: ${parts.join(", ")}`);
         resolve(output);
       })
       .on("error", (err) => {
-        reject(new Error(`Video trim failed: ${err.message}`));
+        reject(new Error(`Video processing failed: ${err.message}`));
       })
       .run();
   });
+}
+
+/**
+ * Remove audio from a video file
+ * @param inputPath - Path or URL to the input video
+ * @param outputPath - Optional output path
+ * @returns Path to the processed video file
+ */
+export async function removeAudioFromVideo(
+  inputPath: string,
+  outputPath?: string
+): Promise<string> {
+  return trimVideo(inputPath, { removeAudio: true }, outputPath);
 }

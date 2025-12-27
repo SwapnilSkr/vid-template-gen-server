@@ -33,6 +33,9 @@ export const TemplateQuery = t.Object({
   keepDuration: t.Optional(
     t.Numeric({ description: "Keep only the first N seconds of the video" })
   ),
+  removeAudio: t.Optional(
+    t.Boolean({ description: "Whether to remove audio from the video" })
+  ),
 });
 
 export type TCreateTemplateBody = typeof CreateTemplateBody.static;
