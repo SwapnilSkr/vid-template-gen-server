@@ -13,6 +13,7 @@ export interface IComposition extends Document {
   title: string;
   plot: string;
   generatedScript: IDialogueLine[];
+  subtitlePosition?: "top" | "center" | "bottom";
   status:
     | "pending"
     | "generating_script"
@@ -89,6 +90,11 @@ const compositionSchema = new Schema<IComposition>(
       default: 0,
       min: 0,
       max: 100,
+    },
+    subtitlePosition: {
+      type: String,
+      enum: ["top", "center", "bottom"],
+      default: "bottom",
     },
     outputUrl: String,
     subtitlesUrl: String,

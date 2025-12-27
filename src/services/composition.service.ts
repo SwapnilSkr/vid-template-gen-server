@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { readFile, unlink } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import {
   Composition,
   type IComposition,
@@ -20,7 +20,7 @@ import {
   calculateDialogueTiming,
 } from "./subtitle.service";
 import { getTemplate } from "./template.service";
-import { ensureDir, generateFilename } from "../utils";
+import { ensureDir, generateFilename, cleanupFiles } from "../utils";
 import { config } from "../config";
 import { getErrorMessage } from "../types";
 
@@ -37,7 +37,8 @@ interface PopulatedTemplate extends Omit<ITemplate, "characters"> {
 export async function createComposition(
   templateId: string,
   plot: string,
-  title?: string
+  title?: string,
+  subtitlePosition?: "top" | "center" | "bottom"
 ): Promise<IComposition> {
   // Validate template exists and has characters
   const template = await getTemplate(templateId);
@@ -56,6 +57,7 @@ export async function createComposition(
     template: templateId,
     title: title || "Generating...",
     plot,
+    subtitlePosition: subtitlePosition || "bottom",
     status: "pending",
     progress: 0,
     generatedScript: [],
@@ -98,9 +100,12 @@ async function updateCompositionStatus(
  * Process composition asynchronously
  */
 async function processComposition(compositionId: string): Promise<void> {
-  const composition = await Composition.findById(compositionId).populate(
-    "template"
-  );
+  const composition = await Composition.findById(compositionId).populate({
+    path: "template",
+    populate: {
+      path: "characters",
+    },
+  });
   if (!composition) throw new Error("Composition not found");
 
   // Cast populated template to proper type
@@ -208,8 +213,8 @@ async function processComposition(compositionId: string): Promise<void> {
         characterId: seg.characterId,
         imagePath: character?.imageUrl || "",
         position: character?.position || {
-          x: 50,
-          y: 75,
+          x: 5,
+          y: 95,
           scale: 0.25,
           anchor: "bottom-left" as const,
         },
@@ -248,7 +253,9 @@ async function processComposition(compositionId: string): Promise<void> {
     // Burn subtitles into video
     const videoWithSubtitles = await addSubtitlesToVideo(
       videoWithAudio,
-      srtContent
+      srtContent,
+      undefined,
+      composition.subtitlePosition || "bottom"
     );
     await updateCompositionStatus(compositionId, "uploading", 85);
 
@@ -277,8 +284,17 @@ async function processComposition(compositionId: string): Promise<void> {
     composition.progress = 100;
     await composition.save();
 
-    // Cleanup temp files
-    await unlink(finalOutputPath).catch(() => {});
+    // Cleanup all temp files
+    const filesToClean = [
+      finalOutputPath,
+      videoWithOverlays,
+      videoWithAudio,
+      videoWithSubtitles,
+      ...audioSegments.map((seg) => seg.audioPath),
+    ];
+
+    await cleanupFiles(filesToClean);
+    console.log(`🧹 Cleaned up ${filesToClean.length} temporary files`);
 
     console.log(`🎉 Composition complete: ${composition._id}`);
   } catch (error: unknown) {

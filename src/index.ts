@@ -8,6 +8,7 @@ import {
   compositionRoutes,
   generateRoutes,
   voiceRoutes,
+  audioRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
 
@@ -88,7 +89,8 @@ const app = new Elysia({
   .use(characterRoutes)
   .use(compositionRoutes)
   .use(generateRoutes)
-  .use(voiceRoutes);
+  .use(voiceRoutes)
+  .use(audioRoutes);
 
 // Start server
 initialize()

@@ -44,8 +44,8 @@ const characterSchema = new Schema<ICharacter>(
       required: true,
     },
     position: {
-      x: { type: Number, default: 50 },
-      y: { type: Number, default: 75 },
+      x: { type: Number, default: 5 },
+      y: { type: Number, default: 95 },
       scale: { type: Number, default: 0.25 },
       anchor: {
         type: String,

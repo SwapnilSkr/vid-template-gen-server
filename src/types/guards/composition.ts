@@ -7,6 +7,9 @@ export const CreateCompositionBody = t.Object({
   templateId: t.String(),
   plot: t.String(),
   title: t.Optional(t.String()),
+  subtitlePosition: t.Optional(
+    t.Union([t.Literal("top"), t.Literal("center"), t.Literal("bottom")])
+  ),
 });
 
 export type TCreateCompositionBody = typeof CreateCompositionBody.static;

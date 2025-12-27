@@ -225,9 +225,27 @@ export async function applyCharacterOverlays(
       .run();
   });
 }
+/**
+ * Check if a video/audio file has an audio stream
+ */
+async function hasAudioStream(filePath: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        reject(new Error(`Failed to probe file: ${err.message}`));
+        return;
+      }
+      const audioStream = metadata.streams.find(
+        (s) => s.codec_type === "audio"
+      );
+      resolve(!!audioStream);
+    });
+  });
+}
 
 /**
  * Merge multiple audio tracks onto a video at specific timestamps
+ * Handles videos with or without existing audio tracks
  */
 export async function mergeAudioTracks(
   videoPath: string,
@@ -243,6 +261,10 @@ export async function mergeAudioTracks(
     outputPath ||
     join(config.processingPath, generateFilename("merged", "mp4"));
 
+  // Check if source video has audio
+  const videoHasAudio = await hasAudioStream(videoPath);
+  console.log(`📹 Source video has audio: ${videoHasAudio}`);
+
   return new Promise((resolve, reject) => {
     let command = ffmpeg(videoPath);
 
@@ -253,41 +275,51 @@ export async function mergeAudioTracks(
 
     // Build complex filter for audio mixing
     const filters: string[] = [];
-    const audioInputs: string[] = [];
+    const mixLabels: string[] = [];
 
-    // Add original audio (if exists) with reduced volume
-    audioInputs.push("[0:a]volume=0.3[orig]");
+    if (videoHasAudio) {
+      // If video has audio, reduce its volume and include it in the mix
+      filters.push("[0:a]volume=0.3[orig]");
+      mixLabels.push("[orig]");
+    }
 
     audioSegments.forEach((segment, index) => {
       const inputIndex = index + 1;
       const label = `a${index}`;
-      // Delay audio to start at the right time
-      filters.push(
-        `[${inputIndex}:a]adelay=${Math.round(
-          segment.startTime * 1000
-        )}|${Math.round(segment.startTime * 1000)}[${label}]`
-      );
-      audioInputs.push(`[${label}]`);
+      // Delay audio to start at the right time (adelay takes milliseconds)
+      const delayMs = Math.round(segment.startTime * 1000);
+      filters.push(`[${inputIndex}:a]adelay=${delayMs}|${delayMs}[${label}]`);
+      mixLabels.push(`[${label}]`);
     });
 
-    // Mix all audio tracks
-    const mixInputs = `[orig]${audioInputs.slice(1).join("")}`;
-    const mixFilter = `${mixInputs}amix=inputs=${
-      audioSegments.length + 1
-    }:duration=longest[aout]`;
+    // Calculate number of audio inputs for amix
+    const numAudioInputs = videoHasAudio
+      ? audioSegments.length + 1
+      : audioSegments.length;
 
-    filters.push(...audioInputs);
+    // Mix all audio tracks
+    const mixFilter = `${mixLabels.join(
+      ""
+    )}amix=inputs=${numAudioInputs}:duration=longest[aout]`;
     filters.push(mixFilter);
 
+    // Log the filter for debugging
+    const filterString = filters.join(";");
+    console.log(`🎛️  FFmpeg audio filter: ${filterString}`);
+
     command
-      .complexFilter(filters.join(";"))
+      .complexFilter(filterString)
       .outputOptions(["-map", "0:v", "-map", "[aout]", "-c:v", "copy"])
       .output(output)
+      .on("start", (_commandLine) => {
+        console.log(`🚀 FFmpeg audio merge command started`);
+      })
       .on("end", () => {
         console.log(`🔊 Merged ${audioSegments.length} audio tracks`);
         resolve(output);
       })
-      .on("error", (err) => {
+      .on("error", (err, _stdout, stderr) => {
+        console.error("FFmpeg audio merge stderr:", stderr);
         reject(new Error(`Audio merge failed: ${err.message}`));
       })
       .run();
@@ -360,16 +392,26 @@ export async function extractThumbnail(
 
 /**
  * Add subtitles to video (burn in)
+ * @param position - Subtitle position: 'top', 'center', or 'bottom' (default: 'bottom')
  */
 export async function addSubtitlesToVideo(
   videoPath: string,
   srtContent: string,
-  outputPath?: string
+  outputPath?: string,
+  position: "top" | "center" | "bottom" = "bottom"
 ): Promise<string> {
   await ensureDir(config.processingPath);
   const output =
     outputPath ||
     join(config.processingPath, generateFilename("subtitled", "mp4"));
+
+  // ASS Alignment values: 2 = bottom-center, 5 = middle-center, 6 = top-center
+  const alignmentMap = {
+    top: 6,
+    center: 5,
+    bottom: 2,
+  };
+  const alignment = alignmentMap[position];
 
   // Write SRT to temp file
   const srtPath = join(config.processingPath, `temp_${Date.now()}.srt`);
@@ -383,12 +425,12 @@ export async function addSubtitlesToVideo(
         `subtitles='${srtPath.replace(
           /'/g,
           "\\'"
-        )}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`,
+        )}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=${alignment}'`,
       ])
       .output(output)
       .on("end", async () => {
         await unlink(srtPath).catch(() => {});
-        console.log(`📝 Subtitles added to video`);
+        console.log(`📝 Subtitles added to video (position: ${position})`);
         resolve(output);
       })
       .on("error", async (err) => {

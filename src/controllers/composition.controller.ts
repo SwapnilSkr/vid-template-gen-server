@@ -34,7 +34,12 @@ export async function createCompositionController({
   body,
 }: CreateCompositionContext) {
   try {
-    const job = await createComposition(body.templateId, body.plot, body.title);
+    const job = await createComposition(
+      body.templateId,
+      body.plot,
+      body.title,
+      body.subtitlePosition
+    );
     return {
       success: true,
       data: job,
@@ -124,7 +129,12 @@ export async function generateCompositionController({
   body,
 }: CreateCompositionContext) {
   try {
-    const job = await createComposition(body.templateId, body.plot, body.title);
+    const job = await createComposition(
+      body.templateId,
+      body.plot,
+      body.title,
+      body.subtitlePosition
+    );
     return {
       success: true,
       data: {

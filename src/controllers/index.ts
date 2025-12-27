@@ -30,3 +30,11 @@ export {
 
 // Voice controllers
 export { listVoicesController } from "./voice.controller";
+
+// Audio Test controllers
+export {
+  runAudioTestController,
+  runCustomAudioTestController,
+  listTestFilesController,
+  cleanupTestFilesController,
+} from "./audio.controller";

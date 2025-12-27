@@ -46,6 +46,16 @@ export async function deleteFile(filePath: string): Promise<void> {
 }
 
 /**
+ * Delete multiple files (skips URLs and non-existent files)
+ */
+export async function cleanupFiles(filePaths: string[]): Promise<void> {
+  const deletePromises = filePaths
+    .filter((path) => path && !path.startsWith("http")) // Skip URLs and empty paths
+    .map((path) => deleteFile(path));
+  await Promise.all(deletePromises);
+}
+
+/**
  * Generate a unique filename
  */
 export function generateFilename(prefix: string, extension: string): string {

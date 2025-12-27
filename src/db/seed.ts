@@ -13,8 +13,8 @@ const MOCK_CHARACTERS = [
     voiceId: "stewie_voice_id", // Replace with real ElevenLabs voice ID
     imageUrl: "https://placeholder.com/stewie.png", // Replace with S3 URL
     position: {
-      x: 15,
-      y: 75,
+      x: 5,
+      y: 95,
       scale: 0.25,
       anchor: "bottom-left" as const,
     },
@@ -25,8 +25,8 @@ const MOCK_CHARACTERS = [
     voiceId: "peter_voice_id", // Replace with real ElevenLabs voice ID
     imageUrl: "https://placeholder.com/peter.png", // Replace with S3 URL
     position: {
-      x: 85,
-      y: 75,
+      x: 95,
+      y: 95,
       scale: 0.3,
       anchor: "bottom-right" as const,
     },
