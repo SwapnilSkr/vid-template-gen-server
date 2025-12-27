@@ -14,7 +14,7 @@ import {
   finalizeVideo,
   addSubtitlesToVideo,
 } from "./ffmpeg.service";
-import { uploadToS3, uploadSubtitles } from "./s3.service";
+import { uploadToS3, uploadSubtitles, uploadAudio } from "./s3.service";
 import {
   generateSrtContent,
   calculateDialogueTiming,
@@ -146,18 +146,20 @@ async function processComposition(compositionId: string): Promise<void> {
         text: d.text,
         startTime: d.startTime,
         duration: d.duration,
+        delay: d.delay,
       };
     });
 
     await composition.save();
     await updateCompositionStatus(compositionId, "generating_audio", 15);
 
-    // Step 2: Generate audio for each dialogue
+    // Step 2: Generate audio for each dialogue and upload to S3
     await ensureDir(config.processingPath);
     const audioSegments: {
       characterId: string;
       text: string;
       audioPath: string;
+      speechUrl: string;
       startTime: number;
       duration: number;
     }[] = [];
@@ -175,16 +177,25 @@ async function processComposition(compositionId: string): Promise<void> {
         character.voiceId
       );
 
+      // Upload speech to S3 for future regeneration
+      const audioBuffer = await readFile(audioPath);
+      const speechUrl = await uploadAudio(
+        audioBuffer,
+        `speech_${compositionId}_${i}.mp3`
+      );
+
       audioSegments.push({
         characterId: character._id.toString(),
         text: line.text,
         audioPath,
+        speechUrl,
         startTime: line.startTime,
         duration,
       });
 
-      // Update line duration with actual audio duration
+      // Update line duration and speechUrl with actual audio data
       line.duration = duration;
+      line.speechUrl = speechUrl;
 
       const progress =
         15 + Math.round(((i + 1) / composition.generatedScript.length) * 25);
@@ -193,6 +204,16 @@ async function processComposition(compositionId: string): Promise<void> {
         "generating_audio",
         progress
       );
+    }
+
+    // Recalculate start times based on actual durations and delays
+    let currentTime = 0;
+    for (let i = 0; i < composition.generatedScript.length; i++) {
+      const line = composition.generatedScript[i];
+      currentTime += line.delay;
+      line.startTime = currentTime;
+      audioSegments[i].startTime = currentTime;
+      currentTime += line.duration;
     }
 
     await composition.save();
@@ -334,4 +355,239 @@ export async function deleteComposition(id: string): Promise<boolean> {
 
   await Composition.findByIdAndDelete(id);
   return true;
+}
+
+/**
+ * Regenerate composition video using existing speech files
+ * This saves ElevenLabs API costs by reusing already generated audio
+ * @param compositionId - The ID of the composition to regenerate
+ * @param customDelays - Optional array of custom delays (in seconds) for each dialogue line
+ * @param subtitlePosition - Optional subtitle position override
+ */
+export async function regenerateComposition(
+  compositionId: string,
+  customDelays?: number[],
+  subtitlePosition?: "top" | "center" | "bottom"
+): Promise<IComposition> {
+  const composition = await Composition.findById(compositionId).populate({
+    path: "template",
+    populate: {
+      path: "characters",
+    },
+  });
+
+  if (!composition) {
+    throw new Error("Composition not found");
+  }
+
+  // Verify all speech files exist
+  const missingAudio = composition.generatedScript.filter((s) => !s.speechUrl);
+  if (missingAudio.length > 0) {
+    throw new Error(
+      `Missing speech files for ${missingAudio.length} dialogue lines. Cannot regenerate.`
+    );
+  }
+
+  // Cast populated template
+  const template = composition.template as unknown as PopulatedTemplate;
+  const characters = template.characters as ICharacter[];
+
+  // Reset status
+  composition.status = "compositing";
+  composition.progress = 10;
+  composition.error = undefined;
+
+  // Update subtitle position if provided
+  if (subtitlePosition) {
+    composition.subtitlePosition = subtitlePosition;
+  }
+
+  await composition.save();
+
+  // Start async regeneration
+  regenerateCompositionAsync(composition, characters, customDelays).catch(
+    async (error: unknown) => {
+      console.error("Composition regeneration failed:", error);
+      composition.status = "failed";
+      composition.error = getErrorMessage(error);
+      await composition.save();
+    }
+  );
+
+  return composition;
+}
+
+/**
+ * Async regeneration process - reuses existing speech files
+ */
+async function regenerateCompositionAsync(
+  composition: IComposition,
+  characters: ICharacter[],
+  customDelays?: number[]
+): Promise<void> {
+  const compositionId = composition._id.toString();
+  const template = composition.template as unknown as PopulatedTemplate;
+
+  try {
+    // Apply custom delays if provided
+    if (customDelays && customDelays.length > 0) {
+      for (let i = 0; i < composition.generatedScript.length; i++) {
+        if (i < customDelays.length && customDelays[i] !== undefined) {
+          composition.generatedScript[i].delay = customDelays[i];
+        }
+      }
+    }
+
+    // Recalculate start times based on delays and durations
+    let currentTime = 0;
+    for (const line of composition.generatedScript) {
+      currentTime += line.delay;
+      line.startTime = currentTime;
+      currentTime += line.duration;
+    }
+
+    await composition.save();
+    await updateCompositionStatus(compositionId, "compositing", 20);
+
+    // Download audio files from S3 to local
+    await ensureDir(config.processingPath);
+    const audioSegments: {
+      characterId: string;
+      text: string;
+      audioPath: string;
+      startTime: number;
+      duration: number;
+    }[] = [];
+
+    for (let i = 0; i < composition.generatedScript.length; i++) {
+      const line = composition.generatedScript[i];
+      const character = characters.find(
+        (c) => c._id.toString() === line.character.toString()
+      );
+
+      if (!character || !line.speechUrl) continue;
+
+      // Download audio from S3
+      const audioPath = join(
+        config.processingPath,
+        `regen_audio_${compositionId}_${i}.mp3`
+      );
+      const response = await fetch(line.speechUrl);
+      const arrayBuffer = await response.arrayBuffer();
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(audioPath, Buffer.from(arrayBuffer));
+
+      audioSegments.push({
+        characterId: character._id.toString(),
+        text: line.text,
+        audioPath,
+        startTime: line.startTime,
+        duration: line.duration,
+      });
+    }
+
+    console.log(`📥 Downloaded ${audioSegments.length} audio files from S3`);
+    await updateCompositionStatus(compositionId, "compositing", 35);
+
+    // Apply character overlays
+    const templateVideoPath = template.videoUrl;
+    const videoSegments = audioSegments.map((seg) => {
+      const character = characters.find(
+        (c) => c._id.toString() === seg.characterId
+      );
+      return {
+        characterId: seg.characterId,
+        imagePath: character?.imageUrl || "",
+        position: character?.position || {
+          x: 5,
+          y: 95,
+          scale: 0.25,
+          anchor: "bottom-left" as const,
+        },
+        startTime: seg.startTime,
+        endTime: seg.startTime + seg.duration,
+      };
+    });
+
+    const videoWithOverlays = await applyCharacterOverlays(
+      templateVideoPath,
+      videoSegments
+    );
+    await updateCompositionStatus(compositionId, "compositing", 50);
+
+    // Merge audio tracks
+    const videoWithAudio = await mergeAudioTracks(
+      videoWithOverlays,
+      audioSegments
+    );
+    await updateCompositionStatus(compositionId, "adding_subtitles", 65);
+
+    // Generate and add subtitles
+    const srtContent = generateSrtContent(
+      composition.generatedScript.map((s) => ({
+        text: s.text,
+        startTime: s.startTime,
+        duration: s.duration,
+      }))
+    );
+
+    const subtitlesUrl = await uploadSubtitles(
+      srtContent,
+      `${compositionId}_regen`
+    );
+    composition.subtitlesUrl = subtitlesUrl;
+
+    const videoWithSubtitles = await addSubtitlesToVideo(
+      videoWithAudio,
+      srtContent,
+      undefined,
+      composition.subtitlePosition || "bottom"
+    );
+    await updateCompositionStatus(compositionId, "uploading", 80);
+
+    // Finalize and upload
+    const outputFilename = generateFilename(
+      `${composition.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_regen`,
+      "mp4"
+    );
+    const finalOutputPath = join(config.processingPath, outputFilename);
+
+    await finalizeVideo(videoWithSubtitles, finalOutputPath, {
+      quality: "high",
+    });
+
+    // Upload to S3
+    const outputBuffer = await readFile(finalOutputPath);
+    const outputUrl = await uploadToS3(
+      outputBuffer,
+      "compositions",
+      outputFilename,
+      "video/mp4"
+    );
+
+    composition.outputUrl = outputUrl;
+    composition.status = "completed";
+    composition.progress = 100;
+    await composition.save();
+
+    // Cleanup temp files
+    const filesToClean = [
+      finalOutputPath,
+      videoWithOverlays,
+      videoWithAudio,
+      videoWithSubtitles,
+      ...audioSegments.map((seg) => seg.audioPath),
+    ];
+
+    await cleanupFiles(filesToClean);
+    console.log(`🧹 Cleaned up ${filesToClean.length} temporary files`);
+
+    console.log(`🔄 Composition regenerated: ${composition._id}`);
+  } catch (error: unknown) {
+    console.error(`Composition regeneration ${compositionId} failed:`, error);
+    composition.status = "failed";
+    composition.error = getErrorMessage(error);
+    await composition.save();
+    throw error;
+  }
 }

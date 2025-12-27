@@ -3,8 +3,13 @@ import {
   createComposition,
   getComposition,
   listCompositions,
+  regenerateComposition,
 } from "../services";
-import type { TIdParams, TCreateCompositionBody } from "../types/guards";
+import type {
+  TIdParams,
+  TCreateCompositionBody,
+  TRegenerateCompositionBody,
+} from "../types/guards";
 import { getErrorMessage } from "../types";
 
 // ============================================
@@ -21,6 +26,11 @@ interface GetCompositionContext extends Context {
 
 interface ListCompositionsContext extends Context {
   query: { limit?: string };
+}
+
+interface RegenerateCompositionContext extends Context {
+  params: TIdParams;
+  body: TRegenerateCompositionBody;
 }
 
 // ============================================
@@ -171,4 +181,33 @@ export async function getGeneratedCompositionController({
       error: composition.error,
     },
   };
+}
+
+/**
+ * Regenerate composition video using existing speech files
+ * Saves ElevenLabs API costs by reusing already generated audio
+ */
+export async function regenerateCompositionController({
+  params,
+  body,
+}: RegenerateCompositionContext) {
+  try {
+    const composition = await regenerateComposition(
+      params.id,
+      body.delays,
+      body.subtitlePosition
+    );
+    return {
+      success: true,
+      data: {
+        id: composition._id,
+        status: composition.status,
+        progress: composition.progress,
+        message:
+          "Regenerating video with existing audio files... Check status for progress.",
+      },
+    };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
+  }
 }

@@ -26,6 +26,7 @@ export {
   downloadCompositionController,
   generateCompositionController,
   getGeneratedCompositionController,
+  regenerateCompositionController,
 } from "./composition.controller";
 
 // Voice controllers

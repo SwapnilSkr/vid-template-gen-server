@@ -1,5 +1,9 @@
 import { Elysia } from "elysia";
-import { IdParams, CreateCompositionBody } from "../types/guards";
+import {
+  IdParams,
+  CreateCompositionBody,
+  RegenerateCompositionBody,
+} from "../types/guards";
 import {
   createCompositionController,
   listCompositionsController,
@@ -7,6 +11,7 @@ import {
   downloadCompositionController,
   generateCompositionController,
   getGeneratedCompositionController,
+  regenerateCompositionController,
 } from "../controllers";
 
 // ============================================
@@ -30,6 +35,12 @@ export const compositionRoutes = new Elysia({ prefix: "/api/compositions" })
   // Download completed composition
   .get("/:id/download", downloadCompositionController, {
     params: IdParams,
+  })
+
+  // Regenerate composition with existing audio (saves ElevenLabs costs)
+  .post("/:id/regenerate", regenerateCompositionController, {
+    params: IdParams,
+    body: RegenerateCompositionBody,
   });
 
 // ============================================

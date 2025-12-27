@@ -88,27 +88,33 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 }
 
 /**
- * Calculate dialogue timing based on text length
+ * Calculate dialogue timing based on text length and AI-generated delays
  */
 export function calculateDialogueTiming(
-  dialogues: { text: string }[],
+  dialogues: { text: string; delay?: number }[],
   startTime = 0,
-  wordsPerSecond = 2.5,
-  pauseBetweenLines = 0.5
-): { text: string; startTime: number; duration: number }[] {
+  wordsPerSecond = 2.5
+): { text: string; startTime: number; duration: number; delay: number }[] {
   let currentTime = startTime;
 
-  return dialogues.map((d) => {
+  return dialogues.map((d, index) => {
     const wordCount = d.text.split(/\s+/).length;
     const duration = Math.max(1.5, wordCount / wordsPerSecond);
+    // Use AI-provided delay, fallback to defaults based on position
+    const delay = d.delay ?? (index === 0 ? 0 : 0.4);
+
+    // Add delay before this line
+    currentTime += delay;
 
     const result = {
       text: d.text,
       startTime: currentTime,
       duration,
+      delay,
     };
 
-    currentTime += duration + pauseBetweenLines;
+    // Move forward by the duration of speech
+    currentTime += duration;
 
     return result;
   });

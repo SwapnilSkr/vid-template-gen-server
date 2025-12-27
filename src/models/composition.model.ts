@@ -5,6 +5,8 @@ export interface IDialogueLine {
   text: string;
   startTime: number;
   duration: number;
+  delay: number; // Pause before this line starts (in seconds)
+  speechUrl?: string; // S3 URL of generated speech (for regeneration)
 }
 
 export interface IComposition extends Document {
@@ -49,6 +51,14 @@ const dialogueLineSchema = new Schema<IDialogueLine>(
     duration: {
       type: Number,
       required: true,
+    },
+    delay: {
+      type: Number,
+      required: true,
+      default: 0.3,
+    },
+    speechUrl: {
+      type: String,
     },
   },
   { _id: false }

@@ -12,6 +12,7 @@ const openrouter = createOpenRouter({
 export interface GeneratedDialogue {
   characterName: string;
   text: string;
+  delay: number; // Seconds of pause before this line (for natural conversation flow)
 }
 
 export interface GeneratedScript {
@@ -50,13 +51,19 @@ REQUIREMENTS:
 - Create 6-10 dialogue lines total
 - Make it entertaining and engaging
 - Characters should interact naturally with each other
+- Add natural conversation delays before each line (in seconds):
+  * 0.1-0.3s for quick responses/interruptions
+  * 0.3-0.6s for normal conversational flow
+  * 0.6-1.0s for thoughtful pauses, topic changes, or dramatic effect
+  * 1.0-1.5s for long pauses after important statements or jokes
+  * First line should have 0 delay
 
 OUTPUT FORMAT (JSON only, no markdown):
 {
   "title": "A catchy title for this video",
   "dialogues": [
-    { "characterName": "character_name_here", "text": "What they say" },
-    { "characterName": "other_character", "text": "Their response" }
+    { "characterName": "character_name_here", "text": "What they say", "delay": 0 },
+    { "characterName": "other_character", "text": "Their response", "delay": 0.4 }
   ]
 }
 
