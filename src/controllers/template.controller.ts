@@ -1,9 +1,9 @@
 import type { Context } from "elysia";
 import {
-  createTemplate,
+  createTemplateWithProcessing,
   getTemplate,
   listTemplates,
-  updateTemplate,
+  updateTemplateWithProcessing,
   deleteTemplate,
   addCharactersToTemplate,
   removeCharactersFromTemplate,
@@ -13,26 +13,29 @@ import type {
   TCreateTemplateBody,
   TUpdateTemplateBody,
   TTemplateCharactersBody,
+  TTemplateQuery,
 } from "../types/guards";
 
 // ============================================
 // Type Definitions for Controller Context
 // ============================================
 
-interface UploadedFiles {
+interface LocalFiles {
   video?: string;
   [key: string]: string | undefined;
 }
 
-interface CreateTemplateContext extends Context {
+interface CreateTemplateContext extends Omit<Context, "query"> {
   body: TCreateTemplateBody;
-  uploadedFiles: UploadedFiles;
+  query: TTemplateQuery;
+  localFiles: LocalFiles;
 }
 
-interface UpdateTemplateContext extends Context {
+interface UpdateTemplateContext extends Omit<Context, "query"> {
   params: TIdParams;
   body: TUpdateTemplateBody;
-  uploadedFiles: UploadedFiles;
+  query: TTemplateQuery;
+  localFiles: LocalFiles;
 }
 
 interface GetTemplateContext extends Context {
@@ -57,15 +60,22 @@ interface DeleteTemplateContext extends Context {
  */
 export async function createTemplateController({
   body,
-  uploadedFiles,
+  query,
+  localFiles,
 }: CreateTemplateContext) {
-  const { name, description } = body;
+  const { name, description, video } = body;
+  const { trimStart, keepDuration } = query;
+  const localPath = localFiles.video;
+
+  if (!localPath) {
+    return { success: false, error: "Video file is required" };
+  }
 
   try {
-    const template = await createTemplate(
-      uploadedFiles.video!,
-      name,
-      description || ""
+    const template = await createTemplateWithProcessing(
+      localPath,
+      { name, description: description || "", originalName: video.name },
+      { trimStart, keepDuration }
     );
 
     return { success: true, data: template };
@@ -141,19 +151,25 @@ export async function removeCharactersFromTemplateController({
 export async function updateTemplateController({
   params,
   body,
-  uploadedFiles,
+  query,
+  localFiles,
 }: UpdateTemplateContext) {
+  const { name, description, video } = body;
+  const { trimStart, keepDuration } = query;
+  const localPath = localFiles.video;
+
   try {
-    const updates: any = {
-      name: body.name,
-      description: body.description,
-    };
+    const updated = await updateTemplateWithProcessing(
+      params.id,
+      {
+        name,
+        description,
+        localPath,
+        originalName: video?.name,
+      },
+      { trimStart, keepDuration }
+    );
 
-    if (uploadedFiles.video) {
-      updates.videoUrl = uploadedFiles.video;
-    }
-
-    const updated = await updateTemplate(params.id, updates);
     if (!updated) {
       return { success: false, error: "Template not found" };
     }

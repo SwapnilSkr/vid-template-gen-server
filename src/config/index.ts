@@ -31,7 +31,7 @@ export const config = {
   ffprobePath: process.env.FFPROBE_PATH || "ffprobe",
 
   // Limits
-  maxFileSizeMB: parseInt(process.env.MAX_FILE_SIZE_MB || "500"),
+  maxFileSizeMB: parseInt(process.env.MAX_FILE_SIZE_MB || "2048"),
   maxVideoDurationSeconds: parseInt(process.env.MAX_VIDEO_DURATION || "300"),
 };
 

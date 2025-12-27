@@ -26,7 +26,11 @@ async function initialize() {
 }
 
 // Create Elysia app
-const app = new Elysia()
+const app = new Elysia({
+  serve: {
+    maxRequestBodySize: config.maxFileSizeMB * 1024 * 1024, // Convert MB to bytes
+  },
+})
   // Global error handler
   .onError(({ error, code }) => {
     console.error(`Error [${code}]:`, error);

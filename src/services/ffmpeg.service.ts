@@ -398,3 +398,65 @@ export async function addSubtitlesToVideo(
       .run();
   });
 }
+
+/**
+ * Trim video by removing the first N seconds and/or keeping only the first N seconds
+ * @param inputPath - Path or URL to the input video
+ * @param options - Trimming options
+ * @param options.trimStart - Number of seconds to trim from the start (default: 0)
+ * @param options.keepDuration - Maximum duration to keep in seconds (optional)
+ * @param outputPath - Optional output path (defaults to processing directory)
+ * @returns Path to the trimmed video file
+ */
+export async function trimVideo(
+  inputPath: string,
+  options: { trimStart?: number; keepDuration?: number },
+  outputPath?: string
+): Promise<string> {
+  await ensureDir(config.processingPath);
+  const output =
+    outputPath ||
+    join(config.processingPath, generateFilename("trimmed", "mp4"));
+
+  const { trimStart = 0, keepDuration } = options;
+
+  return new Promise((resolve, reject) => {
+    let command = ffmpeg(inputPath);
+
+    // Set start time if trimStart is specified
+    if (trimStart > 0) {
+      command = command.setStartTime(trimStart);
+    }
+
+    // Set duration if keepDuration is specified
+    if (keepDuration && keepDuration > 0) {
+      command = command.setDuration(keepDuration);
+    }
+
+    command
+      .outputOptions([
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "aac",
+        "-preset",
+        "fast",
+        "-movflags",
+        "+faststart",
+      ])
+      .output(output)
+      .on("end", () => {
+        const trimMsg = trimStart > 0 ? `trimmed ${trimStart}s from start` : "";
+        const durationMsg = keepDuration ? `kept ${keepDuration}s` : "";
+        const separator = trimMsg && durationMsg ? ", " : "";
+        console.log(
+          `✂️  Video processed: ${trimMsg}${separator}${durationMsg}`
+        );
+        resolve(output);
+      })
+      .on("error", (err) => {
+        reject(new Error(`Video trim failed: ${err.message}`));
+      })
+      .run();
+  });
+}

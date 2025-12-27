@@ -1,10 +1,11 @@
 import { Elysia } from "elysia";
-import { fileUpload } from "../middlewares";
+import { localFileSave } from "../middlewares";
 import {
   IdParams,
   CreateTemplateBody,
   UpdateTemplateBody,
   TemplateCharactersBody,
+  TemplateQuery,
 } from "../types/guards";
 import {
   createTemplateController,
@@ -17,11 +18,11 @@ import {
 } from "../controllers";
 
 // ============================================
-// Upload Middleware Configuration
+// Local File Middleware Configuration
 // ============================================
 
-const videoUploadMiddleware = fileUpload([
-  { field: "video", type: "video", folder: "templates", required: false },
+const localVideoMiddleware = localFileSave([
+  { field: "video", prefix: "template", required: false },
 ]);
 
 // ============================================
@@ -33,8 +34,9 @@ export const templateRoutes = new Elysia({ prefix: "/api/templates" })
   .guard(
     {
       body: CreateTemplateBody,
+      query: TemplateQuery,
     },
-    (app) => app.use(videoUploadMiddleware).post("/", createTemplateController)
+    (app) => app.use(localVideoMiddleware).post("/", createTemplateController)
   )
 
   // List all templates
@@ -50,9 +52,9 @@ export const templateRoutes = new Elysia({ prefix: "/api/templates" })
     {
       params: IdParams,
       body: UpdateTemplateBody,
+      query: TemplateQuery,
     },
-    (app) =>
-      app.use(videoUploadMiddleware).put("/:id", updateTemplateController)
+    (app) => app.use(localVideoMiddleware).put("/:id", updateTemplateController)
   )
 
   // Add characters to template

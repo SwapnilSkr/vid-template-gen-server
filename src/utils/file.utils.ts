@@ -79,3 +79,29 @@ export async function initializeStorage(): Promise<void> {
   await ensureDir(config.processingPath);
   console.log("📁 Storage directories initialized");
 }
+
+/**
+ * Save a File object to disk
+ */
+export async function saveFileToDisk(
+  file: File,
+  prefix: string
+): Promise<string> {
+  const extension = getExtension(file.name) || "mp4";
+  const filename = generateFilename(prefix, extension);
+  const filePath = join(config.processingPath, filename);
+
+  await ensureDir(config.processingPath);
+
+  // Use Bun.write for efficiency if available (in Bun environment)
+  // Otherwise use Node stream-based approach
+  if (typeof Bun !== "undefined") {
+    await (Bun as any).write(filePath, file);
+  } else {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(filePath, buffer);
+  }
+
+  return filePath;
+}
