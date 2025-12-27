@@ -8,21 +8,16 @@ import {
 } from "../models";
 import { generateScript } from "./ai.service";
 import { generateSpeech } from "./elevenlabs.service";
-import {
-  applyCharacterOverlays,
-  mergeAudioTracks,
-  finalizeVideo,
-  addSubtitlesToVideo,
-} from "./ffmpeg.service";
-import { uploadToS3, uploadSubtitles, uploadAudio } from "./s3.service";
-import {
-  generateSrtContent,
-  calculateDialogueTiming,
-} from "./subtitle.service";
+import { uploadAudio, deleteFromS3 } from "./s3.service";
+import { calculateDialogueTiming } from "./subtitle.service";
 import { getTemplate } from "./template.service";
-import { ensureDir, generateFilename, cleanupFiles } from "../utils";
+import { ensureDir, cleanupFiles } from "../utils";
 import { config } from "../config";
 import { getErrorMessage } from "../types";
+import {
+  recalculateTimings,
+  processVideoWithAudioAndSubtitles,
+} from "../helpers/composition.helper";
 
 /**
  * Populated template type - when template is populated via Mongoose
@@ -207,110 +202,33 @@ async function processComposition(compositionId: string): Promise<void> {
     }
 
     // Recalculate start times based on actual durations and delays
-    let currentTime = 0;
-    for (let i = 0; i < composition.generatedScript.length; i++) {
-      const line = composition.generatedScript[i];
-      currentTime += line.delay;
-      line.startTime = currentTime;
-      audioSegments[i].startTime = currentTime;
-      currentTime += line.duration;
-    }
+    recalculateTimings(composition.generatedScript, audioSegments);
 
     await composition.save();
 
-    // Step 3: Download template video for processing
+    // Step 3: Process video with audio and subtitles
     await updateCompositionStatus(compositionId, "compositing", 45);
 
-    // For now, we'll use the video URL directly (assumes accessible)
-    // In production, you might want to download from S3 first
     const templateVideoPath = template.videoUrl;
 
-    // Step 4: Apply character overlays
-    const videoSegments = audioSegments.map((seg) => {
-      const character = characters.find(
-        (c) => c._id.toString() === seg.characterId
+    const { outputUrl, subtitlesUrl, tempFiles } =
+      await processVideoWithAudioAndSubtitles(
+        compositionId,
+        composition,
+        templateVideoPath,
+        audioSegments,
+        characters
       );
-      return {
-        characterId: seg.characterId,
-        imagePath: character?.imageUrl || "",
-        position: character?.position || {
-          x: 5,
-          y: 95,
-          scale: 0.25,
-          anchor: "bottom-left" as const,
-        },
-        startTime: seg.startTime,
-        endTime: seg.startTime + seg.duration,
-      };
-    });
-
-    // Note: For S3 videos, we need to download first
-    // This is simplified - in production, download from S3
-    const videoWithOverlays = await applyCharacterOverlays(
-      templateVideoPath,
-      videoSegments
-    );
-    await updateCompositionStatus(compositionId, "compositing", 60);
-
-    // Step 5: Merge audio tracks
-    const videoWithAudio = await mergeAudioTracks(
-      videoWithOverlays,
-      audioSegments
-    );
-    await updateCompositionStatus(compositionId, "adding_subtitles", 75);
-
-    // Step 6: Generate and add subtitles
-    const srtContent = generateSrtContent(
-      composition.generatedScript.map((s) => ({
-        text: s.text,
-        startTime: s.startTime,
-        duration: s.duration,
-      }))
-    );
-
-    const subtitlesUrl = await uploadSubtitles(srtContent, compositionId);
-    composition.subtitlesUrl = subtitlesUrl;
-
-    // Burn subtitles into video
-    const videoWithSubtitles = await addSubtitlesToVideo(
-      videoWithAudio,
-      srtContent,
-      undefined,
-      composition.subtitlePosition || "bottom"
-    );
-    await updateCompositionStatus(compositionId, "uploading", 85);
-
-    // Step 7: Finalize and upload
-    const outputFilename = generateFilename(
-      composition.title.replace(/[^a-z0-9]/gi, "_").toLowerCase(),
-      "mp4"
-    );
-    const finalOutputPath = join(config.processingPath, outputFilename);
-
-    await finalizeVideo(videoWithSubtitles, finalOutputPath, {
-      quality: "high",
-    });
-
-    // Upload to S3
-    const outputBuffer = await readFile(finalOutputPath);
-    const outputUrl = await uploadToS3(
-      outputBuffer,
-      "compositions",
-      outputFilename,
-      "video/mp4"
-    );
 
     composition.outputUrl = outputUrl;
+    composition.subtitlesUrl = subtitlesUrl;
     composition.status = "completed";
     composition.progress = 100;
     await composition.save();
 
     // Cleanup all temp files
     const filesToClean = [
-      finalOutputPath,
-      videoWithOverlays,
-      videoWithAudio,
-      videoWithSubtitles,
+      ...tempFiles,
       ...audioSegments.map((seg) => seg.audioPath),
     ];
 
@@ -449,6 +367,24 @@ async function regenerateCompositionAsync(
     await composition.save();
     await updateCompositionStatus(compositionId, "compositing", 20);
 
+    // Delete old S3 files to save storage costs
+    const oldFilesToDelete: string[] = [];
+    if (composition.outputUrl) {
+      oldFilesToDelete.push(composition.outputUrl);
+    }
+    if (composition.subtitlesUrl) {
+      oldFilesToDelete.push(composition.subtitlesUrl);
+    }
+
+    for (const fileUrl of oldFilesToDelete) {
+      try {
+        await deleteFromS3(fileUrl);
+        console.log(`🗑️  Deleted old file from S3: ${fileUrl}`);
+      } catch (error) {
+        console.warn(`Failed to delete old file: ${fileUrl}`, error);
+      }
+    }
+
     // Download audio files from S3 to local
     await ensureDir(config.processingPath);
     const audioSegments: {
@@ -489,93 +425,28 @@ async function regenerateCompositionAsync(
     console.log(`📥 Downloaded ${audioSegments.length} audio files from S3`);
     await updateCompositionStatus(compositionId, "compositing", 35);
 
-    // Apply character overlays
+    // Process video with audio and subtitles
     const templateVideoPath = template.videoUrl;
-    const videoSegments = audioSegments.map((seg) => {
-      const character = characters.find(
-        (c) => c._id.toString() === seg.characterId
+
+    const { outputUrl, subtitlesUrl, tempFiles } =
+      await processVideoWithAudioAndSubtitles(
+        compositionId,
+        composition,
+        templateVideoPath,
+        audioSegments,
+        characters,
+        "regen"
       );
-      return {
-        characterId: seg.characterId,
-        imagePath: character?.imageUrl || "",
-        position: character?.position || {
-          x: 5,
-          y: 95,
-          scale: 0.25,
-          anchor: "bottom-left" as const,
-        },
-        startTime: seg.startTime,
-        endTime: seg.startTime + seg.duration,
-      };
-    });
-
-    const videoWithOverlays = await applyCharacterOverlays(
-      templateVideoPath,
-      videoSegments
-    );
-    await updateCompositionStatus(compositionId, "compositing", 50);
-
-    // Merge audio tracks
-    const videoWithAudio = await mergeAudioTracks(
-      videoWithOverlays,
-      audioSegments
-    );
-    await updateCompositionStatus(compositionId, "adding_subtitles", 65);
-
-    // Generate and add subtitles
-    const srtContent = generateSrtContent(
-      composition.generatedScript.map((s) => ({
-        text: s.text,
-        startTime: s.startTime,
-        duration: s.duration,
-      }))
-    );
-
-    const subtitlesUrl = await uploadSubtitles(
-      srtContent,
-      `${compositionId}_regen`
-    );
-    composition.subtitlesUrl = subtitlesUrl;
-
-    const videoWithSubtitles = await addSubtitlesToVideo(
-      videoWithAudio,
-      srtContent,
-      undefined,
-      composition.subtitlePosition || "bottom"
-    );
-    await updateCompositionStatus(compositionId, "uploading", 80);
-
-    // Finalize and upload
-    const outputFilename = generateFilename(
-      `${composition.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_regen`,
-      "mp4"
-    );
-    const finalOutputPath = join(config.processingPath, outputFilename);
-
-    await finalizeVideo(videoWithSubtitles, finalOutputPath, {
-      quality: "high",
-    });
-
-    // Upload to S3
-    const outputBuffer = await readFile(finalOutputPath);
-    const outputUrl = await uploadToS3(
-      outputBuffer,
-      "compositions",
-      outputFilename,
-      "video/mp4"
-    );
 
     composition.outputUrl = outputUrl;
+    composition.subtitlesUrl = subtitlesUrl;
     composition.status = "completed";
     composition.progress = 100;
     await composition.save();
 
     // Cleanup temp files
     const filesToClean = [
-      finalOutputPath,
-      videoWithOverlays,
-      videoWithAudio,
-      videoWithSubtitles,
+      ...tempFiles,
       ...audioSegments.map((seg) => seg.audioPath),
     ];
 
