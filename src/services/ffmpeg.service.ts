@@ -46,7 +46,7 @@ export async function getVideoMetadata(
       }
 
       resolve({
-        duration: metadata.format.duration || 0,
+        duration: metadata.format.duration || null,
         width: videoStream.width || 1920,
         height: videoStream.height || 1080,
         frameRate,

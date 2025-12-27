@@ -35,7 +35,8 @@ const MOCK_CHARACTERS = [
 const MOCK_TEMPLATE = {
   name: "Minecraft Parkour",
   description: "Satisfying Minecraft parkour gameplay footage",
-  videoUrl: "https://placeholder.com/minecraft.mp4", // Replace with S3 URL
+  videoUrl:
+    "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", // Replace with S3 URL
   duration: 60,
   dimensions: {
     width: 1920,

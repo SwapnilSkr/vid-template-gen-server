@@ -38,7 +38,7 @@ export async function createTemplate(
     await template.save();
 
     console.log(
-      `📹 Created template: ${name} (${metadata.duration.toFixed(1)}s)`
+      `📹 Created template: ${name} (${metadata.duration?.toFixed(1) || "?"}s)`
     );
 
     return template;

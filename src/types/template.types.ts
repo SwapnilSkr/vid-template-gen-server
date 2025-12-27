@@ -12,7 +12,7 @@ export interface VideoTemplate {
 }
 
 export interface TemplateMetadata {
-  duration: number;
+  duration: number | null;
   width: number;
   height: number;
   frameRate: number;

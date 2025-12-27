@@ -6,7 +6,7 @@ export interface ITemplate extends Document {
   description: string;
   videoUrl: string;
   thumbnailUrl?: string;
-  duration: number;
+  duration: number | null;
   dimensions: {
     width: number;
     height: number;
@@ -37,7 +37,7 @@ const templateSchema = new Schema<ITemplate>(
     },
     duration: {
       type: Number,
-      required: true,
+      default: null,
     },
     dimensions: {
       width: { type: Number, required: true },
