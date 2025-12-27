@@ -1,5 +1,6 @@
-import { Elysia, t } from "elysia";
+import { Elysia } from "elysia";
 import { uploadImage, uploadVideo } from "../services/s3.service";
+import { getErrorMessage } from "../types";
 
 export type UploadField = {
   field: string;
@@ -7,6 +8,11 @@ export type UploadField = {
   folder: "characters" | "templates" | "compositions";
   required?: boolean;
 };
+
+/**
+ * Request body with file fields
+ */
+type FileRequestBody = Record<string, unknown>;
 
 /**
  * Middleware to handle S3 file uploads dynamically
@@ -19,7 +25,7 @@ export const fileUpload = (fields: UploadField[]) => {
       const uploadedFiles: Record<string, string> = {};
       if (!body || typeof body !== "object") return { uploadedFiles };
 
-      const bodyMap = body as Record<string, any>;
+      const bodyMap = body as FileRequestBody;
       console.log(
         "🔍 Upload middleware triggered. Body keys:",
         Object.keys(bodyMap)
@@ -46,9 +52,11 @@ export const fileUpload = (fields: UploadField[]) => {
 
             uploadedFiles[field] = url;
             console.log(`✅ Uploaded ${field} to ${url}`);
-          } catch (error: any) {
+          } catch (error: unknown) {
             set.status = 500;
-            throw new Error(`Failed to upload ${field}: ${error.message}`);
+            throw new Error(
+              `Failed to upload ${field}: ${getErrorMessage(error)}`
+            );
           }
         } else if (required && !file) {
           set.status = 400;

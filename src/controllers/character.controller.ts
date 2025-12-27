@@ -5,16 +5,29 @@ import {
   listCharacters,
   updateCharacter,
   deleteCharacter,
+  type CharacterPosition,
 } from "../services";
+import type { ICharacter } from "../models";
 import type {
   TIdParams,
   TCreateCharacterBody,
   TUpdateCharacterBody,
 } from "../types/guards";
+import { getErrorMessage } from "../types";
 
 // ============================================
 // Type Definitions for Controller Context
 // ============================================
+
+/**
+ * Anchor position type - matches the model definition
+ */
+type CharacterAnchor =
+  | "top-left"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-right"
+  | "center";
 
 interface UploadedFiles {
   image?: string;
@@ -40,6 +53,13 @@ interface DeleteCharacterContext extends Context {
   params: TIdParams;
 }
 
+/**
+ * Character update data structure - matches service expectation
+ */
+type CharacterUpdateData = Partial<
+  Pick<ICharacter, "displayName" | "voiceId" | "position" | "imageUrl">
+>;
+
 // ============================================
 // Controller Functions
 // ============================================
@@ -64,13 +84,13 @@ export async function createCharacterController({
         x: positionX,
         y: positionY,
         scale,
-        anchor: anchor as any,
+        anchor: anchor as CharacterAnchor,
       },
     });
 
     return { success: true, data: character };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 
@@ -102,24 +122,31 @@ export async function updateCharacterController({
   uploadedFiles,
 }: UpdateCharacterContext) {
   try {
-    const updates: any = {
+    const updates: CharacterUpdateData = {
       displayName: body.displayName,
       voiceId: body.voiceId,
     };
 
     if (body.position) {
-      updates.position = body.position;
+      // Body position is fully specified
+      updates.position = {
+        x: (body.position as CharacterPosition).x,
+        y: (body.position as CharacterPosition).y,
+        scale: (body.position as CharacterPosition).scale,
+        anchor: (body.position as CharacterPosition).anchor as CharacterAnchor,
+      };
     } else if (
       body.positionX !== undefined ||
       body.positionY !== undefined ||
       body.scale !== undefined ||
       body.anchor !== undefined
     ) {
+      // Build position from individual fields with defaults
       updates.position = {
-        x: body.positionX,
-        y: body.positionY,
-        scale: body.scale,
-        anchor: body.anchor,
+        x: body.positionX ?? 50,
+        y: body.positionY ?? 75,
+        scale: body.scale ?? 0.25,
+        anchor: (body.anchor as CharacterAnchor) ?? "bottom-left",
       };
     }
 
@@ -132,8 +159,8 @@ export async function updateCharacterController({
       return { success: false, error: "Character not found" };
     }
     return { success: true, data: updated };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 

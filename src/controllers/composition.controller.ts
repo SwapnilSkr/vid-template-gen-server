@@ -5,6 +5,7 @@ import {
   listCompositions,
 } from "../services";
 import type { TIdParams, TCreateCompositionBody } from "../types/guards";
+import { getErrorMessage } from "../types";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -39,8 +40,8 @@ export async function createCompositionController({
       data: job,
       message: "Composition started! Check status for progress.",
     };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 
@@ -132,8 +133,8 @@ export async function generateCompositionController({
         message: "AI is generating the script...",
       },
     };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 

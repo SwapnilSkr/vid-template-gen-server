@@ -2,6 +2,7 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText } from "ai";
 import { config } from "../config";
 import type { ICharacter } from "../models";
+import { getErrorMessage } from "../types";
 
 // Initialize OpenRouter client
 const openrouter = createOpenRouter({
@@ -24,7 +25,7 @@ export interface GeneratedScript {
 export async function generateScript(
   plot: string,
   characters: ICharacter[],
-  maxDuration: number = 60
+  maxDuration: number | null = 60
 ): Promise<GeneratedScript> {
   const characterList = characters
     .map(
@@ -32,6 +33,8 @@ export async function generateScript(
         `- ${c.displayName} (${c.name}): A character who will speak in the video`
     )
     .join("\n");
+
+  const durationValue = maxDuration ?? 60;
 
   const prompt = `You are a script writer for short-form video content. Generate a dialogue script based on the following:
 
@@ -41,7 +44,7 @@ CHARACTERS:
 ${characterList}
 
 REQUIREMENTS:
-- The video should be approximately ${maxDuration} seconds long
+- The video should be approximately ${durationValue} seconds long
 - Each character should have natural, conversational dialogue
 - Keep each line SHORT (under 15 words) for easy listening
 - Create 6-10 dialogue lines total
@@ -100,9 +103,10 @@ Generate the script now:`;
     );
 
     return script;
-  } catch (error: any) {
-    console.error("AI script generation failed:", error.message);
-    throw new Error(`Failed to generate script: ${error.message}`);
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    console.error("AI script generation failed:", message);
+    throw new Error(`Failed to generate script: ${message}`);
   }
 }
 
@@ -117,7 +121,7 @@ export async function generateTitle(plot: string): Promise<string> {
     });
 
     return text.trim().replace(/^["']|["']$/g, "");
-  } catch (error: any) {
+  } catch (error: unknown) {
     return "Untitled Video";
   }
 }

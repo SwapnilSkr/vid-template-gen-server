@@ -2,6 +2,7 @@
  * Mock data seeder for development
  * Creates Stewie, Peter characters and Minecraft template
  */
+import { Types } from "mongoose";
 import { Character, Template } from "../models";
 import { connectDatabase } from "../db";
 
@@ -49,7 +50,7 @@ export async function seedMockData(): Promise<void> {
   console.log("🌱 Seeding mock data...");
 
   // Create characters
-  const characterIds: string[] = [];
+  const characterIds: Types.ObjectId[] = [];
 
   for (const charData of MOCK_CHARACTERS) {
     let character = await Character.findOne({ name: charData.name });
@@ -62,7 +63,7 @@ export async function seedMockData(): Promise<void> {
       console.log(`  ⏭️  Character exists: ${charData.displayName}`);
     }
 
-    characterIds.push(character._id.toString());
+    characterIds.push(character._id);
   }
 
   // Create template with characters
@@ -77,7 +78,7 @@ export async function seedMockData(): Promise<void> {
     console.log(`  ✅ Created template: ${MOCK_TEMPLATE.name}`);
   } else {
     // Update characters if template exists
-    template.characters = characterIds as any;
+    template.characters = characterIds;
     await template.save();
     console.log(`  ⏭️  Template exists: ${MOCK_TEMPLATE.name}`);
   }

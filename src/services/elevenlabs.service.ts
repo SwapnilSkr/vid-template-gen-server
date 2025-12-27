@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { config } from "../config";
 import type { VoiceSettings } from "../types";
 import { ensureDir, generateFilename } from "../utils";
+import { getErrorMessage } from "../types";
 
 // Initialize ElevenLabs client
 const client = new ElevenLabsClient({
@@ -79,9 +80,10 @@ export async function generateSpeech(
     );
 
     return { audioPath, duration };
-  } catch (error: any) {
-    console.error("ElevenLabs error:", error.message);
-    throw new Error(`Failed to generate speech: ${error.message}`);
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    console.error("ElevenLabs error:", message);
+    throw new Error(`Failed to generate speech: ${message}`);
   }
 }
 
@@ -97,9 +99,10 @@ export async function getVoices(): Promise<
       id: v.voice_id,
       name: v.name || "Unknown",
     }));
-  } catch (error: any) {
-    console.error("Failed to get voices:", error.message);
-    throw new Error(`Failed to get voices: ${error.message}`);
+  } catch (error: unknown) {
+    const message = getErrorMessage(error);
+    console.error("Failed to get voices:", message);
+    throw new Error(`Failed to get voices: ${message}`);
   }
 }
 

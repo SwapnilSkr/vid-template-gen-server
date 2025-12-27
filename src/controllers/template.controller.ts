@@ -15,6 +15,7 @@ import type {
   TTemplateCharactersBody,
   TTemplateQuery,
 } from "../types/guards";
+import { getErrorMessage } from "../types";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -79,8 +80,8 @@ export async function createTemplateController({
     );
 
     return { success: true, data: template };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 
@@ -119,8 +120,8 @@ export async function addCharactersToTemplateController({
       return { success: false, error: "Template not found" };
     }
     return { success: true, data: template };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 
@@ -140,8 +141,8 @@ export async function removeCharactersFromTemplateController({
       return { success: false, error: "Template not found" };
     }
     return { success: true, data: template };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 
@@ -174,8 +175,8 @@ export async function updateTemplateController({
       return { success: false, error: "Template not found" };
     }
     return { success: true, data: updated };
-  } catch (error: any) {
-    return { success: false, error: error.message };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
   }
 }
 

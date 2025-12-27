@@ -6,6 +6,7 @@ import {
   Template,
   Character,
   type ICharacter,
+  type ITemplate,
 } from "../models";
 import { generateScript, type GeneratedScript } from "./ai.service";
 import { generateSpeech } from "./elevenlabs.service";
@@ -23,6 +24,14 @@ import {
 import { getTemplate } from "./template.service";
 import { ensureDir, generateFilename } from "../utils";
 import { config } from "../config";
+import { getErrorMessage } from "../types";
+
+/**
+ * Populated template type - when template is populated via Mongoose
+ */
+interface PopulatedTemplate extends Omit<ITemplate, "characters"> {
+  characters: ICharacter[];
+}
 
 /**
  * Create a new composition from plot
@@ -58,13 +67,13 @@ export async function createComposition(
   console.log(`🎬 Created composition: ${composition._id}`);
 
   // Start async processing
-  processComposition(composition._id.toString()).catch((error) => {
+  processComposition(composition._id.toString()).catch((error: unknown) => {
     console.error("Composition processing failed:", error);
     updateCompositionStatus(
       composition._id.toString(),
       "failed",
       0,
-      error.message
+      getErrorMessage(error)
     );
   });
 
@@ -96,7 +105,8 @@ async function processComposition(compositionId: string): Promise<void> {
   );
   if (!composition) throw new Error("Composition not found");
 
-  const template = composition.template as any;
+  // Cast populated template to proper type
+  const template = composition.template as unknown as PopulatedTemplate;
   const characters = template.characters as ICharacter[];
 
   try {
@@ -117,24 +127,19 @@ async function processComposition(compositionId: string): Promise<void> {
 
     // Map to character refs and save script
     composition.generatedScript = timedDialogues.map((d) => {
-      const character = characters.find((c) =>
-        c.name.toLowerCase() === d.text
-          ? false
-          : c.name.toLowerCase() ===
-            generatedScript.dialogues
-              .find((gd) => gd.text === d.text)
-              ?.characterName.toLowerCase()
-      );
+      // Find the original dialogue to get the character name
       const matchedDialogue = generatedScript.dialogues.find(
         (gd) => gd.text === d.text
       );
-      const char = characters.find(
+
+      // Find the character by matching the name
+      const character = characters.find(
         (c) =>
           c.name.toLowerCase() === matchedDialogue?.characterName.toLowerCase()
       );
 
       return {
-        character: char?._id || characters[0]._id,
+        character: character?._id || characters[0]._id,
         text: d.text,
         startTime: d.startTime,
         duration: d.duration,
@@ -278,9 +283,14 @@ async function processComposition(compositionId: string): Promise<void> {
     await unlink(finalOutputPath).catch(() => {});
 
     console.log(`🎉 Composition complete: ${composition._id}`);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error(`Composition ${compositionId} failed:`, error);
-    await updateCompositionStatus(compositionId, "failed", 0, error.message);
+    await updateCompositionStatus(
+      compositionId,
+      "failed",
+      0,
+      getErrorMessage(error)
+    );
     throw error;
   }
 }

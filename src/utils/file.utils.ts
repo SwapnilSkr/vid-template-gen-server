@@ -1,6 +1,7 @@
 import { mkdir, stat, unlink, readdir } from "node:fs/promises";
 import { join, extname } from "node:path";
 import { config } from "../config";
+import { isNodeError } from "../types";
 
 /**
  * Ensure a directory exists, creating it if necessary
@@ -8,8 +9,8 @@ import { config } from "../config";
 export async function ensureDir(dirPath: string): Promise<void> {
   try {
     await mkdir(dirPath, { recursive: true });
-  } catch (error: any) {
-    if (error.code !== "EEXIST") throw error;
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code !== "EEXIST") throw error;
   }
 }
 
@@ -39,8 +40,8 @@ export async function getFileSize(filePath: string): Promise<number> {
 export async function deleteFile(filePath: string): Promise<void> {
   try {
     await unlink(filePath);
-  } catch (error: any) {
-    if (error.code !== "ENOENT") throw error;
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code !== "ENOENT") throw error;
   }
 }
 
@@ -81,6 +82,18 @@ export async function initializeStorage(): Promise<void> {
 }
 
 /**
+ * Bun.write function signature for type safety
+ */
+declare const Bun:
+  | {
+      write: (
+        path: string,
+        data: File | Blob | ArrayBuffer | string
+      ) => Promise<number>;
+    }
+  | undefined;
+
+/**
  * Save a File object to disk
  */
 export async function saveFileToDisk(
@@ -95,8 +108,8 @@ export async function saveFileToDisk(
 
   // Use Bun.write for efficiency if available (in Bun environment)
   // Otherwise use Node stream-based approach
-  if (typeof Bun !== "undefined") {
-    await (Bun as any).write(filePath, file);
+  if (typeof Bun !== "undefined" && Bun) {
+    await Bun.write(filePath, file);
   } else {
     const buffer = Buffer.from(await file.arrayBuffer());
     const { writeFile } = await import("node:fs/promises");

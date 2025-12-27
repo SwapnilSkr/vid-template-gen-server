@@ -10,5 +10,8 @@ export * from "./composition.types";
 // API types
 export * from "./api.types";
 
+// Error types
+export * from "./error.types";
+
 // Guard types (validation schemas)
 export * from "./guards/index";

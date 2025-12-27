@@ -1,7 +1,25 @@
+import { Types } from "mongoose";
 import { Template, type ITemplate, Character } from "../models";
 import { uploadVideo, deleteFromS3 } from "./s3.service";
 import { getVideoMetadata, trimVideo } from "./ffmpeg.service";
 import { unlink, readFile } from "node:fs/promises";
+import { getErrorMessage } from "../types";
+
+/**
+ * Extended template update type that includes video metadata fields
+ */
+interface TemplateUpdateData {
+  name?: string;
+  description?: string;
+  videoUrl?: string;
+  thumbnailUrl?: string;
+  duration?: number | null;
+  dimensions?: {
+    width: number;
+    height: number;
+  };
+  frameRate?: number;
+}
 
 /**
  * High-level service to process and create a template
@@ -69,7 +87,7 @@ export async function updateTemplateWithProcessing(
   let processedPath: string | null = null;
 
   try {
-    const updates: any = { name, description };
+    const updates: TemplateUpdateData = { name, description };
 
     if (localPath) {
       let finalVideoUrl: string;
@@ -138,8 +156,8 @@ export async function createTemplate(
     );
 
     return template;
-  } catch (error: any) {
-    console.error(`Failed to create template: ${error.message}`);
+  } catch (error: unknown) {
+    console.error(`Failed to create template: ${getErrorMessage(error)}`);
     throw error;
   }
 }
@@ -176,7 +194,7 @@ export async function addCharactersToTemplate(
   const existingIds = new Set(template.characters.map((c) => c.toString()));
   for (const id of characterIds) {
     if (!existingIds.has(id)) {
-      template.characters.push(id as any);
+      template.characters.push(new Types.ObjectId(id));
     }
   }
 
@@ -208,25 +226,23 @@ export async function removeCharactersFromTemplate(
  */
 export async function updateTemplate(
   id: string,
-  updates: Partial<{
-    name: string;
-    description: string;
-    videoUrl: string;
-    thumbnailUrl: string;
-  }>
+  updates: TemplateUpdateData
 ): Promise<ITemplate | null> {
   const existing = await Template.findById(id);
   if (!existing) return null;
 
+  // Create a mutable copy for extending with metadata
+  const finalUpdates: TemplateUpdateData = { ...updates };
+
   if (updates.videoUrl && updates.videoUrl !== existing.videoUrl) {
     await deleteFromS3(existing.videoUrl).catch(console.error);
     const metadata = await getVideoMetadata(updates.videoUrl);
-    (updates as any).duration = metadata.duration;
-    (updates as any).dimensions = {
+    finalUpdates.duration = metadata.duration;
+    finalUpdates.dimensions = {
       width: metadata.width,
       height: metadata.height,
     };
-    (updates as any).frameRate = metadata.frameRate;
+    finalUpdates.frameRate = metadata.frameRate;
   }
 
   if (updates.thumbnailUrl && updates.thumbnailUrl !== existing.thumbnailUrl) {
@@ -235,7 +251,7 @@ export async function updateTemplate(
     }
   }
 
-  return Template.findByIdAndUpdate(id, { $set: updates }, { new: true });
+  return Template.findByIdAndUpdate(id, { $set: finalUpdates }, { new: true });
 }
 
 /**
