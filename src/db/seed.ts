@@ -2,7 +2,7 @@
  * Mock data seeder for development
  * Creates Stewie, Peter characters and Minecraft template
  */
-import { Types } from "mongoose";
+import { type Types } from "mongoose";
 import { Character, Template } from "../models";
 import { connectDatabase } from "../db";
 

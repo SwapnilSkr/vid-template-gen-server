@@ -2,11 +2,11 @@ import { Elysia } from "elysia";
 import { saveFileToDisk } from "../utils";
 import { getErrorMessage } from "../types";
 
-export type LocalUploadField = {
+export interface LocalUploadField {
   field: string;
   prefix?: string;
   required?: boolean;
-};
+}
 
 /**
  * Request body with file fields

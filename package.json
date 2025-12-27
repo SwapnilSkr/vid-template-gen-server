@@ -5,7 +5,9 @@
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "seed": "bun run src/db/seed.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.958.0",
@@ -21,9 +23,14 @@
     "uuid": "^13.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@types/eslint__js": "^9.14.0",
     "@types/fluent-ffmpeg": "^2.1.28",
     "@types/uuid": "^11.0.0",
-    "bun-types": "latest"
+    "bun-types": "latest",
+    "eslint": "^9.39.2",
+    "globals": "^16.5.0",
+    "typescript-eslint": "^8.50.1"
   },
   "module": "src/index.ts"
 }

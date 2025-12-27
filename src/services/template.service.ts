@@ -132,7 +132,7 @@ export async function updateTemplateWithProcessing(
 export async function createTemplate(
   videoUrl: string,
   name: string,
-  description: string = ""
+  description = ""
 ): Promise<ITemplate> {
   try {
     const metadata = await getVideoMetadata(videoUrl);

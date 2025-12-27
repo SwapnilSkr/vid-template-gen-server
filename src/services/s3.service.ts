@@ -1,6 +1,5 @@
 import {
   S3Client,
-  PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
@@ -109,7 +108,7 @@ export async function uploadSubtitles(
  */
 export async function getPresignedUrl(
   key: string,
-  expiresInSeconds: number = 3600
+  expiresInSeconds = 3600
 ): Promise<string> {
   const command = new GetObjectCommand({
     Bucket: config.s3Bucket,

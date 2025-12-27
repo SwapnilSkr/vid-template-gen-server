@@ -39,7 +39,7 @@ export function getJob(jobId: string): CompositionJob | undefined {
 /**
  * List all jobs
  */
-export function listJobs(limit: number = 50): CompositionJob[] {
+export function listJobs(limit = 50): CompositionJob[] {
   const allJobs = Array.from(jobs.values());
   return allJobs
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())

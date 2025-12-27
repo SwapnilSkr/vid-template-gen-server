@@ -1,4 +1,3 @@
-import type { IDialogueLine } from "../models";
 import type { ICharacter } from "../models";
 
 export interface SubtitleEntry {
@@ -28,12 +27,12 @@ function formatSrtTime(seconds: number): string {
  * Generate SRT subtitle content from dialogue
  */
 export function generateSrtContent(
-  dialogues: Array<{
+  dialogues: {
     text: string;
     startTime: number;
     duration: number;
-    character?: ICharacter | any;
-  }>
+    character?: ICharacter | undefined;
+  }[]
 ): string {
   const entries: SubtitleEntry[] = dialogues.map((d, index) => ({
     index: index + 1,
@@ -51,7 +50,7 @@ export function generateSrtContent(
  * Generate ASS subtitle content (for better styling)
  */
 export function generateAssContent(
-  dialogues: Array<{ text: string; startTime: number; duration: number }>
+  dialogues: { text: string; startTime: number; duration: number }[]
 ): string {
   const header = `[Script Info]
 Title: Generated Subtitles
@@ -92,11 +91,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
  * Calculate dialogue timing based on text length
  */
 export function calculateDialogueTiming(
-  dialogues: Array<{ text: string }>,
-  startTime: number = 0,
-  wordsPerSecond: number = 2.5,
-  pauseBetweenLines: number = 0.5
-): Array<{ text: string; startTime: number; duration: number }> {
+  dialogues: { text: string }[],
+  startTime = 0,
+  wordsPerSecond = 2.5,
+  pauseBetweenLines = 0.5
+): { text: string; startTime: number; duration: number }[] {
   let currentTime = startTime;
 
   return dialogues.map((d) => {

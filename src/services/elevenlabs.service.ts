@@ -2,9 +2,8 @@ import { ElevenLabsClient } from "elevenlabs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
-import type { VoiceSettings } from "../types";
+import { getErrorMessage, type VoiceSettings } from "../types";
 import { ensureDir, generateFilename } from "../utils";
-import { getErrorMessage } from "../types";
 
 // Initialize ElevenLabs client
 const client = new ElevenLabsClient({
@@ -90,9 +89,7 @@ export async function generateSpeech(
 /**
  * Get list of available voices
  */
-export async function getVoices(): Promise<
-  Array<{ id: string; name: string }>
-> {
+export async function getVoices(): Promise<{ id: string; name: string }[]> {
   try {
     const voices = await client.voices.getAll();
     return voices.voices.map((v) => ({
@@ -112,7 +109,7 @@ export async function getVoices(): Promise<
 async function getAudioDuration(audioPath: string): Promise<number> {
   const ffmpeg = await import("fluent-ffmpeg");
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, _reject) => {
     ffmpeg.default.ffprobe(audioPath, (err, metadata) => {
       if (err) {
         // Fallback: estimate based on text length (rough approximation)

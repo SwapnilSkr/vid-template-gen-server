@@ -341,7 +341,7 @@ export async function finalizeVideo(
 export async function extractThumbnail(
   videoPath: string,
   outputPath: string,
-  timestamp: number = 1
+  timestamp = 1
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)

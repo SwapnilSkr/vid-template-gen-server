@@ -41,7 +41,7 @@ export function formatTimestamp(seconds: number): string {
  * Calculate total duration from dialogue lines
  */
 export function calculateTotalDuration(
-  lines: Array<{ startTime: number; duration?: number }>
+  lines: { startTime: number; duration?: number }[]
 ): number {
   let maxEnd = 0;
   for (const line of lines) {

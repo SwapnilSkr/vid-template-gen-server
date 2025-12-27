@@ -2,12 +2,12 @@ import { Elysia } from "elysia";
 import { uploadImage, uploadVideo } from "../services/s3.service";
 import { getErrorMessage } from "../types";
 
-export type UploadField = {
+export interface UploadField {
   field: string;
   type: "image" | "video";
   folder: "characters" | "templates" | "compositions";
   required?: boolean;
-};
+}
 
 /**
  * Request body with file fields

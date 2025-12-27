@@ -121,7 +121,7 @@ export async function generateTitle(plot: string): Promise<string> {
     });
 
     return text.trim().replace(/^["']|["']$/g, "");
-  } catch (error: unknown) {
+  } catch (_error: unknown) {
     return "Untitled Video";
   }
 }

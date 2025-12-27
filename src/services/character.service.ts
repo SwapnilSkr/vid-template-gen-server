@@ -1,5 +1,5 @@
 import { Character, type ICharacter } from "../models";
-import { uploadImage, deleteFromS3 } from "./s3.service";
+import { deleteFromS3 } from "./s3.service";
 
 export interface CharacterPosition {
   x: number;

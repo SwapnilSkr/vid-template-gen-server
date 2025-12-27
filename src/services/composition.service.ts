@@ -3,12 +3,10 @@ import { readFile, unlink } from "node:fs/promises";
 import {
   Composition,
   type IComposition,
-  Template,
-  Character,
   type ICharacter,
   type ITemplate,
 } from "../models";
-import { generateScript, type GeneratedScript } from "./ai.service";
+import { generateScript } from "./ai.service";
 import { generateSpeech } from "./elevenlabs.service";
 import {
   applyCharacterOverlays,
@@ -151,13 +149,13 @@ async function processComposition(compositionId: string): Promise<void> {
 
     // Step 2: Generate audio for each dialogue
     await ensureDir(config.processingPath);
-    const audioSegments: Array<{
+    const audioSegments: {
       characterId: string;
       text: string;
       audioPath: string;
       startTime: number;
       duration: number;
-    }> = [];
+    }[] = [];
 
     for (let i = 0; i < composition.generatedScript.length; i++) {
       const line = composition.generatedScript[i];
@@ -305,9 +303,7 @@ export async function getComposition(id: string): Promise<IComposition | null> {
 /**
  * List compositions
  */
-export async function listCompositions(
-  limit: number = 50
-): Promise<IComposition[]> {
+export async function listCompositions(limit = 50): Promise<IComposition[]> {
   return Composition.find().sort({ createdAt: -1 }).limit(limit);
 }
 
