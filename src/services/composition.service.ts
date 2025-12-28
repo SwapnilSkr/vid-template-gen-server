@@ -428,6 +428,10 @@ async function regenerateCompositionAsync(
     // Process video with audio and subtitles
     const templateVideoPath = template.videoUrl;
 
+    console.log(
+      `🎬 Regenerating with subtitlePosition: ${composition.subtitlePosition}`
+    );
+
     const { outputUrl, subtitlesUrl, tempFiles } =
       await processVideoWithAudioAndSubtitles(
         compositionId,

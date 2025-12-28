@@ -112,11 +112,14 @@ export async function processVideoWithAudioAndSubtitles(
     filenameSuffix ? `${compositionId}_${filenameSuffix}` : compositionId
   );
 
+  const subtitlePos = composition.subtitlePosition || "bottom";
+  console.log(`🎯 addSubtitlesToVideo called with position: ${subtitlePos}`);
+
   const videoWithSubtitles = await addSubtitlesToVideo(
     videoWithAudio,
     srtContent,
     undefined,
-    composition.subtitlePosition || "bottom"
+    subtitlePos
   );
 
   // Finalize and upload

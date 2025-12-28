@@ -405,40 +405,104 @@ export async function addSubtitlesToVideo(
     outputPath ||
     join(config.processingPath, generateFilename("subtitled", "mp4"));
 
-  // ASS Alignment values: 2 = bottom-center, 5 = middle-center, 6 = top-center
-  const alignmentMap = {
-    top: 6,
-    center: 5,
-    bottom: 2,
-  };
-  const alignment = alignmentMap[position];
+  console.log(`🔤 addSubtitlesToVideo received position: "${position}"`);
 
-  // Write SRT to temp file
-  const srtPath = join(config.processingPath, `temp_${Date.now()}.srt`);
+  // ASS Alignment values (numpad-style):
+  // 7 8 9 (top row)
+  // 4 5 6 (middle row)
+  // 1 2 3 (bottom row)
+  const styleConfig = {
+    top: { alignment: 8, marginV: 20 },
+    center: { alignment: 5, marginV: 0 },
+    bottom: { alignment: 2, marginV: 30 },
+  };
+  const { alignment, marginV } = styleConfig[position];
+  console.log(
+    `🔤 Using alignment=${alignment}, marginV=${marginV} for position="${position}"`
+  );
+
+  // Convert SRT to ASS format with proper styling
+  const assContent = convertSrtToAss(srtContent, alignment, marginV);
+
+  // Write ASS to temp file
+  const assPath = join(config.processingPath, `temp_${Date.now()}.ass`);
   const { writeFile, unlink } = await import("node:fs/promises");
-  await writeFile(srtPath, srtContent, "utf-8");
+  await writeFile(assPath, assContent, "utf-8");
 
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
-      .outputOptions([
-        "-vf",
-        `subtitles='${srtPath.replace(
-          /'/g,
-          "\\'"
-        )}':force_style='FontSize=24,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=${alignment}'`,
-      ])
+      .outputOptions(["-vf", `ass='${assPath.replace(/'/g, "\\'")}'`])
       .output(output)
       .on("end", async () => {
-        await unlink(srtPath).catch(() => {});
-        console.log(`📝 Subtitles added to video (position: ${position})`);
+        await unlink(assPath).catch(() => {});
+        console.log(
+          `📝 Subtitles added to video (position: ${position}, alignment: ${alignment})`
+        );
         resolve(output);
       })
       .on("error", async (err) => {
-        await unlink(srtPath).catch(() => {});
+        await unlink(assPath).catch(() => {});
         reject(new Error(`Subtitle burn failed: ${err.message}`));
       })
       .run();
   });
+}
+
+/**
+ * Convert SRT content to ASS format with proper styling
+ */
+function convertSrtToAss(
+  srtContent: string,
+  alignment: number,
+  marginV: number
+): string {
+  // ASS header with style definition
+  const header = `[Script Info]
+Title: Generated Subtitles
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,${alignment},10,10,${marginV},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+  // Parse SRT and convert to ASS dialogue lines
+  const dialogueLines: string[] = [];
+  const blocks = srtContent.trim().split(/\n\n+/);
+
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    if (lines.length < 3) continue;
+
+    // Parse timestamp line (format: 00:00:00,000 --> 00:00:00,000)
+    const timestampMatch = lines[1].match(
+      /(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})/
+    );
+    if (!timestampMatch) continue;
+
+    // Convert to ASS time format (H:MM:SS.cc)
+    const startTime = `${parseInt(timestampMatch[1])}:${timestampMatch[2]}:${
+      timestampMatch[3]
+    }.${timestampMatch[4].slice(0, 2)}`;
+    const endTime = `${parseInt(timestampMatch[5])}:${timestampMatch[6]}:${
+      timestampMatch[7]
+    }.${timestampMatch[8].slice(0, 2)}`;
+
+    // Get text (may span multiple lines)
+    const text = lines.slice(2).join("\\N");
+
+    dialogueLines.push(
+      `Dialogue: 0,${startTime},${endTime},Default,,0,0,0,,${text}`
+    );
+  }
+
+  return header + dialogueLines.join("\n") + "\n";
 }
 
 /**
