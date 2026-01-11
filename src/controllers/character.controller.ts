@@ -5,9 +5,7 @@ import {
   listCharacters,
   updateCharacter,
   deleteCharacter,
-  type CharacterPosition,
 } from "../services";
-import type { ICharacter } from "../models";
 import type {
   TIdParams,
   TCreateCharacterBody,
@@ -18,16 +16,6 @@ import { getErrorMessage } from "../types";
 // ============================================
 // Type Definitions for Controller Context
 // ============================================
-
-/**
- * Anchor position type - matches the model definition
- */
-type CharacterAnchor =
-  | "top-left"
-  | "top-right"
-  | "bottom-left"
-  | "bottom-right"
-  | "center";
 
 interface UploadedFiles {
   image?: string;
@@ -53,13 +41,6 @@ interface DeleteCharacterContext extends Context {
   params: TIdParams;
 }
 
-/**
- * Character update data structure - matches service expectation
- */
-type CharacterUpdateData = Partial<
-  Pick<ICharacter, "displayName" | "voiceId" | "position" | "imageUrl">
->;
-
 // ============================================
 // Controller Functions
 // ============================================
@@ -71,8 +52,7 @@ export async function createCharacterController({
   body,
   uploadedFiles,
 }: CreateCharacterContext) {
-  const { name, displayName, voiceId, positionX, positionY, scale, anchor } =
-    body;
+  const { name, displayName, voiceId } = body;
 
   try {
     const character = await createCharacter({
@@ -80,12 +60,6 @@ export async function createCharacterController({
       displayName,
       voiceId,
       imageUrl: uploadedFiles.image!,
-      position: {
-        x: positionX,
-        y: positionY,
-        scale,
-        anchor: anchor as CharacterAnchor,
-      },
     });
 
     return { success: true, data: character };
@@ -122,34 +96,18 @@ export async function updateCharacterController({
   uploadedFiles,
 }: UpdateCharacterContext) {
   try {
-    const updates: CharacterUpdateData = {
-      displayName: body.displayName,
-      voiceId: body.voiceId,
-    };
+    const updates: Partial<{
+      displayName: string;
+      voiceId: string;
+      imageUrl: string;
+    }> = {};
 
-    if (body.position) {
-      // Body position is fully specified
-      updates.position = {
-        x: (body.position as CharacterPosition).x,
-        y: (body.position as CharacterPosition).y,
-        scale: (body.position as CharacterPosition).scale,
-        anchor: (body.position as CharacterPosition).anchor as CharacterAnchor,
-      };
-    } else if (
-      body.positionX !== undefined ||
-      body.positionY !== undefined ||
-      body.scale !== undefined ||
-      body.anchor !== undefined
-    ) {
-      // Build position from individual fields with defaults
-      updates.position = {
-        x: body.positionX ?? 50,
-        y: body.positionY ?? 75,
-        scale: body.scale ?? 0.25,
-        anchor: (body.anchor as CharacterAnchor) ?? "bottom-left",
-      };
+    if (body.displayName) {
+      updates.displayName = body.displayName;
     }
-
+    if (body.voiceId) {
+      updates.voiceId = body.voiceId;
+    }
     if (uploadedFiles.image) {
       updates.imageUrl = uploadedFiles.image;
     }

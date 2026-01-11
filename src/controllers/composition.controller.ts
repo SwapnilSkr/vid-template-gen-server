@@ -11,6 +11,7 @@ import type {
   TRegenerateCompositionBody,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
+import type { ICharacterPosition, ScreenType } from "../models";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -44,12 +45,21 @@ export async function createCompositionController({
   body,
 }: CreateCompositionContext) {
   try {
-    const job = await createComposition(
-      body.templateId,
-      body.plot,
-      body.title,
-      body.subtitlePosition
-    );
+    // Convert characterPositions from Record to Map if provided
+    let characterPositionsMap: Map<string, ICharacterPosition> | undefined;
+    if (body.characterPositions) {
+      characterPositionsMap = new Map(Object.entries(body.characterPositions));
+    }
+
+    const job = await createComposition({
+      templateId: body.templateId,
+      plot: body.plot,
+      title: body.title,
+      screenType: body.screenType as ScreenType | undefined,
+      subtitlePosition: body.subtitlePosition,
+      characterPositions: characterPositionsMap,
+    });
+
     return {
       success: true,
       data: job,
@@ -88,6 +98,7 @@ export async function getCompositionStatusController({
       status: composition.status,
       progress: composition.progress,
       title: composition.title,
+      screenType: composition.screenType,
       script: composition.generatedScript,
       outputUrl: composition.outputUrl,
       error: composition.error,
@@ -139,12 +150,21 @@ export async function generateCompositionController({
   body,
 }: CreateCompositionContext) {
   try {
-    const job = await createComposition(
-      body.templateId,
-      body.plot,
-      body.title,
-      body.subtitlePosition
-    );
+    // Convert characterPositions from Record to Map if provided
+    let characterPositionsMap: Map<string, ICharacterPosition> | undefined;
+    if (body.characterPositions) {
+      characterPositionsMap = new Map(Object.entries(body.characterPositions));
+    }
+
+    const job = await createComposition({
+      templateId: body.templateId,
+      plot: body.plot,
+      title: body.title,
+      screenType: body.screenType as ScreenType | undefined,
+      subtitlePosition: body.subtitlePosition,
+      characterPositions: characterPositionsMap,
+    });
+
     return {
       success: true,
       data: {
@@ -175,6 +195,7 @@ export async function getGeneratedCompositionController({
       status: composition.status,
       progress: composition.progress,
       title: composition.title,
+      screenType: composition.screenType,
       script: composition.generatedScript,
       outputUrl: composition.outputUrl,
       subtitlesUrl: composition.subtitlesUrl,
@@ -192,11 +213,20 @@ export async function regenerateCompositionController({
   body,
 }: RegenerateCompositionContext) {
   try {
-    const composition = await regenerateComposition(
-      params.id,
-      body.delays,
-      body.subtitlePosition
-    );
+    // Convert characterPositions from Record to Map if provided
+    let characterPositionsMap: Map<string, ICharacterPosition> | undefined;
+    if (body.characterPositions) {
+      characterPositionsMap = new Map(Object.entries(body.characterPositions));
+    }
+
+    const composition = await regenerateComposition({
+      compositionId: params.id,
+      delays: body.delays,
+      screenType: body.screenType as ScreenType | undefined,
+      subtitlePosition: body.subtitlePosition,
+      characterPositions: characterPositionsMap,
+    });
+
     return {
       success: true,
       data: {

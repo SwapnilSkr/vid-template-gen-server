@@ -4,4 +4,6 @@ export {
   Composition,
   type IComposition,
   type IDialogueLine,
+  type ICharacterPosition,
+  type ScreenType,
 } from "./composition.model";

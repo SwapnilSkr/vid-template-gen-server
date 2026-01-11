@@ -6,17 +6,6 @@ export interface ICharacter extends Document {
   displayName: string;
   voiceId: string;
   imageUrl: string;
-  position: {
-    x: number;
-    y: number;
-    scale: number;
-    anchor:
-      | "top-left"
-      | "top-right"
-      | "bottom-left"
-      | "bottom-right"
-      | "center";
-  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -42,22 +31,6 @@ const characterSchema = new Schema<ICharacter>(
     imageUrl: {
       type: String,
       required: true,
-    },
-    position: {
-      x: { type: Number, default: 5 },
-      y: { type: Number, default: 95 },
-      scale: { type: Number, default: 0.25 },
-      anchor: {
-        type: String,
-        enum: [
-          "top-left",
-          "top-right",
-          "bottom-left",
-          "bottom-right",
-          "center",
-        ],
-        default: "bottom-left",
-      },
     },
   },
   {

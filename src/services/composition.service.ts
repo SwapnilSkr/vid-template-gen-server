@@ -5,6 +5,8 @@ import {
   type IComposition,
   type ICharacter,
   type ITemplate,
+  type ICharacterPosition,
+  type ScreenType,
 } from "../models";
 import { generateScript } from "./ai.service";
 import { generateSpeech } from "./elevenlabs.service";
@@ -19,6 +21,10 @@ import {
   processVideoWithAudioAndSubtitles,
 } from "../helpers/composition.helper";
 
+// ============================================
+// Types
+// ============================================
+
 /**
  * Populated template type - when template is populated via Mongoose
  */
@@ -27,14 +33,114 @@ interface PopulatedTemplate extends Omit<ITemplate, "characters"> {
 }
 
 /**
+ * Create composition options
+ */
+interface CreateCompositionOptions {
+  templateId: string;
+  plot: string;
+  title?: string;
+  screenType?: ScreenType;
+  subtitlePosition?: "top" | "center" | "bottom";
+  characterPositions?: Map<string, ICharacterPosition>;
+}
+
+/**
+ * Regenerate composition options
+ */
+interface RegenerateCompositionOptions {
+  compositionId: string;
+  delays?: number[];
+  screenType?: ScreenType;
+  subtitlePosition?: "top" | "center" | "bottom";
+  characterPositions?: Map<string, ICharacterPosition>;
+}
+
+// ============================================
+// Default Position Constants
+// ============================================
+
+/**
+ * Default character position based on screen type and character index
+ * Mobile uses a universal 9:16 aspect ratio optimized positioning
+ * Desktop uses a standard 16:9 aspect ratio positioning
+ */
+function getDefaultCharacterPosition(
+  screenType: ScreenType,
+  characterIndex: number,
+  totalCharacters: number
+): ICharacterPosition {
+  // For mobile (9:16 portrait), characters positioned at bottom
+  if (screenType === "mobile") {
+    // Spread characters horizontally at bottom
+    const xPositions =
+      totalCharacters === 1
+        ? [50]
+        : totalCharacters === 2
+        ? [25, 75]
+        : [15, 50, 85];
+
+    return {
+      x: xPositions[characterIndex % xPositions.length],
+      y: 85,
+      scale: 0.3,
+      anchor: "bottom-left" as const,
+    };
+  }
+
+  // For desktop (16:9 landscape), characters positioned at bottom corners
+  const xPositions =
+    totalCharacters === 1
+      ? [50]
+      : totalCharacters === 2
+      ? [10, 90]
+      : [10, 50, 90];
+
+  return {
+    x: xPositions[characterIndex % xPositions.length],
+    y: 90,
+    scale: 0.25,
+    anchor: "bottom-left" as const,
+  };
+}
+
+/**
+ * Generate default character positions for all template characters
+ */
+function generateDefaultCharacterPositions(
+  characters: ICharacter[],
+  screenType: ScreenType
+): Map<string, ICharacterPosition> {
+  const positions = new Map<string, ICharacterPosition>();
+
+  characters.forEach((character, index) => {
+    positions.set(
+      character._id.toString(),
+      getDefaultCharacterPosition(screenType, index, characters.length)
+    );
+  });
+
+  return positions;
+}
+
+// ============================================
+// Composition Service Functions
+// ============================================
+
+/**
  * Create a new composition from plot
  */
 export async function createComposition(
-  templateId: string,
-  plot: string,
-  title?: string,
-  subtitlePosition?: "top" | "center" | "bottom"
+  options: CreateCompositionOptions
 ): Promise<IComposition> {
+  const {
+    templateId,
+    plot,
+    title,
+    screenType = "mobile",
+    subtitlePosition = "bottom",
+    characterPositions,
+  } = options;
+
   // Validate template exists and has characters
   const template = await getTemplate(templateId);
   if (!template) {
@@ -47,19 +153,43 @@ export async function createComposition(
     );
   }
 
+  // Populate characters to generate default positions
+  const populatedTemplate = await template.populate<{
+    characters: ICharacter[];
+  }>("characters");
+  const characters = populatedTemplate.characters;
+
+  // Generate default positions based on screen type
+  const defaultPositions = generateDefaultCharacterPositions(
+    characters,
+    screenType
+  );
+
+  // Merge provided positions with defaults (provided takes precedence)
+  const finalPositions = new Map(defaultPositions);
+  if (characterPositions) {
+    characterPositions.forEach((pos, charId) => {
+      finalPositions.set(charId, pos);
+    });
+  }
+
   // Create composition record
   const composition = new Composition({
     template: templateId,
     title: title || "Generating...",
     plot,
-    subtitlePosition: subtitlePosition || "bottom",
+    screenType,
+    characterPositions: finalPositions,
+    subtitlePosition,
     status: "pending",
     progress: 0,
     generatedScript: [],
   });
 
   await composition.save();
-  console.log(`🎬 Created composition: ${composition._id}`);
+  console.log(
+    `🎬 Created composition: ${composition._id} (${screenType} mode)`
+  );
 
   // Start async processing
   processComposition(composition._id.toString()).catch((error: unknown) => {
@@ -278,15 +408,18 @@ export async function deleteComposition(id: string): Promise<boolean> {
 /**
  * Regenerate composition video using existing speech files
  * This saves ElevenLabs API costs by reusing already generated audio
- * @param compositionId - The ID of the composition to regenerate
- * @param customDelays - Optional array of custom delays (in seconds) for each dialogue line
- * @param subtitlePosition - Optional subtitle position override
  */
 export async function regenerateComposition(
-  compositionId: string,
-  customDelays?: number[],
-  subtitlePosition?: "top" | "center" | "bottom"
+  options: RegenerateCompositionOptions
 ): Promise<IComposition> {
+  const {
+    compositionId,
+    delays,
+    screenType,
+    subtitlePosition,
+    characterPositions,
+  } = options;
+
   const composition = await Composition.findById(compositionId).populate({
     path: "template",
     populate: {
@@ -315,6 +448,25 @@ export async function regenerateComposition(
   composition.progress = 10;
   composition.error = undefined;
 
+  // Update screen type if provided
+  if (screenType && screenType !== composition.screenType) {
+    composition.screenType = screenType;
+
+    // Regenerate default positions for new screen type
+    const newDefaultPositions = generateDefaultCharacterPositions(
+      characters,
+      screenType
+    );
+    composition.characterPositions = newDefaultPositions;
+  }
+
+  // Merge character position overrides if provided
+  if (characterPositions) {
+    characterPositions.forEach((pos, charId) => {
+      composition.characterPositions.set(charId, pos);
+    });
+  }
+
   // Update subtitle position if provided
   if (subtitlePosition) {
     composition.subtitlePosition = subtitlePosition;
@@ -323,7 +475,7 @@ export async function regenerateComposition(
   await composition.save();
 
   // Start async regeneration
-  regenerateCompositionAsync(composition, characters, customDelays).catch(
+  regenerateCompositionAsync(composition, characters, delays).catch(
     async (error: unknown) => {
       console.error("Composition regeneration failed:", error);
       composition.status = "failed";
@@ -429,7 +581,7 @@ async function regenerateCompositionAsync(
     const templateVideoPath = template.videoUrl;
 
     console.log(
-      `🎬 Regenerating with subtitlePosition: ${composition.subtitlePosition}`
+      `🎬 Regenerating with screenType: ${composition.screenType}, subtitlePosition: ${composition.subtitlePosition}`
     );
 
     const { outputUrl, subtitlesUrl, tempFiles } =

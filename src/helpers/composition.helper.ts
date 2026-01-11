@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import type { IComposition, ICharacter } from "../models";
+import type { IComposition, ICharacter, ICharacterPosition } from "../models";
 import {
   applyCharacterOverlays,
   mergeAudioTracks,
@@ -11,6 +11,16 @@ import { uploadToS3, uploadSubtitles } from "../services/s3.service";
 import { generateSrtContent } from "../services/subtitle.service";
 import { generateFilename } from "../utils";
 import { config } from "../config";
+
+/**
+ * Default character position fallback
+ */
+const DEFAULT_POSITION: ICharacterPosition = {
+  x: 5,
+  y: 95,
+  scale: 0.25,
+  anchor: "bottom-left",
+};
 
 /**
  * Recalculate dialogue start times based on delays and durations
@@ -32,7 +42,8 @@ export function recalculateTimings(
 }
 
 /**
- * Build video segments from audio segments and characters
+ * Build video segments from audio segments and composition character positions
+ * Now reads positions from composition.characterPositions instead of character.position
  */
 export function buildVideoSegments(
   audioSegments: {
@@ -40,21 +51,22 @@ export function buildVideoSegments(
     startTime: number;
     duration: number;
   }[],
-  characters: ICharacter[]
+  characters: ICharacter[],
+  characterPositions: Map<string, ICharacterPosition>
 ) {
   return audioSegments.map((seg) => {
     const character = characters.find(
       (c) => c._id.toString() === seg.characterId
     );
+
+    // Get position from composition's characterPositions map
+    const position =
+      characterPositions.get(seg.characterId) || DEFAULT_POSITION;
+
     return {
       characterId: seg.characterId,
       imagePath: character?.imageUrl || "",
-      position: character?.position || {
-        x: 5,
-        y: 95,
-        scale: 0.25,
-        anchor: "bottom-left" as const,
-      },
+      position,
       startTime: seg.startTime,
       endTime: seg.startTime + seg.duration,
     };
@@ -83,8 +95,12 @@ export async function processVideoWithAudioAndSubtitles(
   subtitlesUrl: string;
   tempFiles: string[];
 }> {
-  // Build video segments
-  const videoSegments = buildVideoSegments(audioSegments, characters);
+  // Build video segments using composition's character positions
+  const videoSegments = buildVideoSegments(
+    audioSegments,
+    characters,
+    composition.characterPositions
+  );
 
   // Apply character overlays
   const videoWithOverlays = await applyCharacterOverlays(

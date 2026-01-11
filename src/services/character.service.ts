@@ -1,13 +1,6 @@
 import { Character, type ICharacter } from "../models";
 import { deleteFromS3 } from "./s3.service";
 
-export interface CharacterPosition {
-  x: number;
-  y: number;
-  scale: number;
-  anchor: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
-}
-
 /**
  * Create a new character
  */
@@ -16,9 +9,8 @@ export async function createCharacter(data: {
   displayName: string;
   voiceId: string;
   imageUrl: string;
-  position?: Partial<CharacterPosition>;
 }): Promise<ICharacter> {
-  const { name, displayName, voiceId, imageUrl, position } = data;
+  const { name, displayName, voiceId, imageUrl } = data;
 
   // Create character in DB
   const character = new Character({
@@ -26,12 +18,6 @@ export async function createCharacter(data: {
     displayName,
     voiceId,
     imageUrl,
-    position: {
-      x: position?.x ?? 50,
-      y: position?.y ?? 75,
-      scale: position?.scale ?? 0.25,
-      anchor: position?.anchor ?? "bottom-left",
-    },
   });
 
   await character.save();
@@ -68,9 +54,7 @@ export async function listCharacters(): Promise<ICharacter[]> {
  */
 export async function updateCharacter(
   id: string,
-  updates: Partial<
-    Pick<ICharacter, "displayName" | "voiceId" | "position" | "imageUrl">
-  >
+  updates: Partial<Pick<ICharacter, "displayName" | "voiceId" | "imageUrl">>
 ): Promise<ICharacter | null> {
   // If updating image, delete old one from S3 first
   if (updates.imageUrl) {

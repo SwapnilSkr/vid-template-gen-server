@@ -1,11 +1,11 @@
-import type { CharacterPosition } from "./character.types";
+import type { ICharacterPosition } from "../models";
 
 export interface DialogueLine {
   characterId: string;
   text: string;
   startTime: number; // seconds
   duration?: number; // auto-calculated from audio
-  position?: CharacterPosition; // override default
+  position?: ICharacterPosition; // override default
 }
 
 export interface CompositionRequest {
@@ -55,7 +55,7 @@ export interface AudioSegment {
 export interface VideoSegment {
   characterId: string;
   imagePath: string;
-  position: CharacterPosition;
+  position: ICharacterPosition;
   startTime: number;
   endTime: number;
 }
