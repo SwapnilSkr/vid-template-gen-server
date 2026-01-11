@@ -8,6 +8,13 @@ import type {
   VideoSegment,
 } from "../types";
 import { ensureDir, generateFilename } from "../utils";
+import type { ScreenType } from "../models";
+
+// Screen dimensions for aspect ratio conversion
+const SCREEN_DIMENSIONS = {
+  mobile: { width: 1080, height: 1920 }, // 9:16
+  desktop: { width: 1920, height: 1080 }, // 16:9
+} as const;
 
 // Configure FFmpeg paths if provided
 if (config.ffmpegPath) {
@@ -15,6 +22,50 @@ if (config.ffmpegPath) {
 }
 if (config.ffprobePath) {
   ffmpeg.setFfprobePath(config.ffprobePath);
+}
+
+/**
+ * Convert video to target aspect ratio with smart cropping
+ * @param inputPath - Source video path
+ * @param screenType - Target screen type (mobile/desktop)
+ * @param outputPath - Optional output path
+ * @returns Path to converted video
+ */
+export async function convertToAspectRatio(
+  inputPath: string,
+  screenType: ScreenType,
+  outputPath?: string
+): Promise<string> {
+  await ensureDir(config.processingPath);
+  const output =
+    outputPath ||
+    join(
+      config.processingPath,
+      generateFilename(`${screenType}_converted`, "mp4")
+    );
+
+  const targetDims = SCREEN_DIMENSIONS[screenType];
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .outputOptions([
+        "-vf",
+        `scale=${targetDims.width}:${targetDims.height}:force_original_aspect_ratio=increase,crop=${targetDims.width}:${targetDims.height}`,
+        "-c:a",
+        "copy",
+      ])
+      .output(output)
+      .on("end", () => {
+        console.log(
+          `📐 Converted to ${screenType} aspect ratio (${targetDims.width}x${targetDims.height})`
+        );
+        resolve(output);
+      })
+      .on("error", (err) => {
+        reject(new Error(`Aspect ratio conversion failed: ${err.message}`));
+      })
+      .run();
+  });
 }
 
 /**

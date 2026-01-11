@@ -2,11 +2,12 @@ import { t } from "elysia";
 
 /**
  * Character position schema for composition
+ * x, y, and scale are optional - if not provided, they will be calculated from anchor and screenType
  */
 export const CharacterPositionSchema = t.Object({
-  x: t.Number({ minimum: 0, maximum: 100 }),
-  y: t.Number({ minimum: 0, maximum: 100 }),
-  scale: t.Number({ minimum: 0.01, maximum: 2 }),
+  x: t.Optional(t.Number({ minimum: 0, maximum: 100 })),
+  y: t.Optional(t.Number({ minimum: 0, maximum: 100 })),
+  scale: t.Optional(t.Number({ minimum: 0.01, maximum: 2 })),
   anchor: t.Union([
     t.Literal("top-left"),
     t.Literal("top-right"),

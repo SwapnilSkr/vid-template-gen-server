@@ -13,9 +13,9 @@ import { generateFilename } from "../utils";
 import { config } from "../config";
 
 /**
- * Default character position fallback
+ * Default character position fallback (should rarely be needed now)
  */
-const DEFAULT_POSITION: ICharacterPosition = {
+const DEFAULT_POSITION: Required<ICharacterPosition> = {
   x: 5,
   y: 95,
   scale: 0.25,
@@ -60,13 +60,22 @@ export function buildVideoSegments(
     );
 
     // Get position from composition's characterPositions map
+    // At this point, all positions should be normalized with all fields present
     const position =
       characterPositions.get(seg.characterId) || DEFAULT_POSITION;
+
+    // Ensure we have all required fields (should always be true after normalization)
+    const fullPosition: Required<ICharacterPosition> = {
+      x: position.x ?? DEFAULT_POSITION.x,
+      y: position.y ?? DEFAULT_POSITION.y,
+      scale: position.scale ?? DEFAULT_POSITION.scale,
+      anchor: position.anchor,
+    };
 
     return {
       characterId: seg.characterId,
       imagePath: character?.imageUrl || "",
-      position,
+      position: fullPosition,
       startTime: seg.startTime,
       endTime: seg.startTime + seg.duration,
     };
@@ -95,20 +104,27 @@ export async function processVideoWithAudioAndSubtitles(
   subtitlesUrl: string;
   tempFiles: string[];
 }> {
-  // Build video segments using composition's character positions
+  // Step 1: Convert template video to target aspect ratio
+  const { convertToAspectRatio } = await import("../services/ffmpeg.service");
+  const aspectCorrectedVideo = await convertToAspectRatio(
+    templateVideoPath,
+    composition.screenType
+  );
+
+  // Step 2: Build video segments using composition's character positions
   const videoSegments = buildVideoSegments(
     audioSegments,
     characters,
     composition.characterPositions
   );
 
-  // Apply character overlays
+  // Step 3: Apply character overlays
   const videoWithOverlays = await applyCharacterOverlays(
-    templateVideoPath,
+    aspectCorrectedVideo,
     videoSegments
   );
 
-  // Merge audio tracks
+  // Step 4: Merge audio tracks
   const videoWithAudio = await mergeAudioTracks(
     videoWithOverlays,
     audioSegments
@@ -164,6 +180,7 @@ export async function processVideoWithAudioAndSubtitles(
     outputUrl,
     subtitlesUrl,
     tempFiles: [
+      aspectCorrectedVideo,
       finalOutputPath,
       videoWithOverlays,
       videoWithAudio,

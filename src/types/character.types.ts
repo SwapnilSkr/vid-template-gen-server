@@ -1,19 +1,21 @@
+import type { ICharacterPosition } from "../models";
+
+/**
+ * @deprecated - Use ICharacterPosition from models instead
+ */
 export interface Character {
   id: string;
   name: string;
   displayName: string;
   voiceId: string;
   imagePath: string;
-  defaultPosition: CharacterPosition;
   createdAt: Date;
 }
 
-export interface CharacterPosition {
-  x: number; // 0-100% from left
-  y: number; // 0-100% from top
-  scale: number; // 1.0 = original size
-  anchor: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
-}
+/**
+ * Character position - all fields required
+ */
+export type CharacterPosition = Required<ICharacterPosition>;
 
 export interface VoiceSettings {
   stability: number; // 0-1

@@ -11,11 +11,12 @@ export type ScreenType = "mobile" | "desktop";
 
 /**
  * Character position configuration
+ * x, y, and scale are optional - if not provided, calculated from anchor and screenType
  */
 export interface ICharacterPosition {
-  x: number; // Percentage (0-100)
-  y: number; // Percentage (0-100)
-  scale: number; // Scale factor (e.g., 0.25 = 25%)
+  x?: number; // Percentage (0-100)
+  y?: number; // Percentage (0-100)
+  scale?: number; // Scale factor (e.g., 0.25 = 25%)
   anchor: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
 }
 
@@ -66,9 +67,9 @@ export interface IComposition extends Document {
 
 const characterPositionSchema = new Schema<ICharacterPosition>(
   {
-    x: { type: Number, required: true, min: 0, max: 100 },
-    y: { type: Number, required: true, min: 0, max: 100 },
-    scale: { type: Number, required: true, min: 0.01, max: 2 },
+    x: { type: Number, required: false, min: 0, max: 100 },
+    y: { type: Number, required: false, min: 0, max: 100 },
+    scale: { type: Number, required: false, min: 0.01, max: 2 },
     anchor: {
       type: String,
       enum: ["top-left", "top-right", "bottom-left", "bottom-right", "center"],

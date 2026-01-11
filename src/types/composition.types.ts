@@ -55,7 +55,7 @@ export interface AudioSegment {
 export interface VideoSegment {
   characterId: string;
   imagePath: string;
-  position: ICharacterPosition;
+  position: Required<ICharacterPosition>;
   startTime: number;
   endTime: number;
 }

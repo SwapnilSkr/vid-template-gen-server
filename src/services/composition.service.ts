@@ -60,6 +60,52 @@ interface RegenerateCompositionOptions {
 // ============================================
 
 /**
+ * Target dimensions based on screen type
+ */
+export const SCREEN_DIMENSIONS = {
+  mobile: { width: 1080, height: 1920 }, // 9:16
+  desktop: { width: 1920, height: 1080 }, // 16:9
+} as const;
+
+/**
+ * Calculate x,y coordinates from anchor point
+ */
+function getCoordinatesFromAnchor(
+  anchor: ICharacterPosition["anchor"],
+  screenType: ScreenType
+): { x: number; y: number } {
+  switch (anchor) {
+    case "top-left":
+      return { x: 5, y: 5 };
+    case "top-right":
+      return { x: 95, y: 5 };
+    case "bottom-left":
+      return { x: 5, y: screenType === "mobile" ? 85 : 95 };
+    case "bottom-right":
+      return { x: 95, y: screenType === "mobile" ? 85 : 95 };
+    case "center":
+      return { x: 50, y: 50 };
+  }
+}
+
+/**
+ * Normalize a character position - fill in missing fields from anchor and screenType
+ */
+function normalizePosition(
+  position: ICharacterPosition,
+  screenType: ScreenType
+): Required<ICharacterPosition> {
+  const coords = getCoordinatesFromAnchor(position.anchor, screenType);
+
+  return {
+    x: position.x ?? coords.x,
+    y: position.y ?? coords.y,
+    scale: position.scale ?? (screenType === "mobile" ? 0.3 : 0.25),
+    anchor: position.anchor,
+  };
+}
+
+/**
  * Default character position based on screen type and character index
  * Mobile uses a universal 9:16 aspect ratio optimized positioning
  * Desktop uses a standard 16:9 aspect ratio positioning
@@ -68,7 +114,7 @@ function getDefaultCharacterPosition(
   screenType: ScreenType,
   characterIndex: number,
   totalCharacters: number
-): ICharacterPosition {
+): Required<ICharacterPosition> {
   // For mobile (9:16 portrait), characters positioned at bottom
   if (screenType === "mobile") {
     // Spread characters horizontally at bottom
@@ -109,8 +155,8 @@ function getDefaultCharacterPosition(
 function generateDefaultCharacterPositions(
   characters: ICharacter[],
   screenType: ScreenType
-): Map<string, ICharacterPosition> {
-  const positions = new Map<string, ICharacterPosition>();
+): Map<string, Required<ICharacterPosition>> {
+  const positions = new Map<string, Required<ICharacterPosition>>();
 
   characters.forEach((character, index) => {
     positions.set(
@@ -166,10 +212,11 @@ export async function createComposition(
   );
 
   // Merge provided positions with defaults (provided takes precedence)
+  // Normalize any user-provided positions to ensure all fields are present
   const finalPositions = new Map(defaultPositions);
   if (characterPositions) {
     characterPositions.forEach((pos, charId) => {
-      finalPositions.set(charId, pos);
+      finalPositions.set(charId, normalizePosition(pos, screenType));
     });
   }
 
@@ -461,9 +508,13 @@ export async function regenerateComposition(
   }
 
   // Merge character position overrides if provided
+  // Normalize to fill in missing fields
   if (characterPositions) {
     characterPositions.forEach((pos, charId) => {
-      composition.characterPositions.set(charId, pos);
+      composition.characterPositions.set(
+        charId,
+        normalizePosition(pos, composition.screenType)
+      );
     });
   }
 
