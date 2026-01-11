@@ -6,6 +6,7 @@ import {
   mergeAudioTracks,
   finalizeVideo,
   addSubtitlesToVideo,
+  trimVideo,
 } from "../services/ffmpeg.service";
 import { uploadToS3, uploadSubtitles } from "../services/s3.service";
 import { generateSrtContent } from "../services/subtitle.service";
@@ -21,6 +22,18 @@ const DEFAULT_POSITION: Required<ICharacterPosition> = {
   scale: 0.25,
   anchor: "bottom-left",
 };
+
+/**
+ * Calculate total duration of the conversation from generated script
+ */
+export function calculateConversationDuration(
+  script: IComposition["generatedScript"]
+): number {
+  if (script.length === 0) return 0;
+
+  const lastDialogue = script[script.length - 1];
+  return lastDialogue.startTime + lastDialogue.duration;
+}
 
 /**
  * Recalculate dialogue start times based on delays and durations
@@ -154,6 +167,21 @@ export async function processVideoWithAudioAndSubtitles(
     subtitlePos
   );
 
+  const conversationDuration = calculateConversationDuration(
+    composition.generatedScript
+  );
+  console.log(
+    `⏱️  Conversation duration: ${conversationDuration.toFixed(
+      2
+    )}s - will trim video to this length`
+  );
+
+  const trimmedVideo = await trimVideo(
+    videoWithSubtitles,
+    { keepDuration: conversationDuration },
+    undefined
+  );
+
   // Finalize and upload
   const outputFilename = generateFilename(
     `${composition.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}${
@@ -163,7 +191,7 @@ export async function processVideoWithAudioAndSubtitles(
   );
   const finalOutputPath = join(config.processingPath, outputFilename);
 
-  await finalizeVideo(videoWithSubtitles, finalOutputPath, {
+  await finalizeVideo(trimmedVideo, finalOutputPath, {
     quality: "high",
   });
 
@@ -185,6 +213,7 @@ export async function processVideoWithAudioAndSubtitles(
       videoWithOverlays,
       videoWithAudio,
       videoWithSubtitles,
+      trimmedVideo,
     ],
   };
 }
