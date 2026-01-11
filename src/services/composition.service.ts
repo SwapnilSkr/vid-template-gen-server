@@ -6,6 +6,7 @@ import {
   type ICharacter,
   type ITemplate,
   type ICharacterPosition,
+  type IRequiredCharacterPosition,
   type ScreenType,
 } from "../models";
 import { generateScript } from "./ai.service";
@@ -94,7 +95,7 @@ function getCoordinatesFromAnchor(
 function normalizePosition(
   position: ICharacterPosition,
   screenType: ScreenType
-): Required<ICharacterPosition> {
+): IRequiredCharacterPosition {
   const coords = getCoordinatesFromAnchor(position.anchor, screenType);
 
   return {
@@ -114,7 +115,7 @@ function getDefaultCharacterPosition(
   screenType: ScreenType,
   characterIndex: number,
   totalCharacters: number
-): Required<ICharacterPosition> {
+): IRequiredCharacterPosition {
   // For mobile (9:16 portrait), characters positioned at bottom
   if (screenType === "mobile") {
     // Spread characters horizontally at bottom
@@ -155,8 +156,8 @@ function getDefaultCharacterPosition(
 function generateDefaultCharacterPositions(
   characters: ICharacter[],
   screenType: ScreenType
-): Map<string, Required<ICharacterPosition>> {
-  const positions = new Map<string, Required<ICharacterPosition>>();
+): Map<string, IRequiredCharacterPosition> {
+  const positions = new Map<string, IRequiredCharacterPosition>();
 
   characters.forEach((character, index) => {
     positions.set(

@@ -21,6 +21,16 @@ export interface ICharacterPosition {
 }
 
 /**
+ * Fully populated character position with all required fields
+ */
+export interface IRequiredCharacterPosition {
+  x: number; // Percentage (0-100)
+  y: number; // Percentage (0-100)
+  scale: number; // Scale factor (e.g., 0.25 = 25%)
+  anchor: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+}
+
+/**
  * Dialogue line in generated script
  */
 export interface IDialogueLine {
@@ -41,7 +51,7 @@ export interface IComposition extends Document {
   title: string;
   plot: string;
   screenType: ScreenType;
-  characterPositions: Map<string, ICharacterPosition>;
+  characterPositions: Map<string, IRequiredCharacterPosition>;
   generatedScript: IDialogueLine[];
   subtitlePosition?: "top" | "center" | "bottom";
   status:
@@ -67,9 +77,9 @@ export interface IComposition extends Document {
 
 const characterPositionSchema = new Schema<ICharacterPosition>(
   {
-    x: { type: Number, required: false, min: 0, max: 100 },
-    y: { type: Number, required: false, min: 0, max: 100 },
-    scale: { type: Number, required: false, min: 0.01, max: 2 },
+    x: { type: Number, required: false, min: 0, max: 100, default: 50 },
+    y: { type: Number, required: false, min: 0, max: 100, default: 50 },
+    scale: { type: Number, required: false, min: 0.01, max: 2, default: 0.25 },
     anchor: {
       type: String,
       enum: ["top-left", "top-right", "bottom-left", "bottom-right", "center"],

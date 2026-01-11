@@ -1,6 +1,10 @@
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import type { IComposition, ICharacter, ICharacterPosition } from "../models";
+import type {
+  IComposition,
+  ICharacter,
+  IRequiredCharacterPosition,
+} from "../models";
 import {
   applyCharacterOverlays,
   mergeAudioTracks,
@@ -16,7 +20,7 @@ import { config } from "../config";
 /**
  * Default character position fallback (should rarely be needed now)
  */
-const DEFAULT_POSITION: Required<ICharacterPosition> = {
+const DEFAULT_POSITION: IRequiredCharacterPosition = {
   x: 5,
   y: 95,
   scale: 0.25,
@@ -65,7 +69,7 @@ export function buildVideoSegments(
     duration: number;
   }[],
   characters: ICharacter[],
-  characterPositions: Map<string, ICharacterPosition>
+  characterPositions: Map<string, IRequiredCharacterPosition>
 ) {
   return audioSegments.map((seg) => {
     const character = characters.find(
@@ -77,18 +81,10 @@ export function buildVideoSegments(
     const position =
       characterPositions.get(seg.characterId) || DEFAULT_POSITION;
 
-    // Ensure we have all required fields (should always be true after normalization)
-    const fullPosition: Required<ICharacterPosition> = {
-      x: position.x ?? DEFAULT_POSITION.x,
-      y: position.y ?? DEFAULT_POSITION.y,
-      scale: position.scale ?? DEFAULT_POSITION.scale,
-      anchor: position.anchor,
-    };
-
     return {
       characterId: seg.characterId,
       imagePath: character?.imageUrl || "",
-      position: fullPosition,
+      position,
       startTime: seg.startTime,
       endTime: seg.startTime + seg.duration,
     };

@@ -5,5 +5,6 @@ export {
   type IComposition,
   type IDialogueLine,
   type ICharacterPosition,
+  type IRequiredCharacterPosition,
   type ScreenType,
 } from "./composition.model";
