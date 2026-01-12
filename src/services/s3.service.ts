@@ -99,7 +99,9 @@ export async function uploadSubtitles(
   compositionId: string
 ): Promise<string> {
   const buffer = Buffer.from(content, "utf-8");
-  const filename = `${compositionId}.srt`;
+  const isAss = content.trim().startsWith("[Script Info]");
+  const extension = isAss ? "ass" : "srt";
+  const filename = `${compositionId}.${extension}`;
   return uploadToS3(buffer, "subtitles", filename, "text/plain");
 }
 

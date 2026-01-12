@@ -472,13 +472,30 @@ export async function addSubtitlesToVideo(
     `🔤 Using alignment=${alignment}, marginV=${marginV} for position="${position}"`
   );
 
-  // Convert SRT to ASS format with proper styling
-  const assContent = convertSrtToAss(srtContent, alignment, marginV);
+  // Check if content is already ASS format or needs conversion
+  const isAssContent = srtContent.trim().startsWith("[Script Info]");
+  let assContent: string;
+
+  if (isAssContent) {
+    console.log("🔤 Content is already ASS format, skipping conversion");
+    assContent = srtContent;
+  } else {
+    console.log("🔤 Converting SRT to ASS format");
+    assContent = convertSrtToAss(
+      srtContent,
+      alignment,
+      marginV,
+      undefined,
+      undefined
+    );
+  }
 
   // Write ASS to temp file
   const assPath = join(config.processingPath, `temp_${Date.now()}.ass`);
   const { writeFile, unlink } = await import("node:fs/promises");
   await writeFile(assPath, assContent, "utf-8");
+  console.log(`📝 ASS file written to: ${assPath}`);
+  console.log(`📝 ASS content preview:\n${assContent.substring(0, 500)}...`);
 
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
@@ -505,9 +522,21 @@ export async function addSubtitlesToVideo(
 function convertSrtToAss(
   srtContent: string,
   alignment: number,
-  marginV: number
+  marginV: number,
+  primaryColor?: string,
+  secondaryColor?: string
 ): string {
-  // ASS header with style definition
+  const hexToAssColor = (hex: string): string => {
+    const cleanHex = hex.replace(/^#/, "");
+    const r = parseInt(cleanHex.substring(0, 2), 16);
+    const g = parseInt(cleanHex.substring(2, 4), 16);
+    const b = parseInt(cleanHex.substring(4, 6), 16);
+    return `&H00${b.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${r.toString(16).padStart(2, "0")}`;
+  };
+
+  const primaryAssColor = primaryColor ? hexToAssColor(primaryColor) : "&H00FFFFFF";
+  const secondaryAssColor = secondaryColor ? hexToAssColor(secondaryColor) : "&H000000FF";
+
   const header = `[Script Info]
 Title: Generated Subtitles
 ScriptType: v4.00+
@@ -517,7 +546,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,${alignment},10,10,${marginV},1
+Style: Default,Arial,48,${primaryAssColor},${secondaryAssColor},&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,${alignment},10,10,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

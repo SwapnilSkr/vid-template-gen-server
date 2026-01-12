@@ -7,6 +7,14 @@ export interface SubtitleEntry {
   text: string;
 }
 
+export interface KaraokeConfig {
+  wordsPerChunkMin?: number;
+  wordsPerChunkMax?: number;
+  primaryColor?: string;
+  secondaryColor?: string;
+  chunkSpeedMultiplier?: number; // Lower = faster chunks
+}
+
 /**
  * Format time for SRT (HH:MM:SS,mmm)
  */
@@ -44,6 +52,146 @@ export function generateSrtContent(
   return entries
     .map((e) => `${e.index}\n${e.startTime} --> ${e.endTime}\n${e.text}\n`)
     .join("\n");
+}
+
+function hexToAssColor(hex: string): string {
+  const cleanHex = hex.replace(/^#/, "");
+  const r = parseInt(cleanHex.substring(0, 2), 16);
+  const g = parseInt(cleanHex.substring(2, 4), 16);
+  const b = parseInt(cleanHex.substring(4, 6), 16);
+  return `&H00${b.toString(16).padStart(2, "0")}${g
+    .toString(16)
+    .padStart(2, "0")}${r.toString(16).padStart(2, "0")}`;
+}
+
+function formatAssTime(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = (seconds % 60).toFixed(2);
+  return `${hours}:${minutes.toString().padStart(2, "0")}:${secs.padStart(
+    5,
+    "0"
+  )}`;
+}
+
+function getRandomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function splitTextIntoChunks(
+  text: string,
+  minWords: number,
+  maxWords: number
+): string[] {
+  const words = text.trim().split(/\s+/);
+  if (words.length === 0) return [""];
+
+  const chunks: string[] = [];
+  let i = 0;
+
+  while (i < words.length) {
+    const chunkSize = getRandomInt(minWords, maxWords);
+    const end = Math.min(i + chunkSize, words.length);
+    chunks.push(words.slice(i, end).join(" "));
+    i = end;
+  }
+
+  return chunks;
+}
+
+function splitChunkIntoWords(chunk: string): string[] {
+  return chunk
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+}
+
+export async function generateKaraokeAssContent(
+  dialogues: { text: string; startTime: number; duration: number }[],
+  config: KaraokeConfig = {},
+  alignment = 2,
+  marginV = 30
+): Promise<string> {
+  const {
+    wordsPerChunkMin = 2,
+    wordsPerChunkMax = 3,
+    primaryColor = "#FFFFFF",
+    secondaryColor = "#00FF00",
+    chunkSpeedMultiplier = 0.75,
+  } = config;
+
+  const primaryAssColor = hexToAssColor(primaryColor);
+  const secondaryAssColor = hexToAssColor(secondaryColor);
+  const greenAssColor = hexToAssColor(secondaryColor);
+  const whiteAssColor = hexToAssColor(primaryColor);
+
+  const header = `[Script Info]
+Title: Karaoke Subtitles
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,48,${primaryAssColor},${secondaryAssColor},&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,${alignment},10,10,${marginV},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+  const dialogueLines: string[] = [];
+
+  for (const dialogue of dialogues) {
+    const dialogueStartTime = dialogue.startTime;
+
+    const chunks = splitTextIntoChunks(
+      dialogue.text,
+      wordsPerChunkMin,
+      wordsPerChunkMax
+    );
+    const chunkDuration =
+      (dialogue.duration / chunks.length) * chunkSpeedMultiplier;
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkStartTime = dialogueStartTime + i * chunkDuration;
+
+      const currentChunk = chunks[i];
+      const words = splitChunkIntoWords(currentChunk);
+      const wordDuration = chunkDuration / words.length;
+
+      for (let j = 0; j < words.length; j++) {
+        const wordStartTime = chunkStartTime + j * wordDuration;
+        const wordEndTime = chunkStartTime + (j + 1) * wordDuration;
+
+        const startTimeStr = formatAssTime(wordStartTime);
+        const endTimeStr = formatAssTime(wordEndTime);
+
+        let coloredText = "";
+        for (let k = 0; k < words.length; k++) {
+          if (k === j) {
+            coloredText += `{\\1c&${greenAssColor}}${words[k]}`;
+          } else {
+            coloredText += `{\\1c&${whiteAssColor}}${words[k]}`;
+          }
+          if (k < words.length - 1) {
+            coloredText += " ";
+          }
+        }
+
+        const dialogueLine = `Dialogue: 0,${startTimeStr},${endTimeStr},Default,,0,0,0,,${coloredText}`;
+        console.log(
+          `🎤 Word ${j + 1}/${words.length} in chunk: ${dialogueLine.substring(
+            0,
+            120
+          )}...`
+        );
+        dialogueLines.push(dialogueLine);
+      }
+    }
+  }
+
+  return header + dialogueLines.join("\n") + "\n";
 }
 
 /**

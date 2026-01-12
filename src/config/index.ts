@@ -33,6 +33,18 @@ export const config = {
   // Limits
   maxFileSizeMB: parseInt(process.env.MAX_FILE_SIZE_MB || "2048"),
   maxVideoDurationSeconds: parseInt(process.env.MAX_VIDEO_DURATION || "300"),
+
+  // Subtitle colors for karaoke highlighting
+  subtitleColors: {
+    primary: process.env.SUBTITLE_PRIMARY_COLOR || "#FFFFFF",
+    secondary: process.env.SUBTITLE_SECONDARY_COLOR || "#00FF00",
+  },
+
+  // Subtitle chunk speed multiplier (lower = faster chunks)
+  // 1.0 = normal, 0.75 = 1.33x faster, 0.5 = 2x faster, 0.33 = 3x faster
+  chunkSpeedMultiplier: parseFloat(
+    process.env.CHUNK_SPEED_MULTIPLIER || "0.75"
+  ),
 };
 
 // Validate required config

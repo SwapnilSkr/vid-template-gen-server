@@ -13,7 +13,6 @@ import {
   trimVideo,
 } from "../services/ffmpeg.service";
 import { uploadToS3, uploadSubtitles } from "../services/s3.service";
-import { generateSrtContent } from "../services/subtitle.service";
 import { generateFilename } from "../utils";
 import { config } from "../config";
 
@@ -139,26 +138,45 @@ export async function processVideoWithAudioAndSubtitles(
     audioSegments
   );
 
-  // Generate and add subtitles
-  const srtContent = generateSrtContent(
+  // Generate and add subtitles with karaoke highlighting
+  const { generateKaraokeAssContent } = await import("../services/subtitle.service");
+
+  const subtitlePos = composition.subtitlePosition || "bottom";
+
+  const styleConfig = {
+    top: { alignment: 8, marginV: 20 },
+    center: { alignment: 5, marginV: 0 },
+    bottom: { alignment: 2, marginV: 30 },
+  };
+  const { alignment, marginV } = styleConfig[subtitlePos];
+
+  const assContent = await generateKaraokeAssContent(
     composition.generatedScript.map((s) => ({
       text: s.text,
       startTime: s.startTime,
       duration: s.duration,
-    }))
+    })),
+    {
+      wordsPerChunkMin: 2,
+      wordsPerChunkMax: 3,
+      primaryColor: config.subtitleColors.primary,
+      secondaryColor: config.subtitleColors.secondary,
+      chunkSpeedMultiplier: config.chunkSpeedMultiplier,
+    },
+    alignment,
+    marginV
   );
 
   const subtitlesUrl = await uploadSubtitles(
-    srtContent,
+    assContent,
     filenameSuffix ? `${compositionId}_${filenameSuffix}` : compositionId
   );
 
-  const subtitlePos = composition.subtitlePosition || "bottom";
   console.log(`🎯 addSubtitlesToVideo called with position: ${subtitlePos}`);
 
   const videoWithSubtitles = await addSubtitlesToVideo(
     videoWithAudio,
-    srtContent,
+    assContent,
     undefined,
     subtitlePos
   );
