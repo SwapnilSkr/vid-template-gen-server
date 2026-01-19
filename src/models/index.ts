@@ -8,4 +8,5 @@ export {
   type IRequiredCharacterPosition,
   type ScreenType,
   type SubtitleAnimationType,
+  type CharacterAnimationType,
 } from "./composition.model";

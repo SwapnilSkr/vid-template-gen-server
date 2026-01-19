@@ -106,6 +106,8 @@ function normalizePosition(
     y: position.y ?? coords.y,
     scale: position.scale ?? (screenType === "mobile" ? 0.3 : 0.25),
     anchor: position.anchor,
+    animation: position.animation ?? "none",
+    animationDuration: position.animationDuration ?? 0.3,
   };
 }
 
@@ -134,6 +136,8 @@ function getDefaultCharacterPosition(
       y: 85,
       scale: 0.3,
       anchor: "bottom-left" as const,
+      animation: "none" as const,
+      animationDuration: 0.3,
     };
   }
 
@@ -150,6 +154,8 @@ function getDefaultCharacterPosition(
     y: 90,
     scale: 0.25,
     anchor: "bottom-left" as const,
+    animation: "none" as const,
+    animationDuration: 0.3,
   };
 }
 

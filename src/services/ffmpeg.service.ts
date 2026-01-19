@@ -208,6 +208,7 @@ export async function overlayImage(
 
 /**
  * Apply multiple character overlays to a video
+ * Supports animations: 'none' (static), 'slide_in' (slides from anchor direction)
  */
 export async function applyCharacterOverlays(
   videoPath: string,
@@ -241,13 +242,16 @@ export async function applyCharacterOverlays(
     segments.forEach((segment, index) => {
       const inputIndex = index + 1;
       const scaledSize = Math.round(imageSize * segment.position.scale);
-      const overlayPos = calculateOverlayPosition(
+
+      // Calculate static position
+      const staticPos = calculateOverlayPosition(
         segment.position,
         videoMeta.width,
         videoMeta.height,
         imageSize,
         imageSize
       );
+      const [staticX, staticY] = staticPos.split(":").map(Number);
 
       const scaledLabel = `scaled${index}`;
       const outputLabel = index === segments.length - 1 ? "out" : `v${index}`;
@@ -255,8 +259,39 @@ export async function applyCharacterOverlays(
       filters.push(
         `[${inputIndex}:v]scale=${scaledSize}:${scaledSize}[${scaledLabel}]`
       );
+
+      // Determine overlay position based on animation type
+      let overlayExpr: string;
+      const animation = segment.position.animation || "none";
+
+      if (animation === "slide_in_left" || animation === "slide_in_right") {
+        // Use animationDuration from position (default 0.3s)
+        const animDuration = segment.position.animationDuration || 0.3;
+
+        const isRightSlide = animation === "slide_in_right";
+
+        const startT = segment.startTime;
+        const endAnim = startT + animDuration;
+
+        if (isRightSlide) {
+          // Slide from right edge (offscreen) to target position
+          const offscreenX = videoMeta.width;
+          // Progress: (t - startT) / animDuration, clamped 0-1
+          // x = offscreenX + (staticX - offscreenX) * progress = offscreenX - (offscreenX - staticX) * progress
+          overlayExpr = `'if(lt(t,${startT}),${offscreenX},if(lt(t,${endAnim}),${offscreenX}-(${offscreenX}-${staticX})*(t-${startT})/${animDuration},${staticX}))':'${staticY}'`;
+        } else {
+          // Slide from left edge (offscreen) to target position
+          const offscreenX = -scaledSize;
+          // x = offscreenX + (staticX - offscreenX) * progress
+          overlayExpr = `'if(lt(t,${startT}),${offscreenX},if(lt(t,${endAnim}),${offscreenX}+(${staticX}-${offscreenX})*(t-${startT})/${animDuration},${staticX}))':'${staticY}'`;
+        }
+      } else {
+        // Static position (no animation)
+        overlayExpr = `${staticX}:${staticY}`;
+      }
+
       filters.push(
-        `[${currentOutput}][${scaledLabel}]overlay=${overlayPos}:enable='between(t,${segment.startTime},${segment.endTime})'[${outputLabel}]`
+        `[${currentOutput}][${scaledLabel}]overlay=${overlayExpr}:enable='between(t,${segment.startTime},${segment.endTime})'[${outputLabel}]`
       );
 
       currentOutput = outputLabel;
@@ -276,6 +311,7 @@ export async function applyCharacterOverlays(
       .run();
   });
 }
+
 /**
  * Check if a video/audio file has an audio stream
  */
@@ -534,8 +570,12 @@ function convertSrtToAss(
     return `&H00${b.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${r.toString(16).padStart(2, "0")}`;
   };
 
-  const primaryAssColor = primaryColor ? hexToAssColor(primaryColor) : "&H00FFFFFF";
-  const secondaryAssColor = secondaryColor ? hexToAssColor(secondaryColor) : "&H000000FF";
+  const primaryAssColor = primaryColor
+    ? hexToAssColor(primaryColor)
+    : "&H00FFFFFF";
+  const secondaryAssColor = secondaryColor
+    ? hexToAssColor(secondaryColor)
+    : "&H000000FF";
 
   const header = `[Script Info]
 Title: Generated Subtitles

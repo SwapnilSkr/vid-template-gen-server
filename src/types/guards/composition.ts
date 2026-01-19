@@ -15,6 +15,14 @@ export const CharacterPositionSchema = t.Object({
     t.Literal("bottom-right"),
     t.Literal("center"),
   ]),
+  animation: t.Optional(
+    t.Union([
+      t.Literal("none"),
+      t.Literal("slide_in_left"),
+      t.Literal("slide_in_right"),
+    ])
+  ),
+  animationDuration: t.Optional(t.Number({ minimum: 0.1, maximum: 3 })),
 });
 
 /**

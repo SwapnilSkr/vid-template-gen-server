@@ -24,6 +24,8 @@ const DEFAULT_POSITION: IRequiredCharacterPosition = {
   y: 95,
   scale: 0.25,
   anchor: "bottom-left",
+  animation: "none",
+  animationDuration: 0.3,
 };
 
 /**
@@ -139,7 +141,8 @@ export async function processVideoWithAudioAndSubtitles(
   );
 
   // Generate and add subtitles with karaoke highlighting
-  const { generateKaraokeAssContent } = await import("../services/subtitle.service");
+  const { generateKaraokeAssContent } =
+    await import("../services/subtitle.service");
 
   const subtitlePos = composition.subtitlePosition || "bottom";
 

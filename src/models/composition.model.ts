@@ -15,6 +15,17 @@ export type ScreenType = "mobile" | "desktop";
 export type SubtitleAnimationType = "none" | "pop" | "shake" | "reel";
 
 /**
+ * Character animation type - determines the animation style for character overlays
+ * - none: No animation, character appears immediately
+ * - slide_in_left: Character slides in from left edge
+ * - slide_in_right: Character slides in from right edge
+ */
+export type CharacterAnimationType =
+  | "none"
+  | "slide_in_left"
+  | "slide_in_right";
+
+/**
  * Character position configuration
  * x, y, and scale are optional - if not provided, calculated from anchor and screenType
  */
@@ -23,6 +34,8 @@ export interface ICharacterPosition {
   y?: number; // Percentage (0-100)
   scale?: number; // Scale factor (e.g., 0.25 = 25%)
   anchor: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+  animation?: CharacterAnimationType; // Animation type for character appearance
+  animationDuration?: number; // Animation duration in seconds (default: 0.3)
 }
 
 /**
@@ -33,6 +46,8 @@ export interface IRequiredCharacterPosition {
   y: number; // Percentage (0-100)
   scale: number; // Scale factor (e.g., 0.25 = 25%)
   anchor: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+  animation: CharacterAnimationType; // Animation type for character appearance
+  animationDuration: number; // Animation duration in seconds
 }
 
 /**
@@ -90,6 +105,18 @@ const characterPositionSchema = new Schema<ICharacterPosition>(
       type: String,
       enum: ["top-left", "top-right", "bottom-left", "bottom-right", "center"],
       required: true,
+    },
+    animation: {
+      type: String,
+      enum: ["none", "slide_in_left", "slide_in_right"],
+      default: "none",
+    },
+    animationDuration: {
+      type: Number,
+      required: false,
+      min: 0.1,
+      max: 3,
+      default: 0.3,
     },
   },
   { _id: false }
