@@ -17,7 +17,7 @@ import { calculateDialogueTiming } from "./subtitle.service";
 import { getTemplate } from "./template.service";
 import { ensureDir, cleanupFiles } from "../utils";
 import { config } from "../config";
-import { getErrorMessage } from "../types";
+import { getErrorMessage, type AudioSegment } from "../types";
 import {
   recalculateTimings,
   processVideoWithAudioAndSubtitles,
@@ -296,6 +296,9 @@ async function processComposition(compositionId: string): Promise<void> {
   const template = composition.template as unknown as PopulatedTemplate;
   const characters = template.characters as ICharacter[];
 
+  // Track generated/downloaded files for cleanup on failure
+  let audioSegments: AudioSegment[] = [];
+
   try {
     // Step 1: Generate script using AI
     await updateCompositionStatus(compositionId, "generating_script", 5);
@@ -339,14 +342,7 @@ async function processComposition(compositionId: string): Promise<void> {
 
     // Step 2: Generate audio for each dialogue and upload to S3
     await ensureDir(config.processingPath);
-    const audioSegments: {
-      characterId: string;
-      text: string;
-      audioPath: string;
-      speechUrl: string;
-      startTime: number;
-      duration: number;
-    }[] = [];
+    audioSegments = [];
 
     for (let i = 0; i < composition.generatedScript.length; i++) {
       const line = composition.generatedScript[i];
@@ -427,6 +423,16 @@ async function processComposition(compositionId: string): Promise<void> {
     console.log(`🎉 Composition complete: ${composition._id}`);
   } catch (error: unknown) {
     console.error(`Composition ${compositionId} failed:`, error);
+
+    // Cleanup generated audio segments on failure
+    if (audioSegments && audioSegments.length > 0) {
+      const audioPaths = audioSegments.map((seg) => seg.audioPath);
+      await cleanupFiles(audioPaths);
+      console.log(
+        `🧹 Cleaned up ${audioPaths.length} audio files after failure`
+      );
+    }
+
     await updateCompositionStatus(
       compositionId,
       "failed",
@@ -567,6 +573,9 @@ async function regenerateCompositionAsync(
   const compositionId = composition._id.toString();
   const template = composition.template as unknown as PopulatedTemplate;
 
+  // Track generated/downloaded files for cleanup on failure
+  let audioSegments: AudioSegment[] = [];
+
   try {
     // Apply custom delays if provided
     if (customDelays && customDelays.length > 0) {
@@ -608,13 +617,7 @@ async function regenerateCompositionAsync(
 
     // Download audio files from S3 to local
     await ensureDir(config.processingPath);
-    const audioSegments: {
-      characterId: string;
-      text: string;
-      audioPath: string;
-      startTime: number;
-      duration: number;
-    }[] = [];
+    audioSegments = [];
 
     for (let i = 0; i < composition.generatedScript.length; i++) {
       const line = composition.generatedScript[i];
@@ -681,6 +684,16 @@ async function regenerateCompositionAsync(
     console.log(`🔄 Composition regenerated: ${composition._id}`);
   } catch (error: unknown) {
     console.error(`Composition regeneration ${compositionId} failed:`, error);
+
+    // Cleanup downloaded audio segments on failure
+    if (audioSegments && audioSegments.length > 0) {
+      const audioPaths = audioSegments.map((seg) => seg.audioPath);
+      await cleanupFiles(audioPaths);
+      console.log(
+        `🧹 Cleaned up ${audioPaths.length} downloaded audio files after failure`
+      );
+    }
+
     composition.status = "failed";
     composition.error = getErrorMessage(error);
     await composition.save();

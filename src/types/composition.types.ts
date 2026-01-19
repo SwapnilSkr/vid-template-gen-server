@@ -50,6 +50,7 @@ export interface AudioSegment {
   audioPath: string;
   startTime: number;
   duration: number;
+  speechUrl?: string;
 }
 
 export interface VideoSegment {
