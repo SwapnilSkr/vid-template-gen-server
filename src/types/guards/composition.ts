@@ -26,6 +26,16 @@ export const ScreenTypeSchema = t.Union([
 ]);
 
 /**
+ * Subtitle animation type enum
+ */
+export const SubtitleAnimationSchema = t.Union([
+  t.Literal("none"),
+  t.Literal("pop"),
+  t.Literal("shake"),
+  t.Literal("reel"),
+]);
+
+/**
  * Create composition request body
  */
 export const CreateCompositionBody = t.Object({
@@ -36,6 +46,7 @@ export const CreateCompositionBody = t.Object({
   subtitlePosition: t.Optional(
     t.Union([t.Literal("top"), t.Literal("center"), t.Literal("bottom")])
   ),
+  subtitleAnimation: t.Optional(SubtitleAnimationSchema),
   characterPositions: t.Optional(t.Record(t.String(), CharacterPositionSchema)),
 });
 
@@ -50,6 +61,7 @@ export const RegenerateCompositionBody = t.Object({
   subtitlePosition: t.Optional(
     t.Union([t.Literal("top"), t.Literal("center"), t.Literal("bottom")])
   ),
+  subtitleAnimation: t.Optional(SubtitleAnimationSchema),
   characterPositions: t.Optional(t.Record(t.String(), CharacterPositionSchema)),
 });
 

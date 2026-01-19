@@ -10,6 +10,11 @@ import { Schema, model, type Document, type Types } from "mongoose";
 export type ScreenType = "mobile" | "desktop";
 
 /**
+ * Subtitle animation type - determines the animation style for karaoke subtitles
+ */
+export type SubtitleAnimationType = "none" | "pop" | "shake" | "reel";
+
+/**
  * Character position configuration
  * x, y, and scale are optional - if not provided, calculated from anchor and screenType
  */
@@ -54,6 +59,7 @@ export interface IComposition extends Document {
   characterPositions: Map<string, IRequiredCharacterPosition>;
   generatedScript: IDialogueLine[];
   subtitlePosition?: "top" | "center" | "bottom";
+  subtitleAnimation: SubtitleAnimationType;
   status:
     | "pending"
     | "generating_script"
@@ -171,6 +177,11 @@ const compositionSchema = new Schema<IComposition>(
       type: String,
       enum: ["top", "center", "bottom"],
       default: "bottom",
+    },
+    subtitleAnimation: {
+      type: String,
+      enum: ["none", "pop", "shake", "reel"],
+      default: "none",
     },
     outputUrl: String,
     subtitlesUrl: String,

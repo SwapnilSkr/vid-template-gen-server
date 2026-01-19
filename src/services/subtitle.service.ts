@@ -13,6 +13,7 @@ export interface KaraokeConfig {
   primaryColor?: string;
   secondaryColor?: string;
   chunkSpeedMultiplier?: number; // Lower = faster chunks
+  animationType?: "none" | "pop" | "shake" | "reel";
 }
 
 /**
@@ -106,6 +107,41 @@ function splitChunkIntoWords(chunk: string): string[] {
     .filter((word) => word.length > 0);
 }
 
+/**
+ * Get ASS animation tags for a given animation type
+ * Returns opening tags for the active word
+ */
+function getAnimationTags(
+  animationType: "none" | "pop" | "shake" | "reel",
+  wordDurationMs: number
+): string {
+  if (animationType === "none") {
+    return "";
+  }
+
+  // Calculate timing for animation (use first ~40% of word duration for effect)
+  const animDuration = Math.min(Math.floor(wordDurationMs * 0.4), 200);
+  const halfAnim = Math.floor(animDuration / 2);
+
+  switch (animationType) {
+    case "pop":
+      // Scale up to 120% then back to 100%
+      return `{\\t(0,${halfAnim},\\fscx120\\fscy120)\\t(${halfAnim},${animDuration},\\fscx100\\fscy100)}`;
+    case "shake": {
+      // Rotate right, left, then back to center
+      const third = Math.floor(animDuration / 3);
+      return `{\\t(0,${third},\\frz8)\\t(${third},${third * 2},\\frz-8)\\t(${third * 2},${animDuration},\\frz0)}`;
+    }
+    case "reel": {
+      // Slide in from left with fade in (reel-style)
+      // Move from -200px left to center, with fade
+      return `{\\move(-200,0,0,0,0,${animDuration})\\fad(${Math.floor(animDuration * 0.3)},0)}`;
+    }
+    default:
+      return "";
+  }
+}
+
 export async function generateKaraokeAssContent(
   dialogues: { text: string; startTime: number; duration: number }[],
   config: KaraokeConfig = {},
@@ -118,6 +154,7 @@ export async function generateKaraokeAssContent(
     primaryColor = "#FFFFFF",
     secondaryColor = "#00FF00",
     chunkSpeedMultiplier = 0.75,
+    animationType = "none",
   } = config;
 
   const primaryAssColor = hexToAssColor(primaryColor);
@@ -170,7 +207,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         let coloredText = "";
         for (let k = 0; k < words.length; k++) {
           if (k === j) {
-            coloredText += `{\\1c&${greenAssColor}}${words[k]}`;
+            // Active word: apply color and animation
+            const wordDurationMs = Math.floor(wordDuration * 1000);
+            const animTags = getAnimationTags(animationType, wordDurationMs);
+            coloredText += `{\\1c&${greenAssColor}}${animTags}${words[k]}`;
           } else {
             coloredText += `{\\1c&${whiteAssColor}}${words[k]}`;
           }

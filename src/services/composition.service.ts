@@ -8,6 +8,7 @@ import {
   type ICharacterPosition,
   type IRequiredCharacterPosition,
   type ScreenType,
+  type SubtitleAnimationType,
 } from "../models";
 import { generateScript } from "./ai.service";
 import { generateSpeech } from "./elevenlabs.service";
@@ -42,6 +43,7 @@ interface CreateCompositionOptions {
   title?: string;
   screenType?: ScreenType;
   subtitlePosition?: "top" | "center" | "bottom";
+  subtitleAnimation?: SubtitleAnimationType;
   characterPositions?: Map<string, ICharacterPosition>;
 }
 
@@ -53,6 +55,7 @@ interface RegenerateCompositionOptions {
   delays?: number[];
   screenType?: ScreenType;
   subtitlePosition?: "top" | "center" | "bottom";
+  subtitleAnimation?: SubtitleAnimationType;
   characterPositions?: Map<string, ICharacterPosition>;
 }
 
@@ -123,8 +126,8 @@ function getDefaultCharacterPosition(
       totalCharacters === 1
         ? [50]
         : totalCharacters === 2
-        ? [25, 75]
-        : [15, 50, 85];
+          ? [25, 75]
+          : [15, 50, 85];
 
     return {
       x: xPositions[characterIndex % xPositions.length],
@@ -139,8 +142,8 @@ function getDefaultCharacterPosition(
     totalCharacters === 1
       ? [50]
       : totalCharacters === 2
-      ? [10, 90]
-      : [10, 50, 90];
+        ? [10, 90]
+        : [10, 50, 90];
 
   return {
     x: xPositions[characterIndex % xPositions.length],
@@ -185,6 +188,7 @@ export async function createComposition(
     title,
     screenType = "mobile",
     subtitlePosition = "bottom",
+    subtitleAnimation = "none",
     characterPositions,
   } = options;
 
@@ -229,6 +233,7 @@ export async function createComposition(
     screenType,
     characterPositions: finalPositions,
     subtitlePosition,
+    subtitleAnimation,
     status: "pending",
     progress: 0,
     generatedScript: [],
@@ -465,6 +470,7 @@ export async function regenerateComposition(
     delays,
     screenType,
     subtitlePosition,
+    subtitleAnimation,
     characterPositions,
   } = options;
 
@@ -522,6 +528,11 @@ export async function regenerateComposition(
   // Update subtitle position if provided
   if (subtitlePosition) {
     composition.subtitlePosition = subtitlePosition;
+  }
+
+  // Update subtitle animation if provided
+  if (subtitleAnimation) {
+    composition.subtitleAnimation = subtitleAnimation;
   }
 
   await composition.save();

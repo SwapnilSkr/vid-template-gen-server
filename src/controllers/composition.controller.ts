@@ -11,7 +11,11 @@ import type {
   TRegenerateCompositionBody,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
-import type { ICharacterPosition, ScreenType } from "../models";
+import type {
+  ICharacterPosition,
+  ScreenType,
+  SubtitleAnimationType,
+} from "../models";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -57,6 +61,9 @@ export async function createCompositionController({
       title: body.title,
       screenType: body.screenType as ScreenType | undefined,
       subtitlePosition: body.subtitlePosition,
+      subtitleAnimation: body.subtitleAnimation as
+        | SubtitleAnimationType
+        | undefined,
       characterPositions: characterPositionsMap,
     });
 
@@ -162,6 +169,9 @@ export async function generateCompositionController({
       title: body.title,
       screenType: body.screenType as ScreenType | undefined,
       subtitlePosition: body.subtitlePosition,
+      subtitleAnimation: body.subtitleAnimation as
+        | SubtitleAnimationType
+        | undefined,
       characterPositions: characterPositionsMap,
     });
 
@@ -224,6 +234,9 @@ export async function regenerateCompositionController({
       delays: body.delays,
       screenType: body.screenType as ScreenType | undefined,
       subtitlePosition: body.subtitlePosition,
+      subtitleAnimation: body.subtitleAnimation as
+        | SubtitleAnimationType
+        | undefined,
       characterPositions: characterPositionsMap,
     });
 

@@ -7,4 +7,5 @@ export {
   type ICharacterPosition,
   type IRequiredCharacterPosition,
   type ScreenType,
+  type SubtitleAnimationType,
 } from "./composition.model";
