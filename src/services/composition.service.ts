@@ -22,6 +22,10 @@ import {
   recalculateTimings,
   processVideoWithAudioAndSubtitles,
 } from "../helpers/composition.helper";
+import {
+  enqueueComposition,
+  enqueueCompositionRegeneration,
+} from "../queue/queues";
 
 // ============================================
 // Types
@@ -250,16 +254,8 @@ export async function createComposition(
     `🎬 Created composition: ${composition._id} (${screenType} mode)`
   );
 
-  // Start async processing
-  processComposition(composition._id.toString()).catch((error: unknown) => {
-    console.error("Composition processing failed:", error);
-    updateCompositionStatus(
-      composition._id.toString(),
-      "failed",
-      0,
-      getErrorMessage(error)
-    );
-  });
+  // Enqueue processing (BullMQ — survives restarts, retries on failure)
+  await enqueueComposition(composition._id.toString());
 
   return composition;
 }
@@ -281,9 +277,9 @@ async function updateCompositionStatus(
 }
 
 /**
- * Process composition asynchronously
+ * Process composition asynchronously. Invoked by the composition-processing worker.
  */
-async function processComposition(compositionId: string): Promise<void> {
+export async function processComposition(compositionId: string): Promise<void> {
   const composition = await Composition.findById(compositionId).populate({
     path: "template",
     populate: {
@@ -549,29 +545,31 @@ export async function regenerateComposition(
 
   await composition.save();
 
-  // Start async regeneration
-  regenerateCompositionAsync(composition, characters, delays).catch(
-    async (error: unknown) => {
-      console.error("Composition regeneration failed:", error);
-      composition.status = "failed";
-      composition.error = getErrorMessage(error);
-      await composition.save();
-    }
-  );
+  // Enqueue async regeneration (BullMQ — survives restarts, retries on failure)
+  await enqueueCompositionRegeneration(compositionId, delays);
 
   return composition;
 }
 
 /**
- * Async regeneration process - reuses existing speech files
+ * Async regeneration process - reuses existing speech files.
+ * Invoked by the composition-regeneration worker; re-fetches the composition
+ * (already updated/saved by `regenerateComposition` above) by id.
  */
-async function regenerateCompositionAsync(
-  composition: IComposition,
-  characters: ICharacter[],
+export async function regenerateCompositionAsync(
+  compositionId: string,
   customDelays?: number[]
 ): Promise<void> {
-  const compositionId = composition._id.toString();
+  const composition = await Composition.findById(compositionId).populate({
+    path: "template",
+    populate: {
+      path: "characters",
+    },
+  });
+  if (!composition) throw new Error("Composition not found");
+
   const template = composition.template as unknown as PopulatedTemplate;
+  const characters = template.characters as ICharacter[];
 
   // Track generated/downloaded files for cleanup on failure
   let audioSegments: AudioSegment[] = [];

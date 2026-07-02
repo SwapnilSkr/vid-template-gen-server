@@ -21,3 +21,23 @@ export * from "./character.service";
 
 // Composition orchestration
 export * from "./composition.service";
+
+// Reel (scene-graph) pipeline
+export * from "./openrouter-media.service";
+export * from "./reel-script.service";
+export * from "./reel-render.service";
+export * from "./reel-gameplay.service";
+export * from "./reel-revoice.service";
+export * from "./reel-review.service";
+export * from "./reddit-card.service";
+export * from "./gameplay-ingest.service";
+export * from "./story.service";
+export * from "./reel.service";
+export * from "./trend-reference.service";
+export * from "./trend-scout.service";
+export * from "./trend-insight.service";
+export * from "./voice-sample.service";
+export * from "./s3-reconciliation.service";
+
+// Distribution (publish rendered reels to platforms)
+export * from "./youtube-publish.service";

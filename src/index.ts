@@ -7,10 +7,16 @@ import {
   characterRoutes,
   compositionRoutes,
   generateRoutes,
+  reelRoutes,
   voiceRoutes,
   audioRoutes,
+  metaRoutes,
+  trendRoutes,
+  maintenanceRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
+import { startStoryTopUpScheduler } from "./services/story-scheduler.service";
+import { startWorkers } from "./queue/workers";
 
 // Initialize application
 async function initialize() {
@@ -70,6 +76,7 @@ const app = new Elysia({
       compositions: "/api/compositions",
       voices: "/api/voices",
       generate: "/api/generate",
+      reels: "/api/reels",
       health: "/health",
     },
     usage: {
@@ -89,13 +96,19 @@ const app = new Elysia({
   .use(characterRoutes)
   .use(compositionRoutes)
   .use(generateRoutes)
+  .use(reelRoutes)
   .use(voiceRoutes)
-  .use(audioRoutes);
+  .use(audioRoutes)
+  .use(metaRoutes)
+  .use(trendRoutes)
+  .use(maintenanceRoutes);
 
 // Start server
 initialize()
   .then(() => {
     app.listen(config.port);
+    startWorkers();
+    startStoryTopUpScheduler();
 
     console.log(`
 ╔════════════════════════════════════════════════════════╗
