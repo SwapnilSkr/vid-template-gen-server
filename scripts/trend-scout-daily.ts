@@ -14,9 +14,8 @@
 //
 // Needs YOUTUBE_DATA_API_KEY in env.
 import { connectDatabase, disconnectDatabase } from "../src/db/connection";
-import { scoutAllGenres } from "../src/services/trend-scout.service";
+import { scoutAllGenres, getScoutTargets } from "../src/services/trend-scout.service";
 import { refreshAllTrendInsights } from "../src/services/trend-insight.service";
-import { REDDIT_GENRES } from "../src/services/story.service";
 
 const mode = process.argv[2] === "month" ? "month" : "week";
 const now = new Date();
@@ -25,15 +24,15 @@ const scanWindow = mode === "month" ? "monthly_scan" : "weekly_scan";
 
 await connectDatabase();
 
-console.log(`📊 Trend scout (${mode} window)...`);
+console.log(`📊 Trend scout (${mode} window, all niches)...`);
 const results = await scoutAllGenres({ publishedAfter, scanWindow });
 for (const r of results) {
-  console.log(`  ${r.genre}: found ${r.found}, upserted ${r.upserted}${r.error ? ` (${r.error})` : ""}`);
+  console.log(`  ${r.niche}/${r.genre}: found ${r.found}, upserted ${r.upserted}${r.error ? ` (${r.error})` : ""}`);
 }
 
 console.log("🧠 Refreshing trend-insight digests...");
-const digests = await refreshAllTrendInsights(Object.keys(REDDIT_GENRES));
-console.log(`  refreshed ${digests.length} genre digest(s)`);
+const digests = await refreshAllTrendInsights(getScoutTargets());
+console.log(`  refreshed ${digests.length} niche/genre digest(s)`);
 
 console.log(`\n✅ Trend scout (${mode}) complete.`);
 await disconnectDatabase();

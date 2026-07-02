@@ -7,14 +7,14 @@
 //   bun scripts/refresh-trend-insights.ts
 import { connectDatabase, disconnectDatabase } from "../src/db/connection";
 import { refreshAllTrendInsights } from "../src/services/trend-insight.service";
-import { REDDIT_GENRES } from "../src/services/story.service";
+import { getScoutTargets } from "../src/services/trend-scout.service";
 
 await connectDatabase();
 
-const digests = await refreshAllTrendInsights(Object.keys(REDDIT_GENRES));
-console.log(`🧠 Refreshed ${digests.length} genre digest(s):`);
+const digests = await refreshAllTrendInsights(getScoutTargets());
+console.log(`🧠 Refreshed ${digests.length} niche/genre digest(s):`);
 for (const d of digests) {
-  console.log(`\n— ${d.genre} (${d.sampleSize} samples) —\n${d.digest}`);
+  console.log(`\n— ${d.niche}/${d.genre} (${d.sampleSize} samples) —\n${d.digest}`);
 }
 
 await disconnectDatabase();

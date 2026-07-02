@@ -4,16 +4,24 @@ import { REDDIT_GENRES } from "./story.service";
 import { getErrorMessage } from "../types";
 
 // ============================================
-// Trend scout — pulls top-performing YouTube Shorts per Reddit genre via the
+// Trend scout — pulls top-performing YouTube Shorts per niche/genre via the
 // YouTube Data API v3 (read-only API key, separate from the OAuth publish
 // credentials) and upserts them into TrendReference. Feeds:
-//  1. the trends dashboard (raw reference browsing)
+//  1. the trends dashboard (raw reference browsing, niche-filterable)
 //  2. trend-insight.service's digest (compact context for script/thumbnail prompts)
 //  3. posting-time analysis (dayOfWeek/hourUtc bucketed from postedAt)
 //
-// Quota: search.list = 100 units, videos.list = 1 unit. ~14 Reddit genres ×
-// 1 search + 1 videos call ≈ 1,414 units per full scan — the 10,000/day free
-// quota comfortably covers a daily (rolling week) scan.
+// Multi-niche since 2026-07-03: Reddit genres come from `REDDIT_GENRES`
+// (story.service.ts, already has search-friendly labels); other niches
+// (horror today) don't have Reddit-style sub-genres, so they get a small,
+// hand-picked set of search angles instead — see `SCOUT_TARGETS`. Every
+// target carries an explicit `niche`, so `TrendReference.niche` cleanly
+// separates "reddit" from "horror" (or any future niche) — no query ever
+// mixes across niches, and the dashboard/digest can filter by niche directly.
+//
+// Quota: search.list = 100 units, videos.list = 1 unit. ~14 Reddit genres +
+// 4 horror targets × (1 search + 1 videos call) ≈ 1,814 units per full scan —
+// the 10,000/day free quota comfortably covers a daily (rolling week) scan.
 // ============================================
 
 const YT_API_BASE = "https://www.googleapis.com/youtube/v3";
@@ -21,14 +29,54 @@ const YT_API_BASE = "https://www.googleapis.com/youtube/v3";
  * own `videoDuration=short` filter is coarse (<4min), so re-check exactly. */
 const SHORTS_MAX_DURATION_SEC = 183;
 
+export interface ScoutTarget {
+  niche: string;
+  genre: string; // TrendReference.genre + the TrendInsight digest key
+  displayLabel: string;
+  query: string; // the actual YouTube search query
+}
+
+/** Horror doesn't split into Reddit-style sub-genres (niche-styles.ts treats
+ * it as one niche with a style pool) — these are search angles instead,
+ * covering the format's real range: told-as-true stories, written
+ * creepypasta, and the analog-horror/liminal-space aesthetic already
+ * validated as horror's lead style (see DECISIONS.md #27). */
+const HORROR_TARGETS: ScoutTarget[] = [
+  { niche: "horror", genre: "urban_legend", displayLabel: "Urban Legend", query: "scary urban legend true story shorts" },
+  { niche: "horror", genre: "creepypasta", displayLabel: "Creepypasta", query: "creepypasta horror story shorts" },
+  { niche: "horror", genre: "paranormal", displayLabel: "Paranormal / Real Encounter", query: "true scary story paranormal encounter shorts" },
+  { niche: "horror", genre: "analog_horror", displayLabel: "Analog Horror / Liminal", query: "analog horror backrooms liminal space shorts" },
+];
+
+function redditTargets(): ScoutTarget[] {
+  return Object.entries(REDDIT_GENRES).map(([id, meta]) => ({
+    niche: "reddit",
+    genre: id,
+    displayLabel: meta.label,
+    query: `${meta.label} reddit story`,
+  }));
+}
+
+/** All scout targets, optionally filtered to one niche. */
+export function getScoutTargets(niche?: string): ScoutTarget[] {
+  const all = [...redditTargets(), ...HORROR_TARGETS];
+  return niche ? all.filter((t) => t.niche === niche) : all;
+}
+
+/** Niches the trend scout currently covers (for UI niche filters). */
+export function getScoutNiches(): string[] {
+  return [...new Set(getScoutTargets().map((t) => t.niche))];
+}
+
 export interface ScoutOptions {
   publishedAfter: Date;
   publishedBefore?: Date;
   scanWindow: TrendScanWindow;
-  maxResults?: number; // per genre, default 15
+  maxResults?: number; // per target, default 15
 }
 
 export interface ScoutGenreResult {
+  niche: string;
   genre: string;
   found: number;
   upserted: number;
@@ -65,13 +113,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Search + resolve stats for one Reddit genre's top-viewed Shorts in the window. */
-export async function scoutGenre(genre: string, opts: ScoutOptions): Promise<ScoutGenreResult> {
+/** Search + resolve stats for one scout target's (niche+genre) top-viewed Shorts in the window. */
+export async function scoutTarget(target: ScoutTarget, opts: ScoutOptions): Promise<ScoutGenreResult> {
   if (!config.youtubeDataApiKey) {
     throw new Error("YOUTUBE_DATA_API_KEY not configured — get one from Google Cloud Console");
   }
-  const meta = REDDIT_GENRES[genre];
-  if (!meta) throw new Error(`Unknown Reddit genre: ${genre}`);
 
   const searchParams = new URLSearchParams({
     part: "snippet",
@@ -79,9 +125,15 @@ export async function scoutGenre(genre: string, opts: ScoutOptions): Promise<Sco
     videoDuration: "short",
     order: "viewCount",
     maxResults: String(opts.maxResults ?? 15),
-    q: `${meta.label} reddit story`,
+    q: target.query,
     publishedAfter: opts.publishedAfter.toISOString(),
     key: config.youtubeDataApiKey,
+    // Soft bias only — YouTube still returns non-English results for a
+    // global niche like horror, so this is not a hard filter. The real
+    // English gate for prompt-facing data is isEnglishText() at digest-build
+    // time (trend-insight.service.ts); raw references stay unfiltered here
+    // so the dashboard can still show true global top performers.
+    relevanceLanguage: "en",
   });
   if (opts.publishedBefore) searchParams.set("publishedBefore", opts.publishedBefore.toISOString());
 
@@ -93,7 +145,7 @@ export async function scoutGenre(genre: string, opts: ScoutOptions): Promise<Sco
   const videoIds = (searchJson.items ?? [])
     .map((i) => i.id?.videoId)
     .filter((id): id is string => Boolean(id));
-  if (!videoIds.length) return { genre, found: 0, upserted: 0 };
+  if (!videoIds.length) return { niche: target.niche, genre: target.genre, found: 0, upserted: 0 };
 
   const videosParams = new URLSearchParams({
     part: "snippet,statistics,contentDetails",
@@ -120,8 +172,8 @@ export async function scoutGenre(genre: string, opts: ScoutOptions): Promise<Sco
     await TrendReference.findOneAndUpdate(
       { externalId: item.id },
       {
-        niche: "reddit",
-        genre,
+        niche: target.niche,
+        genre: target.genre,
         sourceUrl: `https://youtube.com/shorts/${item.id}`,
         platform: "youtube_shorts",
         externalId: item.id,
@@ -147,19 +199,21 @@ export async function scoutGenre(genre: string, opts: ScoutOptions): Promise<Sco
     upserted++;
   }
 
-  return { genre, found: videoIds.length, upserted };
+  return { niche: target.niche, genre: target.genre, found: videoIds.length, upserted };
 }
 
-/** Scout every Reddit genre in sequence (gentle pacing to avoid bursty quota errors). */
-export async function scoutAllGenres(opts: ScoutOptions): Promise<ScoutGenreResult[]> {
+/** Scout every target in sequence (gentle pacing to avoid bursty quota errors).
+ * `niche` optionally restricts to one niche's targets (e.g. "horror" only). */
+export async function scoutAllGenres(opts: ScoutOptions, niche?: string): Promise<ScoutGenreResult[]> {
+  const targets = getScoutTargets(niche);
   const results: ScoutGenreResult[] = [];
-  for (const genre of Object.keys(REDDIT_GENRES)) {
+  for (const target of targets) {
     try {
-      results.push(await scoutGenre(genre, opts));
+      results.push(await scoutTarget(target, opts));
     } catch (error: unknown) {
       const message = getErrorMessage(error);
-      console.error(`🔎 trend-scout: ${genre} failed: ${message}`);
-      results.push({ genre, found: 0, upserted: 0, error: message });
+      console.error(`🔎 trend-scout: ${target.niche}/${target.genre} failed: ${message}`);
+      results.push({ niche: target.niche, genre: target.genre, found: 0, upserted: 0, error: message });
     }
     await sleep(300);
   }
@@ -212,8 +266,8 @@ export async function getTrendSummary(
   const scanWindow = PERIOD_WINDOWS[period];
   const out: TrendGenreSummary[] = [];
 
-  for (const [genreId, meta] of Object.entries(REDDIT_GENRES)) {
-    const refs = await TrendReference.find({ niche, genre: genreId, scanWindow: { $in: scanWindow } })
+  for (const target of getScoutTargets(niche)) {
+    const refs = await TrendReference.find({ niche, genre: target.genre, scanWindow: { $in: scanWindow } })
       .sort({ "metrics.views": -1 })
       .limit(50);
     if (!refs.length) continue;
@@ -243,8 +297,8 @@ export async function getTrendSummary(
       .sort((a, b) => b.weightedScore - a.weightedScore);
 
     out.push({
-      genre: genreId,
-      displayLabel: meta.label,
+      genre: target.genre,
+      displayLabel: target.displayLabel,
       sampleSize: refs.length,
       topPerformers,
       postingBuckets,
