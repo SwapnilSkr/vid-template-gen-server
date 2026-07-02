@@ -253,6 +253,16 @@ async function downloadGeneratedAsset(url: string, filename: string): Promise<st
   return path;
 }
 
+function narrationForTts(text: string, niche: string): string {
+  if (niche !== "horror") return text;
+  const paced = text
+    .replace(/:\s+/g, "... ")
+    .replace(/;\s+/g, "... ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return paced;
+}
+
 /** Full pipeline: plan → images → narration → render → upload. Invoked by the reel-processing worker. */
 export async function processReel(reelId: string): Promise<void> {
   const reel = await Reel.findById(reelId);
@@ -374,10 +384,11 @@ export async function processReel(reelId: string): Promise<void> {
         );
         continue;
       }
-      const { audioPath } = await generateNarration(scene.narration, {
+      const { audioPath } = await generateNarration(narrationForTts(scene.narration, reel.niche), {
         model: tts.model,
         voice: tts.voice,
         format: tts.format,
+        profile: reel.niche === "horror" ? "horror" : undefined,
         onUsage: (usage) => {
           measuredCosts.push({
             label: `Narration ${i + 1}`,

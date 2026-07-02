@@ -2,7 +2,7 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText } from "ai";
 import { config } from "../config";
 import { resolveModels, type Tier } from "../config/models";
-import { getRecipe } from "../config/niche-styles";
+import { getRecipe, type NicheRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
 import { getTrendInsight } from "./trend-insight.service";
 
@@ -30,6 +30,45 @@ export interface PlannedReel {
   scenes: PlannedScene[];
 }
 
+function planningModelFor(recipe: NicheRecipe, tier: Tier): string {
+  return process.env.LLM_MODEL || recipe.scriptModel || resolveModels(tier).llm;
+}
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function tightenHorrorPlan(plan: PlannedReel): PlannedReel {
+  return {
+    ...plan,
+    scenes: plan.scenes.map((scene) => ({
+      ...scene,
+      narration: scene.narration
+        .replace(/\b(creepy|terrifying|scary|demon|monster|haunted|suddenly)\b/gi, "")
+        .replace(/\s+/g, " ")
+        .trim(),
+    })),
+  };
+}
+
+function horrorQualityWarnings(plan: PlannedReel): string[] {
+  const warnings: string[] = [];
+  const narration = plan.scenes.map((scene) => scene.narration).join(" ").toLowerCase();
+  const banned = /\b(creepy|terrifying|scary|demon|monster|haunted|suddenly)\b/i;
+  if (banned.test(narration)) {
+    warnings.push("generic horror wording");
+  }
+  const hasPersonalWitness = /\b(i|me|my|we|us|our)\b/i.test(narration);
+  if (!hasPersonalWitness) {
+    warnings.push("not a personal witness account");
+  }
+  const tooLong = plan.scenes.some((scene) => countWords(scene.narration) > 24);
+  if (tooLong) {
+    warnings.push("long narration beats");
+  }
+  return warnings;
+}
+
 /**
  * Plan a reel: title, hook, and an ordered scene graph (narration + visual
  * prompt per scene). Niche behaviour (tone, scene count, structure) comes from
@@ -43,22 +82,30 @@ export async function planReel(
   genre?: string
 ): Promise<PlannedReel> {
   const recipe = getRecipe(niche);
-  const llm = resolveModels(tier).llm;
+  const llm = planningModelFor(recipe, tier);
   const trendBlock = await buildTrendBlock(niche, genre);
   const horrorRules =
     recipe.niche === "horror"
       ? `
 HORROR QUALITY BAR:
-- Write like a believable first-person incident report, not a campfire story.
-- Use concrete sensory details: sounds, distances, timestamps, object positions.
-- The fear must come from implication and pattern-breaking, not gore or jump-scare wording.
-- The last scene must reveal that the threat was present earlier, or that escape made it worse.
+- Write like a believable first-person witness account recorded after the fact, not a campfire story.
+- Every scene narration must be 8-22 words. Short enough to whisper without sounding bored.
+- Use concrete sensory details: sounds, distances, timestamps, object positions, temperature, pressure, reflections.
+- The fear must come from implication and pattern-breaking, not gore, monsters, jump-scare wording, or lore.
+- The last scene must quietly prove the danger was already in the room, or that escape made it worse.
+- Make the narrator sound scared to speak too loudly. Use one deliberate pause in the whole script, not constant ellipses.
 - Avoid these words unless unavoidable: creepy, terrifying, scary, demon, monster, haunted, suddenly.
 - If the script could fit any random horror video, rewrite it to be more specific to this topic.
+
+BAD HORROR LINE:
+"I found a creepy recorder and suddenly heard a terrifying voice."
+
+GOOD HORROR LINE:
+"The recorder was under my pillow again. This time, the metal was warm."
 `
       : "";
 
-  const prompt = `You are a viral short-form video scriptwriter. Produce a vertical faceless reel.
+  const prompt = `You are a ${recipe.niche === "horror" ? "literary short-form horror writer and audio-first scene planner" : "viral short-form video scriptwriter"}. Produce a vertical faceless reel.
 
 NICHE: ${recipe.displayName}
 TOPIC: ${topic}
@@ -83,16 +130,25 @@ OUTPUT JSON ONLY (no markdown):
 }`;
 
   try {
-    const { text } = await generateText({ model: openrouter(llm), prompt });
+    const { text } = await generateText({
+      model: openrouter(llm),
+      prompt,
+      temperature: recipe.niche === "horror" ? 0.85 : undefined,
+    });
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON in model response");
     const parsed = JSON.parse(jsonMatch[0]) as PlannedReel;
 
     if (!parsed.scenes?.length) throw new Error("No scenes returned");
+    const planned = recipe.niche === "horror" ? tightenHorrorPlan(parsed) : parsed;
+    if (recipe.niche === "horror") {
+      const warnings = horrorQualityWarnings(planned);
+      if (warnings.length) console.warn(`⚠️ Horror script quality warning: ${warnings.join(", ")}`);
+    }
 
-    console.log(`📝 Planned "${parsed.title}" — ${parsed.scenes.length} scenes (${recipe.niche})`);
-    return parsed;
+    console.log(`📝 Planned "${planned.title}" — ${planned.scenes.length} scenes (${recipe.niche}) via ${llm}`);
+    return planned;
   } catch (error: unknown) {
     throw new Error(`Reel planning failed: ${getErrorMessage(error)}`);
   }
