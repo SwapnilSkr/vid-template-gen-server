@@ -26,9 +26,11 @@ export * from "./composition.service";
 export * from "./openrouter-media.service";
 export * from "./reel-script.service";
 export * from "./reel-render.service";
+export * from "./reel-hybrid.service";
 export * from "./reel-gameplay.service";
 export * from "./reel-revoice.service";
 export * from "./reel-review.service";
+export * from "./reel-cost.service";
 export * from "./reddit-card.service";
 export * from "./gameplay-ingest.service";
 export * from "./story.service";
@@ -37,6 +39,7 @@ export * from "./trend-reference.service";
 export * from "./trend-scout.service";
 export * from "./trend-insight.service";
 export * from "./voice-sample.service";
+export * from "./model-catalog.service";
 export * from "./s3-reconciliation.service";
 
 // Distribution (publish rendered reels to platforms)

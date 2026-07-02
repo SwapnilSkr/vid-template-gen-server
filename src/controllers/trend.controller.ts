@@ -4,7 +4,7 @@ import {
   getTrendSummary,
   scoutAllGenres,
   refreshAllTrendInsights,
-  REDDIT_GENRES,
+  getScoutTargets,
 } from "../services";
 import type { TrendPlatform, TrendReferenceStatus } from "../models";
 import { getErrorMessage } from "../types";
@@ -41,7 +41,7 @@ export async function listTrendsController({ query }: ListTrendsContext) {
 /** Per-genre top performers + posting-time histogram, for the trends dashboard. */
 export async function getTrendSummaryController({ query, set }: TrendSummaryContext) {
   try {
-    const summary = await getTrendSummary(query.period ?? "week");
+    const summary = await getTrendSummary(query.period ?? "week", query.niche ?? "reddit");
     return { success: true, data: summary };
   } catch (error: unknown) {
     set.status = 400;
@@ -58,8 +58,8 @@ export async function triggerTrendScoutController({ body, set }: TriggerScoutCon
     const publishedAfter = new Date(now.getTime() - (mode === "month" ? 30 : 7) * 24 * 60 * 60 * 1000);
     const scanWindow = mode === "month" ? "monthly_scan" : "weekly_scan";
 
-    const results = await scoutAllGenres({ publishedAfter, scanWindow });
-    const digests = await refreshAllTrendInsights(Object.keys(REDDIT_GENRES));
+    const results = await scoutAllGenres({ publishedAfter, scanWindow }, body.niche);
+    const digests = await refreshAllTrendInsights(getScoutTargets(body.niche));
 
     return {
       success: true,

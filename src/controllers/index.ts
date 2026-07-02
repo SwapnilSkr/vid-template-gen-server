@@ -43,6 +43,8 @@ export {
   revoiceReelController,
   promoteVoiceVariantController,
   listGameplayController,
+  listImageModelsController,
+  getReelDefaultsController,
   listTtsVoicesController,
   useReelFrameAsThumbnailController,
   getVoiceSampleController,

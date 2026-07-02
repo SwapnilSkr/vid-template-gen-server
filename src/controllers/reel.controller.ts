@@ -12,6 +12,9 @@ import {
   listGameplayLibrary,
   useReelFrameAsThumbnail,
   getVoiceSample,
+  listImageModels,
+  listPricedTtsVoices,
+  getReelDefaults,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { TTS_VOICE_CATALOG } from "../config/models";
@@ -23,6 +26,7 @@ import type {
   TVariantParams,
   TThumbnailFrameBody,
   TVoiceSampleQuery,
+  TReelDefaultsQuery,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
 
@@ -56,6 +60,10 @@ interface VoiceSampleContext extends Context {
   query: TVoiceSampleQuery;
 }
 
+interface ReelDefaultsContext extends Context {
+  query: TReelDefaultsQuery;
+}
+
 interface PromoteVoiceVariantContext extends Context {
   params: TVariantParams;
 }
@@ -80,6 +88,7 @@ export async function createReelController({ body, set }: CreateReelContext) {
       source: body.source,
       parts: body.parts,
       gameplayKey: body.gameplayKey,
+      imageModel: body.imageModel,
       ttsModel: body.ttsModel,
       ttsVoice: body.ttsVoice,
       ttsFormat: body.ttsFormat,
@@ -145,9 +154,12 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       scenes: reel.scenes,
       redditStory: reel.redditStory,
       review: reel.review,
+      costUsd: reel.costUsd,
+      costBreakdown: reel.costBreakdown,
       error: reel.error,
       youtube: reel.youtube,
       gameplayKey: reel.gameplayKey,
+      imageModelOverride: reel.imageModelOverride,
       voiceOverride: reel.voiceOverride,
       voiceVariants: reel.voiceVariants,
     },
@@ -322,7 +334,19 @@ export async function listGameplayController() {
 
 /** List the curated cross-model TTS voice catalog for the revoice picker. */
 export async function listTtsVoicesController() {
-  return { success: true, data: TTS_VOICE_CATALOG };
+  return { success: true, data: listPricedTtsVoices() };
+}
+
+export async function listImageModelsController() {
+  try {
+    return { success: true, data: await listImageModels() };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+export async function getReelDefaultsController({ query }: ReelDefaultsContext) {
+  return { success: true, data: getReelDefaults(query.niche, query.tier ?? "cheap") };
 }
 
 /** Generate (or return cached) a short preview clip for a catalog voice. */
@@ -343,10 +367,15 @@ export async function getVoiceSampleController({ query, set }: VoiceSampleContex
 
 /** Delete a reel record. */
 export async function deleteReelController({ params, set }: GetReelContext) {
-  const deleted = await deleteReel(params.id);
-  if (!deleted) {
-    set.status = 404;
-    return { success: false, error: "Reel not found" };
+  try {
+    const deleted = await deleteReel(params.id);
+    if (!deleted) {
+      set.status = 404;
+      return { success: false, error: "Reel not found" };
+    }
+    return { success: true, message: "Reel deleted" };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
   }
-  return { success: true, message: "Reel deleted" };
 }

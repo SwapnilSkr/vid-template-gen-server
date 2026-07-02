@@ -1,6 +1,12 @@
 import { Elysia } from "elysia";
-import { VoiceSampleQuery } from "../types/guards";
-import { listGameplayController, listTtsVoicesController, getVoiceSampleController } from "../controllers";
+import { ReelDefaultsQuery, VoiceSampleQuery } from "../types/guards";
+import {
+  listGameplayController,
+  listTtsVoicesController,
+  getVoiceSampleController,
+  listImageModelsController,
+  getReelDefaultsController,
+} from "../controllers";
 
 // ============================================
 // Reference-data routes for the create/revoice UI: the gameplay clip pool
@@ -9,5 +15,7 @@ import { listGameplayController, listTtsVoicesController, getVoiceSampleControll
 
 export const metaRoutes = new Elysia({ prefix: "/api" })
   .get("/gameplay", listGameplayController)
+  .get("/image-models", listImageModelsController)
+  .get("/reel-defaults", getReelDefaultsController, { query: ReelDefaultsQuery })
   .get("/tts-voices", listTtsVoicesController)
   .get("/tts-voices/sample", getVoiceSampleController, { query: VoiceSampleQuery });
