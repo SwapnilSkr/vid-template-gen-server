@@ -45,6 +45,7 @@ export interface SceneTiming {
 
 export interface RenderOptions {
   horrorEffects?: boolean;
+  comicEffects?: boolean;
   horrorAudioKey?: string;
 }
 
@@ -104,8 +105,10 @@ async function renderImageKenBurnsInner(
       frames,
       clipPath,
       styleTint,
-      options.horrorEffects
-        ? { grainIntensity: 1.65, vignetteDivisor: 3.6, desaturateBoost: 0.18 }
+      options.comicEffects
+        ? comicHorrorStyleForScene(scene, i, scenes.length)
+        : options.horrorEffects
+        ? horrorStyleForScene(scene, i, scenes.length)
         : {}
     );
 
@@ -142,7 +145,7 @@ async function renderImageKenBurnsInner(
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
   if (options.horrorEffects) {
-    await applyHorrorFinalMix(captionedPath, finalPath, tmp, options.horrorAudioKey);
+    await applyHorrorFinalMix(captionedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
   } else {
     await copyVideo(captionedPath, finalPath);
   }
@@ -162,6 +165,55 @@ export interface SceneClipStyle {
   vignetteDivisor?: number;
   /** extra desaturation beyond the base 0.9 saturation (0 = none). */
   desaturateBoost?: number;
+  /** comic-style ink sharpening and harsher contrast. */
+  comicInk?: boolean;
+}
+
+function horrorStyleForScene(scene: RenderScene, index: number, total: number): SceneClipStyle {
+  const text = scene.narration.toLowerCase();
+  const isFinal = index === total - 1;
+  const hasDevice = /\b(recorder|phone|radio|speaker|screen|camera|ai|computer|monitor|tape|voice)\b/.test(text);
+  const hasRoomReveal = /\b(door|window|closet|bed|pillow|chair|room|hall|mirror|stairs|basement)\b/.test(text);
+  const hasBodyDetail = /\b(hand|face|mouth|breath|teeth|skin|eye|eyes|warm|cold)\b/.test(text);
+
+  let grainIntensity = 1.35 + index * 0.08;
+  let vignetteDivisor = 3.9 - index * 0.08;
+  let desaturateBoost = 0.12 + index * 0.015;
+
+  if (hasDevice) {
+    grainIntensity += 0.35;
+    desaturateBoost += 0.04;
+  }
+  if (hasRoomReveal) {
+    vignetteDivisor -= 0.35;
+    desaturateBoost += 0.03;
+  }
+  if (hasBodyDetail) {
+    grainIntensity += 0.18;
+    vignetteDivisor -= 0.15;
+  }
+  if (isFinal) {
+    grainIntensity += 0.35;
+    vignetteDivisor -= 0.45;
+    desaturateBoost += 0.07;
+  }
+
+  return {
+    grainIntensity,
+    vignetteDivisor: Math.max(vignetteDivisor, 2.8),
+    desaturateBoost: Math.min(desaturateBoost, 0.32),
+  };
+}
+
+function comicHorrorStyleForScene(scene: RenderScene, index: number, total: number): SceneClipStyle {
+  const base = horrorStyleForScene(scene, index, total);
+  return {
+    ...base,
+    grainIntensity: Math.min((base.grainIntensity ?? 1.4) + 0.05, 1.55),
+    vignetteDivisor: Math.max((base.vignetteDivisor ?? 3.6) - 0.25, 2.65),
+    desaturateBoost: Math.min((base.desaturateBoost ?? 0.16) + 0.02, 0.34),
+    comicInk: true,
+  };
 }
 
 /**
@@ -184,6 +236,7 @@ export function renderSceneClip(
   const grain = Math.round(9 * (style.grainIntensity ?? 1));
   const vignetteDivisor = style.vignetteDivisor ?? 5;
   const saturation = Math.max(0.9 - (style.desaturateBoost ?? 0), 0.2);
+  const contrast = style.comicInk ? 1.18 : 1.05;
 
   const filters = [
     `scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase`,
@@ -191,7 +244,9 @@ export function renderSceneClip(
     `zoompan=z='${z}':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${W}x${H}:fps=${FPS}`,
     grain > 0 ? `noise=alls=${grain}:allf=t` : null,
     `vignette=PI/${vignetteDivisor}`,
-    styleTint ? `eq=contrast=1.05:saturation=${saturation.toFixed(2)}` : null,
+    styleTint ? `eq=contrast=${contrast.toFixed(2)}:saturation=${saturation.toFixed(2)}` : null,
+    style.comicInk ? "unsharp=5:5:0.85:3:3:0.3" : null,
+    style.comicInk ? `drawbox=x=28:y=28:w=iw-56:h=ih-56:color=black@0.72:t=8` : null,
     `format=yuv420p`,
     `trim=end_frame=${frames}`,
     `setpts=PTS-STARTPTS`,
@@ -320,7 +375,16 @@ function copyVideo(input: string, output: string): Promise<string> {
   });
 }
 
-async function pickHorrorBed(preferredKey?: string): Promise<string | undefined> {
+function hashString(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+async function pickHorrorBed(preferredKey: string | undefined, seed: string): Promise<string | undefined> {
   if (preferredKey && /^horror-audio\/.+\.mp3$/i.test(preferredKey)) return preferredKey;
   try {
     const keys = (await listKeys("horror-audio/")).filter(
@@ -330,11 +394,61 @@ async function pickHorrorBed(preferredKey?: string): Promise<string | undefined>
         !key.endsWith("manifest.json")
     );
     if (!keys.length) return undefined;
-    return keys[Math.floor(Math.random() * keys.length)];
+    return keys.sort()[hashString(seed) % keys.length];
   } catch (error) {
     console.warn(`Could not list horror audio library: ${error instanceof Error ? error.message : String(error)}`);
     return undefined;
   }
+}
+
+interface HorrorCue {
+  key: string;
+  at: number;
+  volume: number;
+}
+
+function firstKey(keys: string[], pattern: RegExp, fallback?: string): string | undefined {
+  return keys.find((key) => pattern.test(key)) ?? fallback;
+}
+
+function selectSituationalHorrorCues(
+  timings: SceneTiming[],
+  keys: string[],
+  bedKey?: string
+): HorrorCue[] {
+  const sfxKeys = keys.filter((key) => key !== bedKey && /(hit|scare|stinger|riser|feedback|tone)/i.test(key));
+  if (!sfxKeys.length) return [];
+
+  const fallback = sfxKeys[0];
+  const feedback = firstKey(sfxKeys, /(feedback|tone)/i, fallback);
+  const stinger = firstKey(sfxKeys, /(stinger|ambient-hit|cringe-scare|scare)/i, fallback);
+  const hit = firstKey(sfxKeys, /(horror-hit|scary-hits|riser)/i, fallback);
+  const cues: HorrorCue[] = [];
+
+  for (let i = 0; i < timings.length; i++) {
+    const scene = timings[i];
+    const text = scene.narration.toLowerCase();
+    const isFinal = i === timings.length - 1;
+    const hasDevice = /\b(recorder|phone|radio|speaker|screen|camera|ai|computer|monitor|tape|voice)\b/.test(text);
+    const hasRoomReveal = /\b(door|window|closet|bed|pillow|chair|room|hall|mirror|stairs|basement)\b/.test(text);
+
+    if (isFinal && hit) {
+      cues.push({
+        key: hit,
+        at: scene.startTime + Math.max(scene.speech - 0.7, 0.4),
+        volume: 0.24,
+      });
+    } else if (hasDevice && feedback) {
+      cues.push({ key: feedback, at: scene.startTime + 0.2, volume: 0.12 });
+    } else if (hasRoomReveal && stinger && i > 0) {
+      cues.push({ key: stinger, at: scene.startTime + 0.25, volume: 0.16 });
+    }
+  }
+
+  return cues
+    .sort((a, b) => a.at - b.at)
+    .filter((cue, index, all) => index === 0 || cue.at - all[index - 1].at > 1.4)
+    .slice(0, 3);
 }
 
 async function downloadUrlToFile(url: string, output: string): Promise<string> {
@@ -348,10 +462,15 @@ async function applyHorrorFinalMix(
   input: string,
   output: string,
   tmp: string[],
-  horrorAudioKey?: string
+  horrorAudioKey?: string,
+  timings: SceneTiming[] = [],
+  comicEffects = false
 ): Promise<string> {
-  const bedKey = await pickHorrorBed(horrorAudioKey);
+  const seed = timings.map((timing) => timing.narration).join("|");
+  const bedKey = await pickHorrorBed(horrorAudioKey, seed);
   if (!bedKey) return copyVideo(input, output);
+  const horrorKeys = await listKeys("horror-audio/").catch(() => []);
+  const cues = selectSituationalHorrorCues(timings, horrorKeys, bedKey);
 
   const bedPath = join(config.processingPath, `horror_bed_${Date.now()}.mp3`);
   tmp.push(bedPath);
@@ -362,26 +481,55 @@ async function applyHorrorFinalMix(
     return copyVideo(input, output);
   }
 
+  const cuePaths: { path: string; cue: HorrorCue }[] = [];
+  for (const cue of cues) {
+    const cuePath = join(config.processingPath, `horror_cue_${cuePaths.length}_${Date.now()}.mp3`);
+    tmp.push(cuePath);
+    try {
+      await downloadUrlToFile(cdnUrlFor(cue.key), cuePath);
+      cuePaths.push({ path: cuePath, cue });
+    } catch (error) {
+      console.warn(`Skipping horror cue ${cue.key}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(input)
-      .input(bedPath)
-      .inputOptions(["-stream_loop", "-1"])
-      .complexFilter(
-        [
-          "[0:v]eq=contrast=1.08:saturation=0.82,noise=alls=5:allf=t[vout]",
-          "[1:a]highpass=f=45,lowpass=f=3600,volume=0.16,afade=t=in:st=0:d=1.2[bed]",
-          "[0:a][bed]amix=inputs=2:duration=first:dropout_transition=0,acompressor=threshold=-18dB:ratio=2.4:attack=8:release=180,loudnorm=I=-16:LRA=8:TP=-1.5[aout]",
-        ],
-        ["vout", "aout"]
-      )
+    const cmd = ffmpeg().input(input).input(bedPath).inputOptions(["-stream_loop", "-1"]);
+    for (const cue of cuePaths) cmd.input(cue.path);
+
+    const videoFilter = comicEffects
+      ? "[0:v]eq=contrast=1.14:saturation=0.74,unsharp=5:5:0.75:3:3:0.25,noise=alls=2:allf=t,drawbox=x=18:y=18:w=iw-36:h=ih-36:color=black@0.65:t=6[vout]"
+      : "[0:v]eq=contrast=1.08:saturation=0.82,noise=alls=5:allf=t[vout]";
+    const filters = [
+      videoFilter,
+      "[1:a]highpass=f=45,lowpass=f=3600,volume=0.16,afade=t=in:st=0:d=1.2[bed]",
+    ];
+    const mixInputs = ["[0:a]", "[bed]"];
+    cuePaths.forEach(({ cue }, index) => {
+      const inputIndex = index + 2;
+      const delayMs = Math.max(Math.round(cue.at * 1000), 0);
+      const label = `cue${index}`;
+      filters.push(
+        `[${inputIndex}:a]atrim=0:2.6,asetpts=PTS-STARTPTS,highpass=f=70,lowpass=f=9000,volume=${cue.volume.toFixed(
+          2
+        )},afade=t=out:st=2.1:d=0.45,adelay=${delayMs}:all=1[${label}]`
+      );
+      mixInputs.push(`[${label}]`);
+    });
+    filters.push(
+      `${mixInputs.join("")}amix=inputs=${mixInputs.length}:duration=first:dropout_transition=0,acompressor=threshold=-18dB:ratio=2.4:attack=8:release=180,loudnorm=I=-16:LRA=8:TP=-1.5[aout]`
+    );
+
+    cmd
+      .complexFilter(filters, ["vout", "aout"])
       .outputOptions([
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        comicEffects ? "slow" : "medium",
         "-crf",
-        "21",
+        comicEffects ? "24" : "21",
+        ...(comicEffects ? ["-maxrate", "8M", "-bufsize", "16M", "-tune", "animation"] : []),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -395,7 +543,10 @@ async function applyHorrorFinalMix(
       ])
       .output(output)
       .on("end", () => {
-        console.log(`🎧 Horror bed mixed from S3: ${bedKey}`);
+        console.log(
+          `🎧 Horror bed mixed from S3: ${bedKey}` +
+            (cuePaths.length ? ` + ${cuePaths.length} situational cue(s)` : "")
+        );
         resolve(output);
       })
       .on("error", (err) => reject(new Error(`Horror final mix failed: ${err.message}`)))
