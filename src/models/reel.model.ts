@@ -87,6 +87,23 @@ export interface IReelReviewPackage {
   updatedAt?: Date;
 }
 
+export interface ICostLine {
+  label: string;
+  model?: string;
+  units: number;
+  unit: string;
+  unitCostUsd: number;
+  costUsd: number;
+}
+
+export interface ICostBreakdown {
+  currency: "USD";
+  totalUsd: number;
+  lines: ICostLine[];
+  note?: string;
+  generatedAt: Date;
+}
+
 export interface IRedditStoryPayload {
   title: string;
   body: string;
@@ -139,6 +156,7 @@ export interface IReel extends Document {
    *  either chosen at creation or picked randomly and recorded so revoice
    *  reuses the exact same background instead of swapping it. */
   gameplayKey?: string;
+  imageModelOverride?: string;
   voiceOverride?: IVoiceOverride;
   voiceVariants: IVoiceVariant[];
 
@@ -148,6 +166,7 @@ export interface IReel extends Document {
   subtitlesUrl?: string;
   review?: IReelReviewPackage;
   costUsd?: number;
+  costBreakdown?: ICostBreakdown;
   error?: string;
   youtube?: IYouTubePublish;
 
@@ -257,6 +276,29 @@ const reelReviewSchema = new Schema<IReelReviewPackage>(
   { _id: false }
 );
 
+const costLineSchema = new Schema<ICostLine>(
+  {
+    label: { type: String, required: true },
+    model: String,
+    units: { type: Number, required: true },
+    unit: { type: String, required: true },
+    unitCostUsd: { type: Number, required: true },
+    costUsd: { type: Number, required: true },
+  },
+  { _id: false }
+);
+
+const costBreakdownSchema = new Schema<ICostBreakdown>(
+  {
+    currency: { type: String, enum: ["USD"], default: "USD" },
+    totalUsd: { type: Number, required: true },
+    lines: { type: [costLineSchema], default: [] },
+    note: String,
+    generatedAt: { type: Date, default: () => new Date() },
+  },
+  { _id: false }
+);
+
 const sceneSchema = new Schema<IScene>(
   {
     index: { type: Number, required: true },
@@ -294,6 +336,7 @@ const reelSchema = new Schema<IReel>(
     partNumber: Number,
     partCount: Number,
     gameplayKey: String,
+    imageModelOverride: String,
     voiceOverride: voiceOverrideSchema,
     voiceVariants: { type: [voiceVariantSchema], default: [] },
     status: {
@@ -316,6 +359,7 @@ const reelSchema = new Schema<IReel>(
     subtitlesUrl: String,
     review: reelReviewSchema,
     costUsd: Number,
+    costBreakdown: costBreakdownSchema,
     error: String,
     youtube: youtubePublishSchema,
   },

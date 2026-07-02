@@ -18,6 +18,8 @@ export const CreateReelBody = t.Object({
   parts: t.Optional(t.Union([t.Literal("off"), t.Literal("auto"), t.Number()])),
   /** explicit S3 key (gameplay/xxx.mp4) to use instead of a random pick */
   gameplayKey: t.Optional(t.String()),
+  /** explicit image model pick from the compatible image model catalog */
+  imageModel: t.Optional(t.String()),
   /** explicit TTS pick from the voice catalog — overrides the tier/niche default */
   ttsModel: t.Optional(t.String()),
   ttsVoice: t.Optional(t.String()),
@@ -70,3 +72,10 @@ export const VoiceSampleQuery = t.Object({
 });
 
 export type TVoiceSampleQuery = typeof VoiceSampleQuery.static;
+
+export const ReelDefaultsQuery = t.Object({
+  niche: t.String(),
+  tier: t.Optional(t.Union([t.Literal("cheap"), t.Literal("value"), t.Literal("premium")])),
+});
+
+export type TReelDefaultsQuery = typeof ReelDefaultsQuery.static;

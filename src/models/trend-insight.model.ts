@@ -11,6 +11,7 @@ export interface ITrendInsight extends Document {
   niche: string;
   genre: string;
   digest: string; // short bullet list of winning title/hook/thumbnail patterns
+  hooks: string[]; // reusable hook-line templates distilled from top performers (not verbatim titles)
   sampleSize: number; // how many references it was distilled from
   createdAt: Date;
   updatedAt: Date;
@@ -21,6 +22,7 @@ const trendInsightSchema = new Schema<ITrendInsight>(
     niche: { type: String, required: true, trim: true, index: true },
     genre: { type: String, required: true, trim: true, index: true },
     digest: { type: String, required: true },
+    hooks: { type: [String], default: [] },
     sampleSize: { type: Number, default: 0 },
   },
   { timestamps: true }

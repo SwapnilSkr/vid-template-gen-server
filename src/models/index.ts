@@ -20,6 +20,8 @@ export {
   type ReelStatus,
   type IYouTubePublish,
   type IReelReviewPackage,
+  type ICostBreakdown,
+  type ICostLine,
   type IVoiceVariant,
   type IVoiceOverride,
 } from "./reel.model";
