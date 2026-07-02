@@ -262,13 +262,17 @@ async function downloadGeneratedAsset(url: string, filename: string): Promise<st
 }
 
 function narrationForTts(text: string, niche: string): string {
-  if (niche !== "horror") return text;
+  if (!isHorrorNiche(niche)) return text;
   const paced = text
     .replace(/:\s+/g, "... ")
     .replace(/;\s+/g, "... ")
     .replace(/\s+/g, " ")
     .trim();
   return paced;
+}
+
+function isHorrorNiche(niche: string): boolean {
+  return niche.startsWith("horror");
 }
 
 /** Full pipeline: plan → images → narration → render → upload. Invoked by the reel-processing worker. */
@@ -396,7 +400,7 @@ export async function processReel(reelId: string): Promise<void> {
         model: tts.model,
         voice: tts.voice,
         format: tts.format,
-        profile: reel.niche === "horror" ? "horror" : undefined,
+        profile: isHorrorNiche(reel.niche) ? "horror" : undefined,
         onUsage: (usage) => {
           measuredCosts.push({
             label: `Narration ${i + 1}`,
@@ -470,7 +474,11 @@ export async function processReel(reelId: string): Promise<void> {
             })
           ),
           true,
-          { horrorEffects: reel.niche === "horror", horrorAudioKey: reel.horrorAudioKey }
+          {
+            horrorEffects: isHorrorNiche(reel.niche),
+            comicEffects: reel.niche === "horror_comic",
+            horrorAudioKey: reel.horrorAudioKey,
+          }
         );
     localFiles.push(result.videoPath, result.assPath);
 

@@ -59,6 +59,10 @@ function normalizeTags(tags: string[]): string[] {
     .slice(0, 15);
 }
 
+function isHorrorNiche(niche: string): boolean {
+  return niche.startsWith("horror");
+}
+
 function wrap(text: string, maxChars: number): string[] {
   const words = text.trim().split(/\s+/);
   const lines: string[] = [];
@@ -109,8 +113,9 @@ async function buildThumbnailPrompt(reel: IReel, title: string): Promise<string>
     return `Bold Reddit Shorts thumbnail for a${genre} story: huge readable hook text, white Reddit post card, tense contrast, gameplay background, red-orange accent, no clutter. Title: "${title}".${trendBlock}`;
   }
 
-  if (reel.niche === "horror") {
-    return `Terrifying YouTube Shorts horror thumbnail for a${genre} story: dark cinematic photoreal scene, single unsettling figure or silhouette half-lit, deep shadows, blood-red or sickly-green rim light, huge bold white hook text with black stroke, high contrast, unsettling composition, no clutter. Title: "${title}".${trendBlock}`;
+  if (isHorrorNiche(reel.niche)) {
+    const medium = reel.niche === "horror_comic" ? "2D horror comic panel" : "dark cinematic photoreal scene";
+    return `Terrifying YouTube Shorts horror thumbnail for a${genre} story: ${medium}, single unsettling figure or silhouette half-lit, deep shadows, blood-red or sickly-green rim light, huge bold white hook text with black stroke, high contrast, unsettling composition, no clutter. Title: "${title}".${trendBlock}`;
   }
 
   const recipe = getRecipe(reel.niche);
@@ -124,7 +129,7 @@ interface ThumbnailBrand {
 
 function thumbnailBrand(niche: string): ThumbnailBrand {
   if (niche === "reddit") return { badgeText: "REDDIT", badgeColor: "#ff4500" };
-  if (niche === "horror") return { badgeText: "HORROR", badgeColor: "#7f1d1d" };
+  if (isHorrorNiche(niche)) return { badgeText: niche === "horror_comic" ? "COMIC HORROR" : "HORROR", badgeColor: "#7f1d1d" };
   return { badgeText: getRecipe(niche).displayName.toUpperCase(), badgeColor: "#0f766e" };
 }
 
@@ -299,7 +304,7 @@ async function renderThumbnailPng(title: string, subtitle: string, niche: string
 
 export async function buildReelReviewPackage(reel: IReel): Promise<IReelReviewPackage> {
   const title = buildTitle(reel).slice(0, 100);
-  const nicheTags = reel.niche === "reddit" ? DEFAULT_REDDIT_TAGS : reel.niche === "horror" ? DEFAULT_HORROR_TAGS : [reel.niche];
+  const nicheTags = reel.niche === "reddit" ? DEFAULT_REDDIT_TAGS : isHorrorNiche(reel.niche) ? DEFAULT_HORROR_TAGS : [reel.niche];
   const tags = normalizeTags([
     reel.niche,
     reel.genre ?? "",
