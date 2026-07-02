@@ -15,6 +15,7 @@ import {
   listImageModels,
   listPricedTtsVoices,
   getReelDefaults,
+  listHorrorAudioLibrary,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { TTS_VOICE_CATALOG } from "../config/models";
@@ -88,6 +89,7 @@ export async function createReelController({ body, set }: CreateReelContext) {
       source: body.source,
       parts: body.parts,
       gameplayKey: body.gameplayKey,
+      horrorAudioKey: body.horrorAudioKey,
       imageModel: body.imageModel,
       ttsModel: body.ttsModel,
       ttsVoice: body.ttsVoice,
@@ -159,6 +161,7 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       error: reel.error,
       youtube: reel.youtube,
       gameplayKey: reel.gameplayKey,
+      horrorAudioKey: reel.horrorAudioKey,
       imageModelOverride: reel.imageModelOverride,
       voiceOverride: reel.voiceOverride,
       voiceVariants: reel.voiceVariants,
@@ -340,6 +343,15 @@ export async function listTtsVoicesController() {
 export async function listImageModelsController() {
   try {
     return { success: true, data: await listImageModels() };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** List global CC0/Public Domain horror beds/stingers stored in S3. */
+export async function listHorrorAudioController() {
+  try {
+    return { success: true, data: await listHorrorAudioLibrary() };
   } catch (error: unknown) {
     return { success: false, error: getErrorMessage(error) };
   }

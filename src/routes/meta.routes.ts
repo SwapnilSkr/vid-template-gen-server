@@ -5,6 +5,7 @@ import {
   listTtsVoicesController,
   getVoiceSampleController,
   listImageModelsController,
+  listHorrorAudioController,
   getReelDefaultsController,
 } from "../controllers";
 
@@ -15,6 +16,7 @@ import {
 
 export const metaRoutes = new Elysia({ prefix: "/api" })
   .get("/gameplay", listGameplayController)
+  .get("/horror-audio", listHorrorAudioController)
   .get("/image-models", listImageModelsController)
   .get("/reel-defaults", getReelDefaultsController, { query: ReelDefaultsQuery })
   .get("/tts-voices", listTtsVoicesController)

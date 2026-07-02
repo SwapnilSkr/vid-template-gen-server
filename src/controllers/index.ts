@@ -43,6 +43,7 @@ export {
   revoiceReelController,
   promoteVoiceVariantController,
   listGameplayController,
+  listHorrorAudioController,
   listImageModelsController,
   getReelDefaultsController,
   listTtsVoicesController,
