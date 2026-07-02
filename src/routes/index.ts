@@ -1,5 +1,9 @@
 export { templateRoutes } from "./template.routes";
 export { characterRoutes } from "./character.routes";
 export { compositionRoutes, generateRoutes } from "./composition.routes";
+export { reelRoutes } from "./reel.routes";
 export { voiceRoutes } from "./voice.routes";
 export { audioRoutes } from "./audio.routes";
+export { metaRoutes } from "./meta.routes";
+export { trendRoutes } from "./trend.routes";
+export { maintenanceRoutes } from "./maintenance.routes";
