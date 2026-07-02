@@ -40,6 +40,7 @@ export * from "./trend-scout.service";
 export * from "./trend-insight.service";
 export * from "./voice-sample.service";
 export * from "./model-catalog.service";
+export * from "./horror-audio.service";
 export * from "./s3-reconciliation.service";
 
 // Distribution (publish rendered reels to platforms)

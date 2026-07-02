@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { config } from "../config";
 import { ensureDir } from "../utils";
 import { getAudioDuration } from "./openrouter-media.service";
+import { cdnUrlFor, listKeys } from "./s3.service";
 import type { ISceneMotion } from "../models";
 
 export const W = 1080;
@@ -42,6 +43,11 @@ export interface SceneTiming {
   startTime: number; // resolved position on the crossfaded timeline
 }
 
+export interface RenderOptions {
+  horrorEffects?: boolean;
+  horrorAudioKey?: string;
+}
+
 /**
  * Render a scene-graph reel: stills + Ken Burns + grain/vignette, narration,
  * crossfaded together, with length-weighted karaoke captions burned in.
@@ -60,13 +66,14 @@ export interface SceneTiming {
 export async function renderImageKenBurns(
   reelId: string,
   scenes: RenderScene[],
-  styleTint = true
+  styleTint = true,
+  options: RenderOptions = {}
 ): Promise<RenderResult> {
   await ensureDir(config.processingPath);
   const tmp: string[] = [];
 
   try {
-    return await renderImageKenBurnsInner(reelId, scenes, styleTint, tmp);
+    return await renderImageKenBurnsInner(reelId, scenes, styleTint, tmp, options);
   } finally {
     // Cleanup must run even on failure — previously only ran on success,
     // leaving every intermediate scene clip behind in storage/processing/.
@@ -78,7 +85,8 @@ async function renderImageKenBurnsInner(
   reelId: string,
   scenes: RenderScene[],
   styleTint: boolean,
-  tmp: string[]
+  tmp: string[],
+  options: RenderOptions
 ): Promise<RenderResult> {
   const timings: SceneTiming[] = [];
 
@@ -90,7 +98,16 @@ async function renderImageKenBurnsInner(
     const frames = Math.round(d * FPS);
     const clipPath = join(config.processingPath, `${reelId}_scene${i}.mp4`);
 
-    await renderSceneClip(scene, d, frames, clipPath, styleTint);
+    await renderSceneClip(
+      scene,
+      d,
+      frames,
+      clipPath,
+      styleTint,
+      options.horrorEffects
+        ? { grainIntensity: 1.65, vignetteDivisor: 3.6, desaturateBoost: 0.18 }
+        : {}
+    );
 
     timings.push({ clipPath, narration: scene.narration, d, speech, startTime: 0 });
     tmp.push(clipPath);
@@ -119,8 +136,16 @@ async function renderImageKenBurnsInner(
   const assPath = join(config.processingPath, `${reelId}.ass`);
   await writeFile(assPath, assContent, "utf-8");
 
+  const captionedPath = join(config.processingPath, `${reelId}_captioned.mp4`);
+  await burnSubtitles(joinedPath, assPath, captionedPath);
+  tmp.push(captionedPath);
+
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
-  await burnSubtitles(joinedPath, assPath, finalPath);
+  if (options.horrorEffects) {
+    await applyHorrorFinalMix(captionedPath, finalPath, tmp, options.horrorAudioKey);
+  } else {
+    await copyVideo(captionedPath, finalPath);
+  }
 
   return {
     videoPath: finalPath,
@@ -280,6 +305,100 @@ export function burnSubtitles(video: string, assPath: string, out: string): Prom
       .output(out)
       .on("end", () => resolve(out))
       .on("error", (err) => reject(new Error(`Caption burn failed: ${err.message}`)))
+      .run();
+  });
+}
+
+function copyVideo(input: string, output: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(input)
+      .outputOptions(["-c", "copy", "-movflags", "+faststart"])
+      .output(output)
+      .on("end", () => resolve(output))
+      .on("error", (err) => reject(new Error(`Final copy failed: ${err.message}`)))
+      .run();
+  });
+}
+
+async function pickHorrorBed(preferredKey?: string): Promise<string | undefined> {
+  if (preferredKey && /^horror-audio\/.+\.mp3$/i.test(preferredKey)) return preferredKey;
+  try {
+    const keys = (await listKeys("horror-audio/")).filter(
+      (key) =>
+        key.endsWith(".mp3") &&
+        /(ambient|ambience|drone|feedback|tone)/i.test(key) &&
+        !key.endsWith("manifest.json")
+    );
+    if (!keys.length) return undefined;
+    return keys[Math.floor(Math.random() * keys.length)];
+  } catch (error) {
+    console.warn(`Could not list horror audio library: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+async function downloadUrlToFile(url: string, output: string): Promise<string> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download ${res.status}`);
+  await writeFile(output, Buffer.from(await res.arrayBuffer()));
+  return output;
+}
+
+async function applyHorrorFinalMix(
+  input: string,
+  output: string,
+  tmp: string[],
+  horrorAudioKey?: string
+): Promise<string> {
+  const bedKey = await pickHorrorBed(horrorAudioKey);
+  if (!bedKey) return copyVideo(input, output);
+
+  const bedPath = join(config.processingPath, `horror_bed_${Date.now()}.mp3`);
+  tmp.push(bedPath);
+  try {
+    await downloadUrlToFile(cdnUrlFor(bedKey), bedPath);
+  } catch (error) {
+    console.warn(`Skipping horror bed ${bedKey}: ${error instanceof Error ? error.message : String(error)}`);
+    return copyVideo(input, output);
+  }
+
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(input)
+      .input(bedPath)
+      .inputOptions(["-stream_loop", "-1"])
+      .complexFilter(
+        [
+          "[0:v]eq=contrast=1.08:saturation=0.82,noise=alls=5:allf=t[vout]",
+          "[1:a]highpass=f=45,lowpass=f=3600,volume=0.16,afade=t=in:st=0:d=1.2[bed]",
+          "[0:a][bed]amix=inputs=2:duration=first:dropout_transition=0,acompressor=threshold=-18dB:ratio=2.4:attack=8:release=180,loudnorm=I=-16:LRA=8:TP=-1.5[aout]",
+        ],
+        ["vout", "aout"]
+      )
+      .outputOptions([
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "21",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-b:a",
+        "192k",
+        "-movflags",
+        "+faststart",
+      ])
+      .output(output)
+      .on("end", () => {
+        console.log(`🎧 Horror bed mixed from S3: ${bedKey}`);
+        resolve(output);
+      })
+      .on("error", (err) => reject(new Error(`Horror final mix failed: ${err.message}`)))
       .run();
   });
 }
