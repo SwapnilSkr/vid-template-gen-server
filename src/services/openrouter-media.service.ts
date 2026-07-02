@@ -2,7 +2,7 @@ import ffmpeg from "fluent-ffmpeg";
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
-import { resolveModels } from "../config/models";
+import { resolveModels, resolveTtsChoice, type TtsChoice } from "../config/models";
 import { getErrorMessage } from "../types";
 import { ensureDir, generateFilename } from "../utils";
 
@@ -18,6 +18,105 @@ import { ensureDir, generateFilename } from "../utils";
 const NO_TEXT_SUFFIX =
   "no text, no watermark, no caption, no lettering, no subtitles, no border, no signature";
 
+const TTS_MAX_ATTEMPTS = 3;
+const TTS_FALLBACK: TtsChoice = {
+  model: "google/gemini-3.1-flash-tts-preview",
+  voice: "Charon",
+  format: "pcm",
+};
+
+export interface MediaUsageCost {
+  costUsd?: number;
+  source: "openrouter_usage" | "openrouter_generation" | "estimated";
+  generationId?: string;
+}
+
+export type MediaUsageCallback = (usage: MediaUsageCost) => void;
+
+interface ImageModelCapability {
+  supported_parameters?: Record<string, { type: string; values?: string[] }>;
+}
+
+let imageCapabilityCache: Map<string, ImageModelCapability> | undefined;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function parseCost(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+async function fetchGenerationCost(generationId?: string): Promise<number | undefined> {
+  if (!generationId) return undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(750 * attempt);
+    try {
+      const res = await fetch(`${config.openRouterBaseUrl}/generation?id=${encodeURIComponent(generationId)}`, {
+        headers: { Authorization: `Bearer ${config.openRouterApiKey}` },
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as { data?: { total_cost?: number | string; usage?: number | string } };
+      return parseCost(data.data?.total_cost) ?? parseCost(data.data?.usage);
+    } catch {
+      // Accounting should never break generation.
+    }
+  }
+  return undefined;
+}
+
+async function getImageModelCapability(model: string): Promise<ImageModelCapability | undefined> {
+  if (!imageCapabilityCache) {
+    try {
+      const res = await fetch(`${config.openRouterBaseUrl}/images/models`, {
+        headers: { Authorization: `Bearer ${config.openRouterApiKey}` },
+      });
+      const json = (await res.json()) as { data?: (ImageModelCapability & { id: string })[] };
+      imageCapabilityCache = new Map((json.data ?? []).map((item) => [item.id, item]));
+    } catch {
+      imageCapabilityCache = new Map();
+    }
+  }
+  return imageCapabilityCache.get(model);
+}
+
+function supportsValue(capability: ImageModelCapability | undefined, key: string, value: string): boolean {
+  const descriptor = capability?.supported_parameters?.[key];
+  return Boolean(descriptor && (!descriptor.values || descriptor.values.includes(value)));
+}
+
+function enumValues(capability: ImageModelCapability | undefined, key: string): string[] {
+  return capability?.supported_parameters?.[key]?.values ?? [];
+}
+
+function isSizeValidationError(status: number, body: string): boolean {
+  return status === 400 && /size|pixel|resolution/i.test(body);
+}
+
+function imageRequestBodies(model: string, prompt: string, capability: ImageModelCapability | undefined): Record<string, unknown>[] {
+  const base: Record<string, unknown> = { model, prompt, n: 1 };
+  if (supportsValue(capability, "aspect_ratio", "9:16")) base.aspect_ratio = "9:16";
+  if (supportsValue(capability, "output_format", "png")) base.output_format = "png";
+
+  const resolutions = enumValues(capability, "resolution");
+  if (!resolutions.length) return [base];
+
+  const preferred = model.includes("seedream")
+    ? ["4K", "2K", "1K", "512"]
+    : ["1K", "2K", "4K", "512"];
+  const ordered = preferred.filter((value) => resolutions.includes(value));
+  for (const value of resolutions) {
+    if (!ordered.includes(value)) ordered.push(value);
+  }
+
+  return ordered.map((resolution) => ({ ...base, resolution }));
+}
+
 /**
  * Generate a still image from a prompt. Returns a local PNG path.
  * Models return square (e.g. 1024x1024); the renderer scales+crops to 9:16.
@@ -25,7 +124,7 @@ const NO_TEXT_SUFFIX =
 export async function generateImage(
   prompt: string,
   styleSuffix = "",
-  opts: { model?: string; outputDir?: string } = {}
+  opts: { model?: string; outputDir?: string; onUsage?: MediaUsageCallback } = {}
 ): Promise<string> {
   const targetDir = opts.outputDir || config.processingPath;
   const model = opts.model || resolveModels().image;
@@ -36,34 +135,57 @@ export async function generateImage(
     .join(". ");
 
   try {
-    const res = await fetch(`${config.openRouterBaseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.openRouterApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        modalities: ["image", "text"],
-        messages: [{ role: "user", content: fullPrompt }],
-      }),
-    });
+    const capability = await getImageModelCapability(model);
+    const bodies = imageRequestBodies(model, fullPrompt, capability);
+    let res: Response | undefined;
+    let lastErrorText = "";
+    for (let attempt = 0; attempt < bodies.length; attempt++) {
+      res = await fetch(`${config.openRouterBaseUrl}/images`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.openRouterApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(bodies[attempt]),
+      });
+      if (res.ok) break;
+      lastErrorText = await res.text();
+      if (!isSizeValidationError(res.status, lastErrorText) || attempt === bodies.length - 1) break;
+      console.warn(
+        `Image size rejected for ${model} (${String(bodies[attempt].resolution ?? "default")}); retrying larger supported size`
+      );
+    }
 
-    if (!res.ok) {
-      throw new Error(`Image API ${res.status}: ${await res.text()}`);
+    if (!res?.ok) {
+      throw new Error(`Image API ${res?.status ?? "unknown"}: ${lastErrorText}`);
     }
 
     const data = (await res.json()) as {
-      choices?: { message?: { images?: { image_url?: { url?: string } }[] } }[];
+      id?: string;
+      usage?: { cost?: number | string };
+      data?: { b64_json?: string; media_type?: string }[];
     };
-    const url = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
-    if (!url) {
+    const responseCost = parseCost(data.usage?.cost);
+    const generationCost = responseCost ?? (await fetchGenerationCost(data.id));
+    opts.onUsage?.({
+      costUsd: generationCost,
+      source:
+        responseCost !== undefined
+          ? "openrouter_usage"
+          : generationCost !== undefined
+          ? "openrouter_generation"
+          : "estimated",
+      generationId: data.id,
+    });
+    const item = data.data?.[0];
+    if (!item?.b64_json) {
       throw new Error("No image returned from model");
     }
+    if (item.media_type === "image/svg+xml") {
+      throw new Error("Vector SVG image returned; choose a raster image model for video generation");
+    }
 
-    // url is a data URI: data:image/png;base64,XXXX
-    const base64 = url.includes(",") ? url.split(",", 2)[1] : url;
-    const buffer = Buffer.from(base64, "base64");
+    const buffer = Buffer.from(item.b64_json, "base64");
 
     const imagePath = join(targetDir, generateFilename("scene", "png"));
     await writeFile(imagePath, buffer);
@@ -82,35 +204,76 @@ export async function generateImage(
  */
 export async function generateNarration(
   text: string,
-  opts: { model?: string; voice?: string; format?: "mp3" | "pcm"; outputDir?: string } = {}
+  opts: { model?: string; voice?: string; format?: "mp3" | "pcm"; outputDir?: string; onUsage?: MediaUsageCallback } = {}
 ): Promise<{ audioPath: string; duration: number }> {
   const targetDir = opts.outputDir || config.processingPath;
-  const tts = resolveModels().tts;
-  const model = opts.model || tts.model;
-  const voice = opts.voice || tts.voice;
-  const format = opts.format || tts.format; // some models (Gemini) only emit pcm
-
   await ensureDir(targetDir);
 
+  const primary = resolveTtsChoice(resolveModels().tts, opts);
+  const fallback = resolveTtsChoice(TTS_FALLBACK);
+  const choices =
+    primary.model === fallback.model && primary.voice === fallback.voice
+      ? [primary]
+      : [primary, fallback];
+
+  let lastError: unknown;
+  for (const choice of choices) {
+    try {
+      return await generateNarrationWithChoice(text, targetDir, choice, opts.onUsage);
+    } catch (error: unknown) {
+      lastError = error;
+      if (choice !== choices[choices.length - 1]) {
+        console.warn(
+          `TTS failed for ${choice.model}/${choice.voice}; falling back to ${fallback.model}/${fallback.voice}: ${getErrorMessage(error)}`
+        );
+      }
+    }
+  }
+
+  throw new Error(`Narration failed: ${getErrorMessage(lastError)}`);
+}
+
+async function generateNarrationWithChoice(
+  text: string,
+  targetDir: string,
+  choice: TtsChoice,
+  onUsage?: MediaUsageCallback
+): Promise<{ audioPath: string; duration: number }> {
+  const { model, voice, format } = choice; // some models (Gemini) only emit pcm
   let rawPath = "";
   try {
-    const res = await fetch(`${config.openRouterBaseUrl}/audio/speech`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.openRouterApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        input: text,
-        voice,
-        response_format: format,
-      }),
-    });
+    let res: Response | undefined;
+    for (let attempt = 1; attempt <= TTS_MAX_ATTEMPTS; attempt++) {
+      res = await fetch(`${config.openRouterBaseUrl}/audio/speech`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.openRouterApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          input: text,
+          voice,
+          response_format: format,
+        }),
+      });
 
+      if (res.ok || !isRetryableStatus(res.status) || attempt === TTS_MAX_ATTEMPTS) break;
+      console.warn(`TTS ${res.status} for ${model}/${voice}; retrying (${attempt}/${TTS_MAX_ATTEMPTS})`);
+      await sleep(750 * attempt);
+    }
+
+    if (!res) throw new Error("TTS request failed before receiving a response");
     if (!res.ok) {
       throw new Error(`TTS API ${res.status}: ${await res.text()}`);
     }
+    const generationId = res.headers.get("x-openrouter-generation-id") ?? undefined;
+    const generationCost = await fetchGenerationCost(generationId);
+    onUsage?.({
+      costUsd: generationCost,
+      source: generationCost !== undefined ? "openrouter_generation" : "estimated",
+      generationId,
+    });
 
     const buffer = Buffer.from(await res.arrayBuffer());
     const rawExt = format === "pcm" ? "pcm" : "mp3";
@@ -136,7 +299,7 @@ export async function generateNarration(
     return { audioPath, duration };
   } catch (error: unknown) {
     if (rawPath) await unlink(rawPath).catch(() => {});
-    throw new Error(`Narration failed: ${getErrorMessage(error)}`);
+    throw error;
   }
 }
 
@@ -183,4 +346,122 @@ export function getAudioDuration(audioPath: string): Promise<number> {
       resolve(metadata.format.duration || 3);
     });
   });
+}
+
+// ============================================
+// Hero video generation — OpenRouter's async /videos endpoint (submit → poll
+// → download). This is the one genuinely expensive, genuinely slow (minutes,
+// not seconds) call in the whole pipeline, which is why it's gated behind
+// `heroPolicy` in the niche recipe and only ever used for ONE scene per reel.
+// Confirmed request/response shape against OpenRouter's own docs 2026-07-03
+// (POST /videos -> {id, status, polling_url}; GET polling_url -> {status,
+// unsigned_urls} once status:"completed").
+// ============================================
+
+export interface HeroVideoOptions {
+  model?: string;
+  durationSec?: number; // clip length OpenRouter generates, default 5
+  aspectRatio?: string; // default "9:16"
+  outputDir?: string;
+  pollIntervalMs?: number; // default 30s — these jobs take minutes, not seconds
+  maxPollAttempts?: number; // default 60 (30 min ceiling)
+  onUsage?: MediaUsageCallback;
+}
+
+export interface HeroVideoResult {
+  videoPath: string;
+  durationSec: number;
+}
+
+interface VideoJobResponse {
+  id: string;
+  status: "pending" | "in_progress" | "completed" | "failed" | "cancelled" | "expired";
+  polling_url?: string;
+  unsigned_urls?: string[];
+  error?: unknown;
+  usage?: { cost?: number | string };
+  total_cost?: number | string;
+  cost?: number | string;
+}
+
+/**
+ * Generate the single AI-video "hero shot" for a `hybrid_scene` reel.
+ * Submits, polls until terminal, downloads the result. `generate_audio` is
+ * always false — narration/sound design for the scene are handled separately
+ * and mixed in during render, not baked in by the video model.
+ */
+export async function generateHeroVideo(
+  prompt: string,
+  opts: HeroVideoOptions = {}
+): Promise<HeroVideoResult> {
+  const model = opts.model || resolveModels().video;
+  const durationSec = opts.durationSec ?? 5;
+  const targetDir = opts.outputDir || config.processingPath;
+  await ensureDir(targetDir);
+
+  const fullPrompt = [prompt, NO_TEXT_SUFFIX].filter(Boolean).join(". ");
+
+  const submitRes = await fetch(`${config.openRouterBaseUrl}/videos`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.openRouterApiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      prompt: fullPrompt,
+      duration: durationSec,
+      aspect_ratio: opts.aspectRatio ?? "9:16",
+      generate_audio: false,
+    }),
+  });
+  if (!submitRes.ok) {
+    throw new Error(`Video submit failed (${submitRes.status}): ${await submitRes.text()}`);
+  }
+  const job = (await submitRes.json()) as VideoJobResponse;
+  const pollUrl = job.polling_url || `${config.openRouterBaseUrl}/videos/${job.id}`;
+
+  const pollIntervalMs = opts.pollIntervalMs ?? 30_000;
+  const maxAttempts = opts.maxPollAttempts ?? 60;
+
+  let final: VideoJobResponse | undefined;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await sleep(pollIntervalMs);
+    const pollRes = await fetch(pollUrl, {
+      headers: { Authorization: `Bearer ${config.openRouterApiKey}` },
+    });
+    if (!pollRes.ok) {
+      throw new Error(`Video poll failed (${pollRes.status}): ${await pollRes.text()}`);
+    }
+    final = (await pollRes.json()) as VideoJobResponse;
+    if (final.status === "completed") break;
+    if (final.status === "failed" || final.status === "cancelled" || final.status === "expired") {
+      throw new Error(`Hero video generation ${final.status}: ${JSON.stringify(final.error ?? "")}`);
+    }
+  }
+  if (final?.status !== "completed") {
+    throw new Error(`Hero video generation timed out after ${maxAttempts} polls`);
+  }
+  const finalCost = parseCost(final.total_cost) ?? parseCost(final.cost) ?? parseCost(final.usage?.cost);
+  opts.onUsage?.({
+    costUsd: finalCost,
+    source: finalCost !== undefined ? "openrouter_usage" : "estimated",
+    generationId: final.id ?? job.id,
+  });
+
+  const videoUrl = final.unsigned_urls?.[0];
+  if (!videoUrl) throw new Error("Hero video completed but no download URL returned");
+
+  const dlRes = await fetch(videoUrl, {
+    headers: videoUrl.includes("openrouter.ai")
+      ? { Authorization: `Bearer ${config.openRouterApiKey}` }
+      : {},
+  });
+  if (!dlRes.ok) throw new Error(`Hero video download failed (${dlRes.status})`);
+  const buffer = Buffer.from(await dlRes.arrayBuffer());
+
+  const videoPath = join(targetDir, generateFilename("hero", "mp4"));
+  await writeFile(videoPath, buffer);
+  console.log(`🎬 Hero video [${model}]: "${prompt.substring(0, 40)}..." (${durationSec}s)`);
+  return { videoPath, durationSec };
 }
