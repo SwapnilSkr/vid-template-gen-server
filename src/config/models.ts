@@ -120,11 +120,11 @@ export const TTS_VOICE_CATALOG: TtsVoiceOption[] = [
   { model: "canopylabs/orpheus-3b-0.1-ft", voice: "zac", format: "mp3", label: "Zac (Orpheus) — male, dynamic" },
 
   // --- xAI Grok Voice TTS 1.0 (mp3) — all 5 voices ---
-  { model: "x-ai/grok-voice-tts-1.0", voice: "Eve", format: "mp3", label: "Eve (Grok Voice)" },
-  { model: "x-ai/grok-voice-tts-1.0", voice: "Ara", format: "mp3", label: "Ara (Grok Voice)" },
-  { model: "x-ai/grok-voice-tts-1.0", voice: "Rex", format: "mp3", label: "Rex (Grok Voice)" },
-  { model: "x-ai/grok-voice-tts-1.0", voice: "Sal", format: "mp3", label: "Sal (Grok Voice)" },
-  { model: "x-ai/grok-voice-tts-1.0", voice: "Leo", format: "mp3", label: "Leo (Grok Voice)" },
+  { model: "x-ai/grok-voice-tts-1.0", voice: "Rex", format: "mp3", label: "Rex (Grok Voice) — darker male, horror default" },
+  { model: "x-ai/grok-voice-tts-1.0", voice: "Sal", format: "mp3", label: "Sal (Grok Voice) — conversational, Reddit default" },
+  { model: "x-ai/grok-voice-tts-1.0", voice: "Leo", format: "mp3", label: "Leo (Grok Voice) — steady male" },
+  { model: "x-ai/grok-voice-tts-1.0", voice: "Eve", format: "mp3", label: "Eve (Grok Voice) — female" },
+  { model: "x-ai/grok-voice-tts-1.0", voice: "Ara", format: "mp3", label: "Ara (Grok Voice) — female" },
 ];
 
 const ENV_TIER = (process.env.MODEL_TIER as Tier) || "cheap";

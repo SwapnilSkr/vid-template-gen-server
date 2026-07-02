@@ -38,6 +38,8 @@ export interface NicheRecipe {
   strategy: ReelStrategy;
   styles: VisualStyle[]; // rotation pool
   imageTier: Tier; // which image model quality to use
+  /** Optional script-planning model override. Use when prose quality matters more than the tier default. */
+  scriptModel?: string;
   sceneCount: number;
   motion: "ken_burns" | "loop_ambient" | "mograph" | "gameplay";
   captionSkin: CaptionSkin;
@@ -264,9 +266,10 @@ export const NICHE_RECIPES: Record<string, NicheRecipe> = {
     captionSkin: "karaoke_word",
     musicMood: "ambient_drone",
     heroPolicy: "never",
-    voice: { model: "canopylabs/orpheus-3b-0.1-ft", voice: "leo", format: "mp3" },
+    scriptModel: "google/gemini-2.5-flash",
+    voice: { model: "x-ai/grok-voice-tts-1.0", voice: "Rex", format: "mp3" },
     scriptGuide:
-      "Short-form horror that feels like a true confession, not a generic spooky tale. Use one ordinary object or place, one impossible detail, and a final line that recontextualizes the whole story. Keep the voice quiet, specific, and restrained: no monsters, no clichés, no 'suddenly', no explaining the evil. Every scene should make the situation more wrong.",
+      "Short-form horror that feels like a real whispered confession recorded after midnight. Use one ordinary object or place, one impossible detail, and a final line that recontextualizes the whole story. Keep the voice intimate, quiet, and disturbed: short sentences, uneasy pauses, concrete sensory details, no monsters, no gore, no clichés, no 'suddenly', no explaining the evil. Every scene should make the situation more wrong, more personal, and harder to dismiss as imagination.",
   },
 
   mythology: {
