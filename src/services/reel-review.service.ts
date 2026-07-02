@@ -11,6 +11,7 @@ import { generateImage } from "./openrouter-media.service";
 import { uploadImage } from "./s3.service";
 import { listTrendReferences } from "./trend-reference.service";
 import { getTrendDigest } from "./trend-insight.service";
+import { getRecipe } from "../config/niche-styles";
 
 export interface UpdateReelReviewInput {
   title?: string;
@@ -27,6 +28,14 @@ const DEFAULT_REDDIT_TAGS = [
   "aita",
   "storytime",
   "reddit",
+];
+
+const DEFAULT_HORROR_TAGS = [
+  "shorts",
+  "horror",
+  "horrorstories",
+  "scarystories",
+  "creepypasta",
 ];
 
 function esc(value: string): string {
@@ -67,7 +76,8 @@ function wrap(text: string, maxChars: number): string[] {
 }
 
 function buildTitle(reel: IReel): string {
-  const base = (reel.review?.title || reel.title || reel.hook || reel.topic || "Reddit story").trim();
+  const recipe = getRecipe(reel.niche);
+  const base = (reel.review?.title || reel.title || reel.hook || reel.topic || recipe.displayName).trim();
   if (reel.partNumber && reel.partCount && reel.partCount > 1) {
     return `${base} | Part ${reel.partNumber}`;
   }
@@ -75,20 +85,47 @@ function buildTitle(reel: IReel): string {
 }
 
 function buildDescription(reel: IReel, title: string, tags: string[]): string {
-  const source = reel.redditStory?.subreddit ? `${reel.redditStory.subreddit} story` : "Reddit story";
   const part =
     reel.partNumber && reel.partCount && reel.partCount > 1
       ? `\n\nPart ${reel.partNumber} of ${reel.partCount}.`
       : "";
   const hashtags = tags.slice(0, 8).map((tag) => `#${tag}`).join(" ");
-  return `${title}\n\n${source} with gameplay, captions, and a fast hook.${part}\n\n${hashtags}`.trim();
+
+  if (reel.niche === "reddit") {
+    const source = reel.redditStory?.subreddit ? `${reel.redditStory.subreddit} story` : "Reddit story";
+    return `${title}\n\n${source} with gameplay, captions, and a fast hook.${part}\n\n${hashtags}`.trim();
+  }
+
+  const recipe = getRecipe(reel.niche);
+  return `${title}\n\n${recipe.displayName} short.${part}\n\n${hashtags}`.trim();
 }
 
 async function buildThumbnailPrompt(reel: IReel, title: string): Promise<string> {
   const genre = reel.genre ? ` ${reel.genre.replace(/_/g, " ")}` : "";
   const digest = await getTrendDigest(reel.niche, reel.genre);
   const trendBlock = digest ? ` Reference these winning thumbnail/title patterns from top-performing videos in this genre: ${digest.replace(/\n/g, " ")}` : "";
-  return `Bold Reddit Shorts thumbnail for a${genre} story: huge readable hook text, white Reddit post card, tense contrast, gameplay background, red-orange accent, no clutter. Title: "${title}".${trendBlock}`;
+
+  if (reel.niche === "reddit") {
+    return `Bold Reddit Shorts thumbnail for a${genre} story: huge readable hook text, white Reddit post card, tense contrast, gameplay background, red-orange accent, no clutter. Title: "${title}".${trendBlock}`;
+  }
+
+  if (reel.niche === "horror") {
+    return `Terrifying YouTube Shorts horror thumbnail for a${genre} story: dark cinematic photoreal scene, single unsettling figure or silhouette half-lit, deep shadows, blood-red or sickly-green rim light, huge bold white hook text with black stroke, high contrast, unsettling composition, no clutter. Title: "${title}".${trendBlock}`;
+  }
+
+  const recipe = getRecipe(reel.niche);
+  return `Bold YouTube Shorts thumbnail for a "${recipe.displayName}"${genre} video: cinematic dramatic scene, huge readable hook text, high contrast, no clutter. Title: "${title}".${trendBlock}`;
+}
+
+interface ThumbnailBrand {
+  badgeText: string;
+  badgeColor: string;
+}
+
+function thumbnailBrand(niche: string): ThumbnailBrand {
+  if (niche === "reddit") return { badgeText: "REDDIT", badgeColor: "#ff4500" };
+  if (niche === "horror") return { badgeText: "HORROR", badgeColor: "#7f1d1d" };
+  return { badgeText: getRecipe(niche).displayName.toUpperCase(), badgeColor: "#0f766e" };
 }
 
 async function buildVisibilityNotes(reel: IReel): Promise<string> {
@@ -101,7 +138,9 @@ async function buildVisibilityNotes(reel: IReel): Promise<string> {
   });
 
   if (!refs.length) {
-    return "Use a curiosity-gap title, large readable thumbnail text, Reddit/card visual language, first-second hook, and Shorts tags.";
+    return reel.niche === "reddit"
+      ? "Use a curiosity-gap title, large readable thumbnail text, Reddit/card visual language, first-second hook, and Shorts tags."
+      : "Use a curiosity-gap title, large readable thumbnail text, dramatic visual language, first-second hook, and Shorts tags.";
   }
 
   const notes = refs
@@ -114,38 +153,45 @@ const THUMB_W = 1280;
 const THUMB_H = 720; // YouTube thumbnail ratio (16:9)
 
 /** Flat mockup thumbnail (no AI image) — the original design, kept as a
- * fallback when image generation fails or no prompt is available. */
-async function renderFlatThumbnailPng(title: string, subtitle: string): Promise<string> {
+ * fallback when image generation fails or no prompt is available. Branding
+ * (badge text/color, Reddit post-card mockup) varies by niche. */
+async function renderFlatThumbnailPng(title: string, subtitle: string, niche: string): Promise<string> {
   await ensureDir(config.processingPath);
   const lines = wrap(title, 18);
   const titleSvg = lines
     .map((line, index) => `<tspan x="70" dy="${index === 0 ? 0 : 86}">${esc(line)}</tspan>`)
     .join("");
+  const brand = thumbnailBrand(niche);
+  const isReddit = niche === "reddit";
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${THUMB_W}" height="${THUMB_H}" viewBox="0 0 ${THUMB_W} ${THUMB_H}">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#111827"/>
-      <stop offset="0.54" stop-color="#172033"/>
-      <stop offset="1" stop-color="#0f766e"/>
-    </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.34"/>
-    </filter>
-  </defs>
-  <rect width="${THUMB_W}" height="${THUMB_H}" fill="url(#bg)"/>
-  <rect x="760" y="70" width="420" height="560" rx="34" fill="#f8fafc" opacity="0.95" filter="url(#shadow)"/>
-  <circle cx="836" cy="150" r="34" fill="#ff4500"/>
+  const cardMockup = isReddit
+    ? `<rect x="760" y="70" width="420" height="560" rx="34" fill="#f8fafc" opacity="0.95" filter="url(#shadow)"/>
+  <circle cx="836" cy="150" r="34" fill="${brand.badgeColor}"/>
   <text x="836" y="162" text-anchor="middle" font-family="Arial" font-size="36" font-weight="700" fill="#fff">r</text>
   <text x="890" y="146" font-family="Arial" font-size="32" font-weight="700" fill="#111827">Reddit</text>
   <text x="890" y="184" font-family="Arial" font-size="24" fill="#64748b">storytime</text>
   <rect x="810" y="240" width="320" height="28" rx="14" fill="#cbd5e1"/>
   <rect x="810" y="302" width="268" height="28" rx="14" fill="#e2e8f0"/>
   <rect x="810" y="364" width="338" height="28" rx="14" fill="#cbd5e1"/>
-  <rect x="810" y="504" width="150" height="52" rx="26" fill="#ff4500"/>
-  <text x="885" y="539" text-anchor="middle" font-family="Arial" font-size="25" font-weight="700" fill="#fff">AITA?</text>
+  <rect x="810" y="504" width="150" height="52" rx="26" fill="${brand.badgeColor}"/>
+  <text x="885" y="539" text-anchor="middle" font-family="Arial" font-size="25" font-weight="700" fill="#fff">AITA?</text>`
+    : "";
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${THUMB_W}" height="${THUMB_H}" viewBox="0 0 ${THUMB_W} ${THUMB_H}">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0b0f"/>
+      <stop offset="0.54" stop-color="#171923"/>
+      <stop offset="1" stop-color="${brand.badgeColor}"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+  <rect width="${THUMB_W}" height="${THUMB_H}" fill="url(#bg)"/>
+  ${cardMockup}
   <rect x="48" y="80" width="622" height="560" rx="32" fill="#ffffff" filter="url(#shadow)"/>
-  <text x="70" y="164" font-family="Arial" font-size="34" font-weight="700" fill="#ff4500">REDDIT SHORTS</text>
+  <text x="70" y="164" font-family="Arial" font-size="34" font-weight="700" fill="${brand.badgeColor}">${esc(brand.badgeText)} SHORTS</text>
   <text x="70" y="280" font-family="Arial" font-size="76" line-height="1" font-weight="900" fill="#111827">${titleSvg}</text>
   <text x="70" y="588" font-family="Arial" font-size="30" font-weight="700" fill="#475569">${esc(subtitle)}</text>
 </svg>`;
@@ -160,11 +206,12 @@ async function renderFlatThumbnailPng(title: string, subtitle: string): Promise<
 }
 
 /** Transparent text-overlay layer: bottom gradient for legibility + huge bold
- * hook text + a small Reddit badge — composited over the AI background. */
-function renderThumbnailOverlaySvg(title: string): Buffer {
+ * hook text + a small niche badge — composited over the AI background. */
+function renderThumbnailOverlaySvg(title: string, niche: string): Buffer {
   const lines = wrap(title, 16);
   const lineH = 84;
   const startY = THUMB_H - 70 - (lines.length - 1) * lineH;
+  const brand = thumbnailBrand(niche);
   const textSvg = lines
     .map(
       (line, index) =>
@@ -180,8 +227,8 @@ function renderThumbnailOverlaySvg(title: string): Buffer {
     </linearGradient>
   </defs>
   <rect x="0" y="0" width="${THUMB_W}" height="${THUMB_H}" fill="url(#fade)"/>
-  <rect x="40" y="40" width="150" height="52" rx="26" fill="#ff4500"/>
-  <text x="115" y="75" text-anchor="middle" font-family="Arial" font-size="26" font-weight="700" fill="#ffffff">REDDIT</text>
+  <rect x="40" y="40" width="150" height="52" rx="26" fill="${brand.badgeColor}"/>
+  <text x="115" y="75" text-anchor="middle" font-family="Arial" font-size="26" font-weight="700" fill="#ffffff">${esc(brand.badgeText)}</text>
   ${textSvg}
 </svg>`;
 
@@ -214,11 +261,11 @@ function overlayThumbnailText(background: string, overlay: string, output: strin
 }
 
 /** Real AI thumbnail: generate a dramatic background from `thumbnailPrompt`,
- * composite the bold hook text + Reddit badge on top. Falls back to the flat
+ * composite the bold hook text + niche badge on top. Falls back to the flat
  * mockup design if image generation or compositing fails. */
-async function renderThumbnailPng(title: string, subtitle: string, thumbnailPrompt?: string): Promise<string> {
+async function renderThumbnailPng(title: string, subtitle: string, niche: string, thumbnailPrompt?: string): Promise<string> {
   await ensureDir(config.processingPath);
-  if (!thumbnailPrompt) return renderFlatThumbnailPng(title, subtitle);
+  if (!thumbnailPrompt) return renderFlatThumbnailPng(title, subtitle, niche);
 
   const localFiles: string[] = [];
   try {
@@ -235,7 +282,7 @@ async function renderThumbnailPng(title: string, subtitle: string, thumbnailProm
     localFiles.push(fittedBgPath);
 
     const overlayPath = join(config.processingPath, generateFilename("thumb_overlay", "png"));
-    await writeFile(overlayPath, renderThumbnailOverlaySvg(title));
+    await writeFile(overlayPath, renderThumbnailOverlaySvg(title, niche));
     localFiles.push(overlayPath);
 
     const finalPath = join(config.processingPath, generateFilename("thumbnail", "png"));
@@ -246,23 +293,24 @@ async function renderThumbnailPng(title: string, subtitle: string, thumbnailProm
   } catch (error: unknown) {
     console.warn(`🖼️  AI thumbnail failed, falling back to flat design: ${getErrorMessage(error)}`);
     await Promise.all(localFiles.map((f) => unlink(f).catch(() => {})));
-    return renderFlatThumbnailPng(title, subtitle);
+    return renderFlatThumbnailPng(title, subtitle, niche);
   }
 }
 
 export async function buildReelReviewPackage(reel: IReel): Promise<IReelReviewPackage> {
   const title = buildTitle(reel).slice(0, 100);
+  const nicheTags = reel.niche === "reddit" ? DEFAULT_REDDIT_TAGS : reel.niche === "horror" ? DEFAULT_HORROR_TAGS : [reel.niche];
   const tags = normalizeTags([
     reel.niche,
     reel.genre ?? "",
     reel.redditStory?.subreddit?.replace(/^r\//i, "") ?? "",
-    ...DEFAULT_REDDIT_TAGS,
+    ...nicheTags,
   ]);
   const description = buildDescription(reel, title, tags);
   const thumbnailPrompt = await buildThumbnailPrompt(reel, title);
   const visibilityNotes = await buildVisibilityNotes(reel);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
-  const thumbnailPath = await renderThumbnailPng(title, subtitle, thumbnailPrompt);
+  const thumbnailPath = await renderThumbnailPng(title, subtitle, reel.niche, thumbnailPrompt);
   const thumbnailUrl = await uploadImage(await readFile(thumbnailPath), "reels", `${reel._id}_thumbnail.png`);
 
   return {
@@ -323,7 +371,7 @@ export async function regenerateReelThumbnail(
   const title = (nextReview.title || buildTitle(reel)).slice(0, 100);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
   const thumbnailPrompt = nextReview.thumbnailPrompt || (await buildThumbnailPrompt(reel, title));
-  const thumbnailPath = await renderThumbnailPng(title, subtitle, thumbnailPrompt);
+  const thumbnailPath = await renderThumbnailPng(title, subtitle, reel.niche, thumbnailPrompt);
   nextReview.thumbnailUrl = await uploadImage(
     await readFile(thumbnailPath),
     "reels",

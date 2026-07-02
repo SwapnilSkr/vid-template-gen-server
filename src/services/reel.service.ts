@@ -1,8 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { Reel, type IReel, type StorySource } from "../models";
 import { config } from "../config";
-import { resolveModels, type Tier } from "../config/models";
+import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
 import { ensureDir, cleanupFiles } from "../utils";
 import { getErrorMessage } from "../types";
 import { planReel, planRedditStory } from "./reel-script.service";
@@ -17,7 +18,10 @@ import {
 } from "./story.service";
 import { generateImage, generateNarration } from "./openrouter-media.service";
 import { renderImageKenBurns, type RenderScene } from "./reel-render.service";
+import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
+import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
+import { buildReelCostBreakdown, type MeasuredCostInput } from "./reel-cost.service";
 import {
   uploadImage,
   uploadAudio,
@@ -35,9 +39,17 @@ interface CreateReelOptions {
   source?: StorySource;
   genre?: string;
   gameplayKey?: string;
+  imageModel?: string;
   ttsModel?: string;
   ttsVoice?: string;
   ttsFormat?: "mp3" | "pcm";
+}
+
+/** Pick a random genre from this niche's scout targets (undefined if the niche has none, e.g. reddit picks its own way). */
+function pickRandomGenre(niche: string): string | undefined {
+  const targets = getScoutTargets(niche);
+  if (!targets.length) return undefined;
+  return targets[Math.floor(Math.random() * targets.length)].genre;
 }
 
 /** Build the voiceOverride subdoc from create-options, or undefined if none given. */
@@ -66,6 +78,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
       source: options.source,
       genre: options.genre,
       gameplayKey: options.gameplayKey,
+      imageModel: options.imageModel,
       ttsModel: options.ttsModel,
       ttsVoice: options.ttsVoice,
       ttsFormat: options.ttsFormat,
@@ -76,14 +89,21 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     return createGameplayReelFromStory(options);
   }
 
+  // Niches with their own scout targets (e.g. horror) need a genre assigned
+  // at creation time so the planner can pull the matching trend digest —
+  // pick one at random when the caller didn't specify one. Reddit is excluded
+  // here: it has its own untouched auto-topic flow via generateStory.
+  const genre = options.genre ?? (recipe.strategy !== "gameplay_overlay" ? pickRandomGenre(niche) : undefined);
+
   const reel = new Reel({
     niche,
     topic,
     tier,
     storySource: options.source,
-    genre: options.genre,
+    genre,
     strategy: recipe.strategy,
     gameplayKey: options.gameplayKey,
+    imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
     progress: 0,
@@ -112,6 +132,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     genre: story.genre ?? options.genre,
     strategy: "gameplay_overlay",
     gameplayKey: options.gameplayKey,
+    imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
     progress: 0,
@@ -150,6 +171,7 @@ async function createGameplayReelSeries(
       genre: part.genre ?? options.genre,
       strategy: "gameplay_overlay",
       gameplayKey: options.gameplayKey,
+      imageModelOverride: options.imageModel,
       voiceOverride: toVoiceOverride(options),
       status: "pending",
       progress: 0,
@@ -223,6 +245,14 @@ async function updateStatus(
   });
 }
 
+async function downloadGeneratedAsset(url: string, filename: string): Promise<string> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Could not reuse generated asset (${res.status}): ${url}`);
+  const path = join(config.processingPath, filename);
+  await writeFile(path, Buffer.from(await res.arrayBuffer()));
+  return path;
+}
+
 /** Full pipeline: plan → images → narration → render → upload. Invoked by the reel-processing worker. */
 export async function processReel(reelId: string): Promise<void> {
   const reel = await Reel.findById(reelId);
@@ -236,40 +266,84 @@ export async function processReel(reelId: string): Promise<void> {
     return processGameplayReel(reel, recipe);
   }
 
+  const isHybrid = recipe.strategy === "hybrid_scene";
   const models = resolveModels(reel.tier as Tier); // tts/video from reel tier
-  const imageModel = resolveModels(recipe.imageTier as Tier).image; // niche-appropriate stills
+  const imageModel = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image; // niche-appropriate stills
   // precedence: tier default < niche voice override < explicit pick at creation
-  const tts = { ...models.tts, ...(recipe.voice ?? {}), ...(reel.voiceOverride ?? {}) };
+  const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
   const style = pickStyle(recipe); // rotate one style from the niche pool
+  const measuredCosts: MeasuredCostInput[] = [];
 
   try {
     await ensureDir(config.processingPath);
 
     // 1. Plan (LLM script + scene graph)
     await updateStatus(reelId, "planning", 5);
-    const plan = await planReel(reel.niche, reel.topic, reel.tier as Tier);
-    reel.title = plan.title;
-    reel.hook = plan.hook;
-    reel.style = style.promptSuffix;
-    console.log(`🎨 Style: ${style.id} | image=${imageModel} | voice=${tts.model}/${tts.voice}`);
-    reel.scenes = plan.scenes.map((s, i) => ({
-      index: i,
-      narration: s.narration,
-      visualPrompt: s.visualPrompt,
-      motion: { type: "ken_burns", direction: i % 2 === 0 ? "in" : "out" },
-      startTime: 0,
-      duration: 0,
-      isHero: false,
-    }));
-    await reel.save();
+    const canReusePlan = reel.scenes.length > 0 && Boolean(reel.title && reel.hook);
+    if (canReusePlan) {
+      console.log(`♻️  Reusing existing plan/assets for reel ${reelId}`);
+    } else {
+      const plan = await planReel(reel.niche, reel.topic, reel.tier as Tier, reel.genre);
+      reel.title = plan.title;
+      reel.hook = plan.hook;
+      reel.style = style.promptSuffix;
+      reel.scenes = plan.scenes.map((s, i) => ({
+        index: i,
+        narration: s.narration,
+        visualPrompt: s.visualPrompt,
+        motion: { type: "ken_burns", direction: i % 2 === 0 ? "in" : "out" },
+        startTime: 0,
+        duration: 0,
+        // heroPolicy "one_climax" (horror/mythology/movie_recap today): the
+        // final scene is always the hero reveal — matches the "escalate dread,
+        // end on a twist" script structure. "trend_gated" heroPolicy isn't used
+        // by any hybrid_scene niche yet; revisit this if that changes.
+        isHero: isHybrid && i === plan.scenes.length - 1,
+      }));
+      await reel.save();
+    }
+    console.log(
+      `🎨 Style: ${canReusePlan ? "reused" : style.id} | image=${imageModel} | voice=${tts.model}/${tts.voice}` +
+        (isHybrid ? ` | hero=${models.video}` : "")
+    );
 
-    // 2. Images
+    // 2. Images — skip the hero scene; its visual comes from generateHeroVideo
+    // at render time instead (no point paying for a still that's discarded).
     await updateStatus(reelId, "generating_assets", 20);
-    const imagePaths: string[] = [];
+    const imagePaths: (string | undefined)[] = [];
+    const heroVideoPaths: (string | undefined)[] = [];
     for (let i = 0; i < reel.scenes.length; i++) {
       const scene = reel.scenes[i];
+      if (scene.isHero) {
+        if (scene.assetUrl) {
+          const heroVideoPath = await downloadGeneratedAsset(scene.assetUrl, `${reelId}_${i}_hero_reused.mp4`);
+          heroVideoPaths[i] = heroVideoPath;
+          localFiles.push(heroVideoPath);
+        }
+        imagePaths.push(undefined);
+        continue;
+      }
+      if (scene.assetUrl) {
+        const imagePath = await downloadGeneratedAsset(scene.assetUrl, `${reelId}_${i}_reused.png`);
+        imagePaths.push(imagePath);
+        localFiles.push(imagePath);
+        await updateStatus(
+          reelId,
+          "generating_assets",
+          20 + Math.round(((i + 1) / reel.scenes.length) * 25)
+        );
+        continue;
+      }
       const imagePath = await generateImage(scene.visualPrompt, reel.style, {
         model: imageModel,
+        onUsage: (usage) => {
+          measuredCosts.push({
+            label: `Image ${i + 1}`,
+            model: imageModel,
+            costUsd: usage.costUsd,
+            source: usage.costUsd !== undefined ? "actual" : "estimated",
+          });
+        },
       });
       imagePaths.push(imagePath);
       localFiles.push(imagePath);
@@ -289,10 +363,29 @@ export async function processReel(reelId: string): Promise<void> {
     const audioPaths: string[] = [];
     for (let i = 0; i < reel.scenes.length; i++) {
       const scene = reel.scenes[i];
+      if (scene.audioUrl) {
+        const audioPath = await downloadGeneratedAsset(scene.audioUrl, `${reelId}_${i}_reused.mp3`);
+        audioPaths.push(audioPath);
+        localFiles.push(audioPath);
+        await updateStatus(
+          reelId,
+          "generating_audio",
+          50 + Math.round(((i + 1) / reel.scenes.length) * 20)
+        );
+        continue;
+      }
       const { audioPath } = await generateNarration(scene.narration, {
         model: tts.model,
         voice: tts.voice,
         format: tts.format,
+        onUsage: (usage) => {
+          measuredCosts.push({
+            label: `Narration ${i + 1}`,
+            model: `${tts.model}/${tts.voice}`,
+            costUsd: usage.costUsd,
+            source: usage.costUsd !== undefined ? "actual" : "estimated",
+          });
+        },
       });
       audioPaths.push(audioPath);
       localFiles.push(audioPath);
@@ -309,13 +402,55 @@ export async function processReel(reelId: string): Promise<void> {
 
     // 4. Render (align happens inside, from actual durations)
     await updateStatus(reelId, "rendering", 75);
-    const renderScenes: RenderScene[] = reel.scenes.map((s, i) => ({
-      imagePath: imagePaths[i],
-      audioPath: audioPaths[i],
-      narration: s.narration,
-      motion: s.motion,
-    }));
-    const result = await renderImageKenBurns(reelId, renderScenes);
+    const result = isHybrid
+      ? await renderHybridScene(
+          reelId,
+          reel.scenes.map(
+            (s, i): HybridScene => ({
+              imagePath: imagePaths[i] ?? "", // unused for the hero scene
+              audioPath: audioPaths[i],
+              narration: s.narration,
+              visualPrompt: s.visualPrompt,
+              motion: s.motion,
+              isHero: s.isHero,
+              heroVideoPath: heroVideoPaths[i],
+            })
+          ),
+          {
+            heroVideoModel: models.video,
+            onHeroGenerated: async (heroVideoPath) => {
+              const heroIndex = reel.scenes.findIndex((scene) => scene.isHero && !scene.assetUrl);
+              if (heroIndex < 0) return;
+              localFiles.push(heroVideoPath);
+              const buffer = await readFile(heroVideoPath);
+              reel.scenes[heroIndex].assetUrl = await uploadVideo(
+                buffer,
+                "compositions",
+                `${reelId}_hero.mp4`
+              );
+              await reel.save();
+            },
+            onHeroUsage: (usage) => {
+              measuredCosts.push({
+                label: "Hero video",
+                model: models.video,
+                costUsd: usage.costUsd,
+                source: usage.costUsd !== undefined ? "actual" : "estimated",
+              });
+            },
+          }
+        )
+      : await renderImageKenBurns(
+          reelId,
+          reel.scenes.map(
+            (s, i): RenderScene => ({
+              imagePath: imagePaths[i]!,
+              audioPath: audioPaths[i],
+              narration: s.narration,
+              motion: s.motion,
+            })
+          )
+        );
     localFiles.push(result.videoPath, result.assPath);
 
     // record resolved timings
@@ -323,7 +458,6 @@ export async function processReel(reelId: string): Promise<void> {
       reel.scenes[i].startTime = t.startTime;
       reel.scenes[i].duration = t.duration;
     });
-
     // 5. Upload
     await updateStatus(reelId, "uploading", 92);
     const videoBuffer = await readFile(result.videoPath);
@@ -331,6 +465,16 @@ export async function processReel(reelId: string): Promise<void> {
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
     reel.review = await buildReelReviewPackage(reel);
+    const heroScene = isHybrid ? result.scenes.find((_, i) => reel.scenes[i]?.isHero) : undefined;
+    const costBreakdown = await buildReelCostBreakdown(reel, {
+      llmModel: models.llm,
+      tts,
+      measuredCosts,
+      heroVideoModel: isHybrid ? models.video : undefined,
+      heroDurationSec: heroScene ? Math.min(Math.max(Math.round(heroScene.duration), 4), 8) : undefined,
+    });
+    reel.costBreakdown = costBreakdown;
+    reel.costUsd = costBreakdown.totalUsd;
 
     reel.status = "completed";
     reel.progress = 100;
@@ -351,7 +495,8 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
   const reelId = reel._id.toString();
   const localFiles: string[] = [];
   // precedence: tier default < niche voice override < explicit pick at creation
-  const tts = { ...resolveModels(reel.tier as Tier).tts, ...(recipe.voice ?? {}), ...(reel.voiceOverride ?? {}) };
+  const models = resolveModels(reel.tier as Tier);
+  const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
 
   try {
     await ensureDir(config.processingPath);
@@ -401,6 +546,12 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
     reel.review = await buildReelReviewPackage(reel);
+    const costBreakdown = await buildReelCostBreakdown(reel, {
+      llmModel: models.llm,
+      tts,
+    });
+    reel.costBreakdown = costBreakdown;
+    reel.costUsd = costBreakdown.totalUsd;
 
     reel.status = "completed";
     reel.progress = 100;
@@ -430,6 +581,9 @@ export async function listReels(limit = 50): Promise<IReel[]> {
 export async function deleteReel(id: string): Promise<boolean> {
   const reel = await Reel.findById(id);
   if (!reel) return false;
+  if (["planning", "generating_assets", "generating_audio", "aligning", "rendering", "uploading"].includes(reel.status)) {
+    throw new Error(`Cannot delete reel while generation is active (current status: ${reel.status})`);
+  }
 
   const assetUrls = [
     reel.outputUrl,

@@ -6,18 +6,18 @@ import { ensureDir } from "../utils";
 import { getAudioDuration } from "./openrouter-media.service";
 import type { ISceneMotion } from "../models";
 
-const W = 1080;
-const H = 1920;
-const FPS = 30;
+export const W = 1080;
+export const H = 1920;
+export const FPS = 30;
 
 // Continuity tuning (fixes "too much gap" / "no natural flow"):
 //  - TAIL: silent breathing room appended after each narration.
 //  - XFADE: scenes crossfade into each other instead of cutting to black.
 //    The crossfade is hidden inside TAIL so spoken words never overlap.
 //    Effective silent gap between sentences = TAIL - XFADE (~0.1s) → tight.
-const TAIL = 0.45;
-const XFADE = 0.35;
-const EDGE_FADE = 0.4; // gentle fade from/to black at the very start/end only
+export const TAIL = 0.45;
+export const XFADE = 0.35;
+export const EDGE_FADE = 0.4; // gentle fade from/to black at the very start/end only
 
 export interface RenderScene {
   imagePath: string;
@@ -31,9 +31,10 @@ export interface RenderResult {
   assPath: string;
   scenes: { startTime: number; duration: number }[];
   totalDuration: number;
+  heroVideoPath?: string;
 }
 
-interface SceneTiming {
+export interface SceneTiming {
   clipPath: string;
   narration: string;
   d: number; // full clip duration (speech + TAIL)
@@ -129,29 +130,43 @@ async function renderImageKenBurnsInner(
   };
 }
 
+export interface SceneClipStyle {
+  /** 0-1, scaled onto the base `noise=alls=9` grain — 1 = default intensity. Can exceed 1. */
+  grainIntensity?: number;
+  /** vignette angle divisor — smaller = darker/tighter vignette. Default matches `PI/5`. */
+  vignetteDivisor?: number;
+  /** extra desaturation beyond the base 0.9 saturation (0 = none). */
+  desaturateBoost?: number;
+}
+
 /**
  * One scene → mp4 (Ken Burns + grain + vignette + its narration).
  * No black fades here — continuity comes from crossfades in assembly.
  */
-function renderSceneClip(
+export function renderSceneClip(
   scene: RenderScene,
   d: number,
   frames: number,
   out: string,
-  styleTint: boolean
+  styleTint: boolean,
+  style: SceneClipStyle = {}
 ): Promise<string> {
   const z =
     scene.motion.direction === "out"
       ? `if(eq(on,1),1.45,max(zoom-0.0011,1.0))`
       : `min(zoom+0.0011,1.45)`;
 
+  const grain = Math.round(9 * (style.grainIntensity ?? 1));
+  const vignetteDivisor = style.vignetteDivisor ?? 5;
+  const saturation = Math.max(0.9 - (style.desaturateBoost ?? 0), 0.2);
+
   const filters = [
     `scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase`,
     `crop=${W * 2}:${H * 2}`,
     `zoompan=z='${z}':d=${frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${W}x${H}:fps=${FPS}`,
-    `noise=alls=9:allf=t`,
-    `vignette=PI/5`,
-    styleTint ? `eq=contrast=1.05:saturation=0.9` : null,
+    grain > 0 ? `noise=alls=${grain}:allf=t` : null,
+    `vignette=PI/${vignetteDivisor}`,
+    styleTint ? `eq=contrast=1.05:saturation=${saturation.toFixed(2)}` : null,
     `format=yuv420p`,
     `trim=end_frame=${frames}`,
     `setpts=PTS-STARTPTS`,
@@ -249,7 +264,7 @@ function assembleCrossfade(
   });
 }
 
-function burnSubtitles(video: string, assPath: string, out: string): Promise<string> {
+export function burnSubtitles(video: string, assPath: string, out: string): Promise<string> {
   return new Promise((resolve, reject) => {
     ffmpeg(video)
       .outputOptions([
@@ -290,7 +305,7 @@ function wordWeight(w: string): number {
   return Math.max(letters, 1);
 }
 
-function buildPortraitKaraoke(
+export function buildPortraitKaraoke(
   scenes: { text: string; startTime: number; speech: number }[]
 ): string {
   const header = `[Script Info]

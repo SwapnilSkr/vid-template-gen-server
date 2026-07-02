@@ -4,9 +4,20 @@ import { config } from "../config";
 import { resolveModels, type Tier } from "../config/models";
 import { getRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
-import { getTrendDigest } from "./trend-insight.service";
+import { getTrendInsight } from "./trend-insight.service";
 
 const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
+
+/** Format the cached trend digest + reusable hook templates into one prompt
+ * block (undefined/empty pieces are omitted, e.g. no genre or no data yet). */
+async function buildTrendBlock(niche: string, genre?: string): Promise<string> {
+  const insight = await getTrendInsight(niche, genre);
+  if (!insight) return "";
+  const hookBlock = insight.hooks.length
+    ? `\nPROVEN HOOK-LINE TEMPLATES (adapt one to this topic, don't reuse verbatim):\n${insight.hooks.map((h) => `- ${h}`).join("\n")}\n`
+    : "";
+  return `\nCURRENT WINNING PATTERNS (from trending videos in this genre this week):\n${insight.digest}\n${hookBlock}`;
+}
 
 export interface PlannedScene {
   narration: string;
@@ -28,16 +39,31 @@ export interface PlannedReel {
 export async function planReel(
   niche: string,
   topic: string,
-  tier: Tier = "value"
+  tier: Tier = "value",
+  genre?: string
 ): Promise<PlannedReel> {
   const recipe = getRecipe(niche);
   const llm = resolveModels(tier).llm;
+  const trendBlock = await buildTrendBlock(niche, genre);
+  const horrorRules =
+    recipe.niche === "horror"
+      ? `
+HORROR QUALITY BAR:
+- Write like a believable first-person incident report, not a campfire story.
+- Use concrete sensory details: sounds, distances, timestamps, object positions.
+- The fear must come from implication and pattern-breaking, not gore or jump-scare wording.
+- The last scene must reveal that the threat was present earlier, or that escape made it worse.
+- Avoid these words unless unavoidable: creepy, terrifying, scary, demon, monster, haunted, suddenly.
+- If the script could fit any random horror video, rewrite it to be more specific to this topic.
+`
+      : "";
 
   const prompt = `You are a viral short-form video scriptwriter. Produce a vertical faceless reel.
 
 NICHE: ${recipe.displayName}
 TOPIC: ${topic}
-DIRECTION: ${recipe.scriptGuide}
+DIRECTION: ${recipe.scriptGuide}${trendBlock}
+${horrorRules}
 
 RULES:
 - Exactly ${recipe.sceneCount} scenes. Each scene = ONE narration beat of 1-2 sentences (max ~30 words) AND one vivid image description.
@@ -45,6 +71,7 @@ RULES:
 - Narration must read naturally aloud (spell out numbers as words, e.g. "fifteen eighteen" not "1518").
 - visualPrompt: describe ONLY the scene's imagery (subject, setting, mood, lighting). Do NOT include style words, camera jargon, or any text/words-in-image.
 - Continuous story: each scene flows into the next. No repetition.
+- Each narration beat must add new information; do not restate the premise.
 
 OUTPUT JSON ONLY (no markdown):
 {
@@ -96,8 +123,7 @@ export async function planRedditStory(
 ): Promise<RedditStory> {
   const llm = resolveModels(tier).llm;
   const recipe = getRecipe("reddit");
-  const digest = await getTrendDigest("reddit", genre);
-  const trendBlock = digest ? `\nCURRENT WINNING PATTERNS (from trending videos in this genre this week):\n${digest}\n` : "";
+  const trendBlock = await buildTrendBlock("reddit", genre);
 
   const prompt = `You write viral Reddit-style short-form stories read aloud over gameplay footage.
 
