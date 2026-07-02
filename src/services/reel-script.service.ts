@@ -34,6 +34,10 @@ function planningModelFor(recipe: NicheRecipe, tier: Tier): string {
   return process.env.LLM_MODEL || recipe.scriptModel || resolveModels(tier).llm;
 }
 
+function isHorrorRecipe(recipe: NicheRecipe): boolean {
+  return recipe.niche.startsWith("horror");
+}
+
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
@@ -62,7 +66,11 @@ function horrorQualityWarnings(plan: PlannedReel): string[] {
   if (!hasPersonalWitness) {
     warnings.push("not a personal witness account");
   }
-  const tooLong = plan.scenes.some((scene) => countWords(scene.narration) > 24);
+  const tooShort = plan.scenes.reduce((sum, scene) => sum + countWords(scene.narration), 0) < 140;
+  if (tooShort) {
+    warnings.push("short for a complete one-minute story");
+  }
+  const tooLong = plan.scenes.some((scene) => countWords(scene.narration) > 38);
   if (tooLong) {
     warnings.push("long narration beats");
   }
@@ -84,12 +92,14 @@ export async function planReel(
   const recipe = getRecipe(niche);
   const llm = planningModelFor(recipe, tier);
   const trendBlock = await buildTrendBlock(niche, genre);
+  const horror = isHorrorRecipe(recipe);
   const horrorRules =
-    recipe.niche === "horror"
+    horror
       ? `
 HORROR QUALITY BAR:
 - Write like a believable first-person witness account recorded after the fact, not a campfire story.
-- Every scene narration must be 8-22 words. Short enough to whisper without sounding bored.
+- Target a finished 55-75 second story. Every scene narration must be 16-32 words, with one clear new plot beat.
+- Use this arc across the scenes: ordinary setup, first wrong detail, attempted explanation, investigation, escalation, personal implication, failed escape, reveal, consequence.
 - Use concrete sensory details: sounds, distances, timestamps, object positions, temperature, pressure, reflections.
 - The fear must come from implication and pattern-breaking, not gore, monsters, jump-scare wording, or lore.
 - The last scene must quietly prove the danger was already in the room, or that escape made it worse.
@@ -105,7 +115,7 @@ GOOD HORROR LINE:
 `
       : "";
 
-  const prompt = `You are a ${recipe.niche === "horror" ? "literary short-form horror writer and audio-first scene planner" : "viral short-form video scriptwriter"}. Produce a vertical faceless reel.
+  const prompt = `You are a ${horror ? "literary short-form horror writer and audio-first scene planner" : "viral short-form video scriptwriter"}. Produce a vertical faceless reel.
 
 NICHE: ${recipe.displayName}
 TOPIC: ${topic}
@@ -113,7 +123,7 @@ DIRECTION: ${recipe.scriptGuide}${trendBlock}
 ${horrorRules}
 
 RULES:
-- Exactly ${recipe.sceneCount} scenes. Each scene = ONE narration beat of 1-2 sentences (max ~30 words) AND one vivid image description.
+- Exactly ${recipe.sceneCount} scenes. Each scene = ONE narration beat of 1-2 sentences ${horror ? "(16-32 words)" : "(max ~30 words)"} AND one vivid image description.
 - Scene 1's narration is the HOOK — grab attention in the first 3 seconds, sound-off-friendly.
 - Narration must read naturally aloud (spell out numbers as words, e.g. "fifteen eighteen" not "1518").
 - visualPrompt: describe ONLY the scene's imagery (subject, setting, mood, lighting). Do NOT include style words, camera jargon, or any text/words-in-image.
@@ -133,7 +143,7 @@ OUTPUT JSON ONLY (no markdown):
     const { text } = await generateText({
       model: openrouter(llm),
       prompt,
-      temperature: recipe.niche === "horror" ? 0.85 : undefined,
+      temperature: horror ? 0.85 : undefined,
     });
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -141,8 +151,8 @@ OUTPUT JSON ONLY (no markdown):
     const parsed = JSON.parse(jsonMatch[0]) as PlannedReel;
 
     if (!parsed.scenes?.length) throw new Error("No scenes returned");
-    const planned = recipe.niche === "horror" ? tightenHorrorPlan(parsed) : parsed;
-    if (recipe.niche === "horror") {
+    const planned = horror ? tightenHorrorPlan(parsed) : parsed;
+    if (horror) {
       const warnings = horrorQualityWarnings(planned);
       if (warnings.length) console.warn(`⚠️ Horror script quality warning: ${warnings.join(", ")}`);
     }
