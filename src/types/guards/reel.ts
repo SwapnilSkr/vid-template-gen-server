@@ -18,6 +18,8 @@ export const CreateReelBody = t.Object({
   parts: t.Optional(t.Union([t.Literal("off"), t.Literal("auto"), t.Number()])),
   /** explicit S3 key (gameplay/xxx.mp4) to use instead of a random pick */
   gameplayKey: t.Optional(t.String()),
+  /** explicit global S3 key (horror-audio/xxx.mp3) for horror background bed */
+  horrorAudioKey: t.Optional(t.String()),
   /** explicit image model pick from the compatible image model catalog */
   imageModel: t.Optional(t.String()),
   /** explicit TTS pick from the voice catalog — overrides the tier/niche default */

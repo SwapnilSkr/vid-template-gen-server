@@ -156,6 +156,7 @@ export interface IReel extends Document {
    *  either chosen at creation or picked randomly and recorded so revoice
    *  reuses the exact same background instead of swapping it. */
   gameplayKey?: string;
+  horrorAudioKey?: string;
   imageModelOverride?: string;
   voiceOverride?: IVoiceOverride;
   voiceVariants: IVoiceVariant[];
@@ -336,6 +337,7 @@ const reelSchema = new Schema<IReel>(
     partNumber: Number,
     partCount: Number,
     gameplayKey: String,
+    horrorAudioKey: String,
     imageModelOverride: String,
     voiceOverride: voiceOverrideSchema,
     voiceVariants: { type: [voiceVariantSchema], default: [] },

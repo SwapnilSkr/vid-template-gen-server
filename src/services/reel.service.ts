@@ -39,6 +39,7 @@ interface CreateReelOptions {
   source?: StorySource;
   genre?: string;
   gameplayKey?: string;
+  horrorAudioKey?: string;
   imageModel?: string;
   ttsModel?: string;
   ttsVoice?: string;
@@ -68,6 +69,9 @@ export interface CreateReelResult {
 export async function createReel(options: CreateReelOptions): Promise<CreateReelResult> {
   const { niche, topic, tier = "cheap", parts = "off" } = options;
   const recipe = getRecipe(niche);
+  if (options.horrorAudioKey && !/^horror-audio\/.+\.mp3$/i.test(options.horrorAudioKey)) {
+    throw new Error("Invalid horror audio key");
+  }
 
   if (recipe.strategy === "gameplay_overlay" && parts !== "off") {
     return createGameplayReelSeries({
@@ -78,6 +82,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
       source: options.source,
       genre: options.genre,
       gameplayKey: options.gameplayKey,
+      horrorAudioKey: options.horrorAudioKey,
       imageModel: options.imageModel,
       ttsModel: options.ttsModel,
       ttsVoice: options.ttsVoice,
@@ -103,6 +108,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     genre,
     strategy: recipe.strategy,
     gameplayKey: options.gameplayKey,
+    horrorAudioKey: options.horrorAudioKey,
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
@@ -132,6 +138,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     genre: story.genre ?? options.genre,
     strategy: "gameplay_overlay",
     gameplayKey: options.gameplayKey,
+    horrorAudioKey: options.horrorAudioKey,
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
@@ -171,6 +178,7 @@ async function createGameplayReelSeries(
       genre: part.genre ?? options.genre,
       strategy: "gameplay_overlay",
       gameplayKey: options.gameplayKey,
+      horrorAudioKey: options.horrorAudioKey,
       imageModelOverride: options.imageModel,
       voiceOverride: toVoiceOverride(options),
       status: "pending",
@@ -460,7 +468,9 @@ export async function processReel(reelId: string): Promise<void> {
               narration: s.narration,
               motion: s.motion,
             })
-          )
+          ),
+          true,
+          { horrorEffects: reel.niche === "horror", horrorAudioKey: reel.horrorAudioKey }
         );
     localFiles.push(result.videoPath, result.assPath);
 
