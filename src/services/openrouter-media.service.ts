@@ -24,6 +24,7 @@ const TTS_FALLBACK: TtsChoice = {
   voice: "Charon",
   format: "pcm",
 };
+const IMAGE_FALLBACK_MODEL = "google/gemini-3.1-flash-lite-image";
 
 export interface MediaUsageCost {
   costUsd?: number;
@@ -94,8 +95,8 @@ function enumValues(capability: ImageModelCapability | undefined, key: string): 
   return capability?.supported_parameters?.[key]?.values ?? [];
 }
 
-function isSizeValidationError(status: number, body: string): boolean {
-  return status === 400 && /size|pixel|resolution/i.test(body);
+function isImageValidationError(status: number, body: string): boolean {
+  return status === 400 && /size|pixel|resolution|parameter|aspect|format|quality|background/i.test(body);
 }
 
 function imageRequestBodies(model: string, prompt: string, capability: ImageModelCapability | undefined): Record<string, unknown>[] {
@@ -103,8 +104,9 @@ function imageRequestBodies(model: string, prompt: string, capability: ImageMode
   if (supportsValue(capability, "aspect_ratio", "9:16")) base.aspect_ratio = "9:16";
   if (supportsValue(capability, "output_format", "png")) base.output_format = "png";
 
+  const bodies: Record<string, unknown>[] = [];
   const resolutions = enumValues(capability, "resolution");
-  if (!resolutions.length) return [base];
+  if (!resolutions.length) return [base, { model, prompt, n: 1 }];
 
   const preferred = model.includes("seedream")
     ? ["4K", "2K", "1K", "512"]
@@ -114,7 +116,11 @@ function imageRequestBodies(model: string, prompt: string, capability: ImageMode
     if (!ordered.includes(value)) ordered.push(value);
   }
 
-  return ordered.map((resolution) => ({ ...base, resolution }));
+  for (const resolution of ordered) {
+    bodies.push({ ...base, resolution });
+  }
+  bodies.push({ model, prompt, n: 1 });
+  return bodies;
 }
 
 /**
@@ -135,6 +141,31 @@ export async function generateImage(
     .join(". ");
 
   try {
+    const modelsToTry = model === IMAGE_FALLBACK_MODEL ? [model] : [model, IMAGE_FALLBACK_MODEL];
+    let lastError: unknown;
+    for (const activeModel of modelsToTry) {
+      try {
+        return await generateImageWithModel(activeModel, fullPrompt, prompt, targetDir, opts.onUsage);
+      } catch (error: unknown) {
+        lastError = error;
+        if (activeModel !== modelsToTry[modelsToTry.length - 1]) {
+          console.warn(`Image model failed for ${activeModel}; falling back to ${IMAGE_FALLBACK_MODEL}: ${getErrorMessage(error)}`);
+        }
+      }
+    }
+    throw lastError;
+  } catch (error: unknown) {
+    throw new Error(`Image generation failed: ${getErrorMessage(error)}`);
+  }
+}
+
+async function generateImageWithModel(
+  model: string,
+  fullPrompt: string,
+  logPrompt: string,
+  targetDir: string,
+  onUsage?: MediaUsageCallback
+): Promise<string> {
     const capability = await getImageModelCapability(model);
     const bodies = imageRequestBodies(model, fullPrompt, capability);
     let res: Response | undefined;
@@ -150,9 +181,9 @@ export async function generateImage(
       });
       if (res.ok) break;
       lastErrorText = await res.text();
-      if (!isSizeValidationError(res.status, lastErrorText) || attempt === bodies.length - 1) break;
+      if (!isImageValidationError(res.status, lastErrorText) || attempt === bodies.length - 1) break;
       console.warn(
-        `Image size rejected for ${model} (${String(bodies[attempt].resolution ?? "default")}); retrying larger supported size`
+        `Image request rejected for ${model} (${String(bodies[attempt].resolution ?? "default")}); retrying alternate supported request`
       );
     }
 
@@ -167,7 +198,7 @@ export async function generateImage(
     };
     const responseCost = parseCost(data.usage?.cost);
     const generationCost = responseCost ?? (await fetchGenerationCost(data.id));
-    opts.onUsage?.({
+    onUsage?.({
       costUsd: generationCost,
       source:
         responseCost !== undefined
@@ -189,11 +220,8 @@ export async function generateImage(
 
     const imagePath = join(targetDir, generateFilename("scene", "png"));
     await writeFile(imagePath, buffer);
-    console.log(`🖼️  Generated image: "${prompt.substring(0, 40)}..."`);
+    console.log(`🖼️  Generated image [${model}]: "${logPrompt.substring(0, 40)}..."`);
     return imagePath;
-  } catch (error: unknown) {
-    throw new Error(`Image generation failed: ${getErrorMessage(error)}`);
-  }
 }
 
 /**
@@ -204,7 +232,14 @@ export async function generateImage(
  */
 export async function generateNarration(
   text: string,
-  opts: { model?: string; voice?: string; format?: "mp3" | "pcm"; outputDir?: string; onUsage?: MediaUsageCallback } = {}
+  opts: {
+    model?: string;
+    voice?: string;
+    format?: "mp3" | "pcm";
+    outputDir?: string;
+    profile?: "horror";
+    onUsage?: MediaUsageCallback;
+  } = {}
 ): Promise<{ audioPath: string; duration: number }> {
   const targetDir = opts.outputDir || config.processingPath;
   await ensureDir(targetDir);
@@ -219,7 +254,7 @@ export async function generateNarration(
   let lastError: unknown;
   for (const choice of choices) {
     try {
-      return await generateNarrationWithChoice(text, targetDir, choice, opts.onUsage);
+      return await generateNarrationWithChoice(text, targetDir, choice, opts.profile, opts.onUsage);
     } catch (error: unknown) {
       lastError = error;
       if (choice !== choices[choices.length - 1]) {
@@ -237,6 +272,7 @@ async function generateNarrationWithChoice(
   text: string,
   targetDir: string,
   choice: TtsChoice,
+  profile?: "horror",
   onUsage?: MediaUsageCallback
 ): Promise<{ audioPath: string; duration: number }> {
   const { model, voice, format } = choice; // some models (Gemini) only emit pcm
@@ -255,6 +291,16 @@ async function generateNarrationWithChoice(
           input: text,
           voice,
           response_format: format,
+          ...(profile === "horror" ? { speed: 0.9 } : {}),
+          ...(profile === "horror" && model === "microsoft/mai-voice-2"
+            ? {
+                provider: {
+                  options: {
+                    azure: { style: "sad", styledegree: 1.7 },
+                  },
+                },
+              }
+            : {}),
         }),
       });
 
@@ -287,8 +333,16 @@ async function generateNarrationWithChoice(
       await pcmToMp3(rawPath, mp3Src);
     }
 
+    const trimmedPath = join(targetDir, generateFilename("narration_trimmed", "mp3"));
+    await trimSilence(mp3Src, trimmedPath);
     const audioPath = join(targetDir, generateFilename("narration", "mp3"));
-    await trimSilence(mp3Src, audioPath);
+    if (profile === "horror") {
+      await applyHorrorVoiceTreatment(trimmedPath, audioPath);
+      await unlink(trimmedPath).catch(() => {});
+    } else {
+      await trimSilence(trimmedPath, audioPath);
+      await unlink(trimmedPath).catch(() => {});
+    }
     await unlink(rawPath).catch(() => {});
     if (mp3Src !== rawPath) await unlink(mp3Src).catch(() => {});
 
@@ -330,6 +384,37 @@ function trimSilence(input: string, output: string): Promise<string> {
       .output(output)
       .on("end", () => resolve(output))
       .on("error", (err) => reject(new Error(`Silence trim failed: ${err.message}`)))
+      .run();
+  });
+}
+
+/**
+ * Horror narration should sound like a late-night recording, not a clean
+ * audiobook read. This intentionally stays subtle: pitch down, darken the top
+ * end, add a small room echo, and normalize so captions/render timing still
+ * behave predictably.
+ */
+function applyHorrorVoiceTreatment(input: string, output: string): Promise<string> {
+  const filters = [
+    "aresample=48000",
+    "asetrate=44160",
+    "aresample=48000",
+    "atempo=1.087",
+    "highpass=f=65",
+    "lowpass=f=3300",
+    "tremolo=f=4.8:d=0.035",
+    "aecho=0.72:0.45:55|115:0.12|0.07",
+    "acompressor=threshold=-22dB:ratio=2.2:attack=8:release=140",
+    "loudnorm=I=-18:LRA=8:TP=-1.5",
+  ].join(",");
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(input)
+      .audioFilters(filters)
+      .outputOptions(["-c:a", "libmp3lame", "-q:a", "4"])
+      .output(output)
+      .on("end", () => resolve(output))
+      .on("error", (err) => reject(new Error(`Horror voice treatment failed: ${err.message}`)))
       .run();
   });
 }
