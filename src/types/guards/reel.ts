@@ -1,0 +1,72 @@
+import { t } from "elysia";
+
+/**
+ * Create reel request body.
+ * `topic` is optional/empty/"auto" → pulls from the story bank (Reddit niche)
+ * or lets the planner pick freely (other niches).
+ */
+export const CreateReelBody = t.Object({
+  niche: t.String(),
+  genre: t.Optional(t.String()),
+  topic: t.Optional(t.String()),
+  tier: t.Optional(
+    t.Union([t.Literal("cheap"), t.Literal("value"), t.Literal("premium")])
+  ),
+  source: t.Optional(
+    t.Union([t.Literal("llm"), t.Literal("hybrid"), t.Literal("verbatim")])
+  ),
+  parts: t.Optional(t.Union([t.Literal("off"), t.Literal("auto"), t.Number()])),
+  /** explicit S3 key (gameplay/xxx.mp4) to use instead of a random pick */
+  gameplayKey: t.Optional(t.String()),
+  /** explicit TTS pick from the voice catalog — overrides the tier/niche default */
+  ttsModel: t.Optional(t.String()),
+  ttsVoice: t.Optional(t.String()),
+  ttsFormat: t.Optional(t.Union([t.Literal("mp3"), t.Literal("pcm")])),
+});
+
+export type TCreateReelBody = typeof CreateReelBody.static;
+
+export const RevoiceReelBody = t.Object({
+  variants: t.Array(
+    t.Object({
+      model: t.Optional(t.String()),
+      voice: t.Optional(t.String()),
+      format: t.Optional(t.Union([t.Literal("mp3"), t.Literal("pcm")])),
+      label: t.Optional(t.String()),
+    }),
+    { minItems: 1, maxItems: 5 }
+  ),
+});
+
+export type TRevoiceReelBody = typeof RevoiceReelBody.static;
+
+export const VariantParams = t.Object({
+  id: t.String(),
+  variantId: t.String(),
+});
+
+export type TVariantParams = typeof VariantParams.static;
+
+export const UpdateReelReviewBody = t.Object({
+  title: t.Optional(t.String()),
+  description: t.Optional(t.String()),
+  tags: t.Optional(t.Array(t.String())),
+  thumbnailPrompt: t.Optional(t.String()),
+  visibilityNotes: t.Optional(t.String()),
+  status: t.Optional(t.Union([t.Literal("draft"), t.Literal("ready"), t.Literal("approved")])),
+});
+
+export type TUpdateReelReviewBody = typeof UpdateReelReviewBody.static;
+
+export const ThumbnailFrameBody = t.Object({
+  atSeconds: t.Number({ minimum: 0 }),
+});
+
+export type TThumbnailFrameBody = typeof ThumbnailFrameBody.static;
+
+export const VoiceSampleQuery = t.Object({
+  model: t.String(),
+  voice: t.String(),
+});
+
+export type TVoiceSampleQuery = typeof VoiceSampleQuery.static;

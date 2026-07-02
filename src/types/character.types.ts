@@ -36,4 +36,6 @@ export const DEFAULT_CHARACTER_POSITION: CharacterPosition = {
   y: 80,
   scale: 0.3,
   anchor: "bottom-left",
+  animation: "none",
+  animationDuration: 0.3,
 };
