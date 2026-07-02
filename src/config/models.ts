@@ -31,7 +31,7 @@ export interface ModelSet {
 export const REGISTRY: Record<Tier, ModelSet> = {
   cheap: {
     llm: "deepseek/deepseek-v4-flash", // ~$0.10/$0.20 per Mtok
-    image: "google/gemini-2.5-flash-image", // ~$0.04/img, proven in lab
+    image: "google/gemini-3.1-flash-lite-image", // cheapest current-gen image tier
     tts: { model: "google/gemini-3.1-flash-tts-preview", voice: "Charon", format: "pcm" }, // natural; cost delta is negligible
     video: "bytedance/seedance-2.0-fast", // ~$0.022/s
   },
@@ -142,4 +142,48 @@ export function resolveModels(tier: Tier = ENV_TIER): ModelSet {
     },
     video: process.env.VIDEO_MODEL || base.video,
   };
+}
+
+export function resolveTtsChoice(
+  base: TtsChoice,
+  ...overrides: Partial<TtsChoice>[]
+): TtsChoice {
+  let current = { ...base };
+
+  for (const override of overrides) {
+    if (!override.model && !override.voice && !override.format) continue;
+
+    if (override.model && override.voice) {
+      current = {
+        model: override.model,
+        voice: override.voice,
+        format: override.format ?? current.format,
+      };
+    } else if (override.voice) {
+      const matchingVoice = TTS_VOICE_CATALOG.find((option) => option.voice === override.voice);
+      current = matchingVoice
+        ? {
+            model: matchingVoice.model,
+            voice: matchingVoice.voice,
+            format: override.format ?? matchingVoice.format,
+          }
+        : { ...current, voice: override.voice, format: override.format ?? current.format };
+    } else if (override.model) {
+      const matchingModel = TTS_VOICE_CATALOG.find((option) => option.model === override.model);
+      current = {
+        model: override.model,
+        voice: matchingModel?.voice ?? current.voice,
+        format: override.format ?? matchingModel?.format ?? current.format,
+      };
+    } else if (override.format) {
+      current = { ...current, format: override.format };
+    }
+
+    const exact = TTS_VOICE_CATALOG.find(
+      (option) => option.model === current.model && option.voice === current.voice
+    );
+    if (exact) current = { model: exact.model, voice: exact.voice, format: exact.format };
+  }
+
+  return current;
 }

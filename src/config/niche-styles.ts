@@ -256,17 +256,17 @@ export const NICHE_RECIPES: Record<string, NicheRecipe> = {
   horror: {
     niche: "horror",
     displayName: "AI Horror",
-    strategy: "hybrid_scene",
+    strategy: "image_kenburns",
     styles: [S.analog_liminal, S.photoreal_dark],
-    imageTier: "value",
+    imageTier: "cheap",
     sceneCount: 5,
     motion: "ken_burns",
     captionSkin: "karaoke_word",
     musicMood: "ambient_drone",
-    heroPolicy: "one_climax",
-    voice: { voice: "am_onyx" }, // deeper delivery (Kokoro) until TTS upgrade
+    heroPolicy: "never",
+    voice: { model: "canopylabs/orpheus-3b-0.1-ft", voice: "leo", format: "mp3" },
     scriptGuide:
-      "Creepy short horror narration (urban legend / unexplained). Whispered ominous tone, hook in the first line, escalate dread, end on a chilling twist.",
+      "Short-form horror that feels like a true confession, not a generic spooky tale. Use one ordinary object or place, one impossible detail, and a final line that recontextualizes the whole story. Keep the voice quiet, specific, and restrained: no monsters, no clichés, no 'suddenly', no explaining the evil. Every scene should make the situation more wrong.",
   },
 
   mythology: {
@@ -327,6 +327,7 @@ export const GAMEPLAY_RECIPE: NicheRecipe = {
   captionSkin: "bouncing_word",
   musicMood: "subtle_bed",
   heroPolicy: "never",
+  voice: { model: "x-ai/grok-voice-tts-1.0", voice: "Sal", format: "mp3" },
   scriptGuide:
     "Read a gripping Reddit-style story (AITA / confession / revenge). The title is the curiosity-gap hook. Conversational first-person, escalating tension, satisfying payoff.",
 };
