@@ -78,6 +78,11 @@ const S = {
     promptSuffix:
       "liminal space, empty fluorescent-lit interior, early-2000s camcorder footage, low resolution, VHS analog noise, uncanny emptiness, unsettling, vertical 9:16",
   },
+  comic_horror_2d: {
+    id: "comic_horror_2d",
+    promptSuffix:
+      "2D horror motion-comic panel, black ink line art, heavy crosshatching, halftone dots, harsh noir shadows, off-white paper texture, limited palette of black white dirty red and sickly green, unsettling graphic novel composition, vertical 9:16, no speech bubbles, no text",
+  },
   clean_editorial: {
     id: "clean_editorial",
     promptSuffix:
@@ -261,7 +266,7 @@ export const NICHE_RECIPES: Record<string, NicheRecipe> = {
     strategy: "image_kenburns",
     styles: [S.analog_liminal, S.photoreal_dark],
     imageTier: "cheap",
-    sceneCount: 5,
+    sceneCount: 9,
     motion: "ken_burns",
     captionSkin: "karaoke_word",
     musicMood: "ambient_drone",
@@ -269,7 +274,24 @@ export const NICHE_RECIPES: Record<string, NicheRecipe> = {
     scriptModel: "google/gemini-2.5-flash",
     voice: { model: "x-ai/grok-voice-tts-1.0", voice: "Rex", format: "mp3" },
     scriptGuide:
-      "Short-form horror that feels like a real whispered confession recorded after midnight. Use one ordinary object or place, one impossible detail, and a final line that recontextualizes the whole story. Keep the voice intimate, quiet, and disturbed: short sentences, uneasy pauses, concrete sensory details, no monsters, no gore, no clichés, no 'suddenly', no explaining the evil. Every scene should make the situation more wrong, more personal, and harder to dismiss as imagination.",
+      "One-minute horror story that feels like a real whispered confession recorded after midnight. It must complete a full story arc: normal world, first impossible detail, investigation, failed rational explanation, escalation, personal danger, attempted escape, and final consequence. Use one ordinary object or place, one impossible detail, and a final line that recontextualizes the whole story. Keep the voice intimate, quiet, and disturbed: concrete sensory details, uneasy pauses, no monsters, no gore, no clichés, no 'suddenly', no explaining the evil. Every scene should make the situation more wrong, more personal, and harder to dismiss as imagination.",
+  },
+
+  horror_comic: {
+    niche: "horror_comic",
+    displayName: "2D Comic Horror",
+    strategy: "image_kenburns",
+    styles: [S.comic_horror_2d],
+    imageTier: "cheap",
+    sceneCount: 9,
+    motion: "ken_burns",
+    captionSkin: "karaoke_word",
+    musicMood: "ambient_drone",
+    heroPolicy: "never",
+    scriptModel: "google/gemini-2.5-flash",
+    voice: { model: "x-ai/grok-voice-tts-1.0", voice: "Rex", format: "mp3" },
+    scriptGuide:
+      "One-minute horror story told as a 2D motion comic. It must complete a full story arc: normal world, first impossible detail, investigation, failed rational explanation, escalation, personal danger, attempted escape, and final consequence. Write visual beats as comic panels with bold silhouettes, close-ups, distorted shadows, panel-worthy reveals, and one ordinary object becoming impossible. Keep the narration intimate and disturbed: concrete sensory details, uneasy pauses, no monsters, no gore, no clichés, no 'suddenly', no explaining the evil. Every scene should become a stronger comic panel and make the situation more wrong, more personal, and harder to dismiss as imagination.",
   },
 
   mythology: {
