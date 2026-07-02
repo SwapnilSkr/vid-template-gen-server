@@ -22,6 +22,7 @@ export interface ReelDefaultOption {
   niche: string;
   tier: Tier;
   tts: PricedTtsVoiceOption;
+  scriptModel: string;
 }
 
 interface OpenRouterModel {
@@ -64,12 +65,13 @@ const VOICE_PRICE_LABELS: Record<string, { priceLabel: string; priceNote: string
   },
   "canopylabs/orpheus-3b-0.1-ft": {
     priceLabel: "low/medium",
-    priceNote: "Good fit for drama and horror; exact cost is captured when OpenRouter exposes generation usage.",
-    recommendedFor: ["horror", "drama"],
+    priceNote: "Good fit for natural drama; exact cost is captured when OpenRouter exposes generation usage.",
+    recommendedFor: ["drama"],
   },
   "x-ai/grok-voice-tts-1.0": {
     priceLabel: "usage-priced",
-    priceNote: "Exact cost is captured when OpenRouter exposes generation usage.",
+    priceNote: "Supports richer voice control than the basic catalog voices; horror output also gets backend voice treatment.",
+    recommendedFor: ["horror", "reddit"],
   },
 };
 
@@ -127,10 +129,10 @@ function imageTier(model: OpenRouterModel, endpoint?: OpenRouterImageEndpoint): 
 
 export function listPricedTtsVoices(): PricedTtsVoiceOption[] {
   const priority: Record<string, number> = {
-    "canopylabs/orpheus-3b-0.1-ft": 0,
-    "google/gemini-3.1-flash-tts-preview": 1,
-    "microsoft/mai-voice-2": 2,
-    "x-ai/grok-voice-tts-1.0": 3,
+    "x-ai/grok-voice-tts-1.0": 0,
+    "canopylabs/orpheus-3b-0.1-ft": 1,
+    "google/gemini-3.1-flash-tts-preview": 2,
+    "microsoft/mai-voice-2": 3,
     "hexgrad/kokoro-82m": 4,
   };
 
@@ -152,6 +154,7 @@ export function listPricedTtsVoices(): PricedTtsVoiceOption[] {
 
 export function getReelDefaults(niche: string, tier: Tier = "cheap"): ReelDefaultOption {
   const recipe = getRecipe(niche);
+  const scriptModel = process.env.LLM_MODEL || recipe.scriptModel || resolveModels(tier).llm;
   const resolved = resolveTtsChoice(resolveModels(tier).tts, recipe.voice ?? {});
   const voice =
     listPricedTtsVoices().find((option) => option.model === resolved.model && option.voice === resolved.voice) ?? {
@@ -162,7 +165,7 @@ export function getReelDefaults(niche: string, tier: Tier = "cheap"): ReelDefaul
       unitPriceLabel: "shown after generation when exact usage is exposed",
       priceNote: "Exact cost is captured when OpenRouter exposes generation usage.",
     };
-  return { niche, tier, tts: voice };
+  return { niche, tier, tts: voice, scriptModel };
 }
 
 export async function listImageModels(): Promise<ImageModelOption[]> {
@@ -173,6 +176,10 @@ export async function listImageModels(): Promise<ImageModelOption[]> {
   );
   const endpoints = new Map(endpointEntries);
   return concrete
+    .filter((model) => {
+      const endpoint = endpoints.get(model.id);
+      return Boolean(endpoint?.pricing?.some((item) => item.billable === "output_image"));
+    })
     .sort((a, b) => cheapestOutputCost(endpoints.get(a.id)) - cheapestOutputCost(endpoints.get(b.id)))
     .map((model): ImageModelOption => {
       const endpoint = endpoints.get(model.id);
