@@ -27,6 +27,8 @@ export * from "./openrouter-media.service";
 export * from "./reel-script.service";
 export * from "./reel-render.service";
 export * from "./reel-hybrid.service";
+export * from "./reel-motion.service";
+export * from "./art-style.service";
 export * from "./reel-gameplay.service";
 export * from "./reel-revoice.service";
 export * from "./reel-review.service";
