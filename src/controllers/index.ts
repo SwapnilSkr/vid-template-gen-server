@@ -44,6 +44,7 @@ export {
   promoteVoiceVariantController,
   listGameplayController,
   listHorrorAudioController,
+  listArtStylesController,
   listImageModelsController,
   getReelDefaultsController,
   listTtsVoicesController,

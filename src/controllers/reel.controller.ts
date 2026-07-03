@@ -16,6 +16,7 @@ import {
   listPricedTtsVoices,
   getReelDefaults,
   listHorrorAudioLibrary,
+  listArtStyles,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { TTS_VOICE_CATALOG } from "../config/models";
@@ -91,6 +92,8 @@ export async function createReelController({ body, set }: CreateReelContext) {
       gameplayKey: body.gameplayKey,
       horrorAudioKey: body.horrorAudioKey,
       imageModel: body.imageModel,
+      artStyleId: body.artStyleId,
+      motionMode: body.motionMode,
       ttsModel: body.ttsModel,
       ttsVoice: body.ttsVoice,
       ttsFormat: body.ttsFormat,
@@ -147,6 +150,9 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       title: reel.title,
       source: reel.storySource,
       genre: reel.genre,
+      artStyleId: reel.artStyleId,
+      motionMode: reel.motionMode,
+      storyBible: reel.storyBible,
       seriesId: reel.seriesId,
       partNumber: reel.partNumber,
       partCount: reel.partCount,
@@ -352,6 +358,15 @@ export async function listImageModelsController() {
 export async function listHorrorAudioController() {
   try {
     return { success: true, data: await listHorrorAudioLibrary() };
+  } catch (error: unknown) {
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** List reference-art styles (registry ∪ S3 manifest), optionally by niche. */
+export async function listArtStylesController({ query }: { query: { niche?: string } }) {
+  try {
+    return { success: true, data: await listArtStyles(query.niche) };
   } catch (error: unknown) {
     return { success: false, error: getErrorMessage(error) };
   }
