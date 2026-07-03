@@ -44,6 +44,8 @@ export async function publishReelToYouTube(reelId: string): Promise<void> {
     videoId: reel.youtube?.videoId,
     url: reel.youtube?.url,
     publishedAt: reel.youtube?.publishedAt,
+    thumbnailStatus: reel.youtube?.thumbnailStatus,
+    thumbnailError: reel.youtube?.thumbnailError,
   };
 
   reel.youtube = { ...previousPublish, status: "uploading" };
@@ -78,13 +80,29 @@ export async function publishReelToYouTube(reelId: string): Promise<void> {
     });
 
     const videoId = res.data.id ?? undefined;
+    let thumbnailStatus: "uploaded" | "missing" | "failed" = review.thumbnailUrl
+      ? "failed"
+      : "missing";
+    let thumbnailError: string | undefined;
+
     if (videoId && review.thumbnailUrl) {
-      const thumbnailRes = await fetch(review.thumbnailUrl);
-      if (thumbnailRes.ok && thumbnailRes.body) {
+      try {
+        const thumbnailRes = await fetch(review.thumbnailUrl);
+        if (!thumbnailRes.ok) {
+          throw new Error(`Failed to fetch thumbnail (${thumbnailRes.status})`);
+        }
+        const thumbnailBuffer = Buffer.from(await thumbnailRes.arrayBuffer());
         await youtube.thumbnails.set({
           videoId,
-          media: { body: Readable.fromWeb(thumbnailRes.body as never) },
+          media: {
+            mimeType: thumbnailRes.headers.get("content-type") ?? "image/png",
+            body: Readable.from(thumbnailBuffer),
+          },
         });
+        thumbnailStatus = "uploaded";
+      } catch (error: unknown) {
+        thumbnailError = getErrorMessage(error);
+        console.warn(`⚠️  Thumbnail upload failed for reel ${reelId}: ${thumbnailError}`);
       }
     }
 
@@ -92,6 +110,8 @@ export async function publishReelToYouTube(reelId: string): Promise<void> {
       status: "published",
       videoId,
       url: videoId ? `https://youtube.com/shorts/${videoId}` : undefined,
+      thumbnailStatus,
+      thumbnailError,
       publishedAt: new Date(),
     };
     await reel.save();
