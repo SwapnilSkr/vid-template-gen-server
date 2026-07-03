@@ -79,7 +79,7 @@ export async function appendBrandedOutro(
     await ensureDir(config.processingPath);
     const line =
       brand.kind === "reddit"
-        ? `Follow ${brand.channelName} for more stories.`
+        ? redditOutroLine(reel, brand.channelName)
         : `Subscribe to ${brand.channelName}. The next story is already waiting.`;
     const { audioPath } = await generateNarration(line, {
       ...tts,
@@ -89,7 +89,11 @@ export async function appendBrandedOutro(
     });
     tmp.push(audioPath);
 
-    const cardPath = await renderOutroCard(brand, Boolean(options.backgroundVideo && brand.kind === "reddit"));
+    const cardPath = await renderOutroCard(
+      brand,
+      Boolean(options.backgroundVideo && brand.kind === "reddit"),
+      nextRedditPart(reel)
+    );
     tmp.push(cardPath);
     const outroClip = join(config.processingPath, `${reel._id}_outro_clip.mp4`);
     tmp.push(outroClip);
@@ -109,7 +113,25 @@ export async function appendBrandedOutro(
   }
 }
 
-async function renderOutroCard(brand: OutroBrand, transparent = false): Promise<string> {
+function redditOutroLine(reel: IReel, channelName: string): string {
+  const nextPart = nextRedditPart(reel);
+  if (nextPart) {
+    return `Follow ${channelName} for part ${nextPart}.`;
+  }
+  return `Follow ${channelName} for more stories.`;
+}
+
+function nextRedditPart(reel: IReel): number | undefined {
+  const partNumber = reel.partNumber ?? reel.redditStory?.partNumber ?? 1;
+  const partCount = reel.partCount ?? reel.redditStory?.partCount ?? 1;
+  return partNumber < partCount ? partNumber + 1 : undefined;
+}
+
+async function renderOutroCard(
+  brand: OutroBrand,
+  transparent = false,
+  nextPart?: number
+): Promise<string> {
   const isHorror = brand.kind === "horror";
   const initials = brand.channelName
     .split(/\s+/)
@@ -117,10 +139,16 @@ async function renderOutroCard(brand: OutroBrand, transparent = false): Promise<
     .join("")
     .slice(0, 2)
     .toUpperCase();
-  const title = isHorror ? "DON'T WATCH ALONE" : "FOLLOW FOR MORE";
+  const title = isHorror
+    ? "DON'T WATCH ALONE"
+    : nextPart
+      ? `FOLLOW FOR PART ${nextPart}`
+      : "FOLLOW FOR MORE";
   const subtitle = isHorror
     ? "New nightmares every night"
-    : "More stories after this one";
+    : nextPart
+      ? `Part ${nextPart} drops next`
+      : "More stories after this one";
   const accent = isHorror ? "#b91c1c" : "#ff4500";
   const bgA = isHorror ? "#050505" : "#111827";
   const bgB = isHorror ? "#1f0505" : "#1f2937";
