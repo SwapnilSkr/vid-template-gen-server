@@ -1,8 +1,16 @@
 import { Elysia } from "elysia";
-import { ListTrendsQuery, TrendSummaryQuery, TriggerScoutBody } from "../types/guards";
 import {
+  ListHorrorReferencesQuery,
+  ListTrendsQuery,
+  TrendSummaryQuery,
+  TriggerHorrorReferenceScoutBody,
+  TriggerScoutBody,
+} from "../types/guards";
+import {
+  listHorrorReferencesController,
   listTrendsController,
   getTrendSummaryController,
+  triggerHorrorReferenceScoutController,
   triggerTrendScoutController,
 } from "../controllers";
 
@@ -14,4 +22,10 @@ import {
 export const trendRoutes = new Elysia({ prefix: "/api/trends" })
   .get("/", listTrendsController, { query: ListTrendsQuery })
   .get("/summary", getTrendSummaryController, { query: TrendSummaryQuery })
-  .post("/scout", triggerTrendScoutController, { body: TriggerScoutBody });
+  .post("/scout", triggerTrendScoutController, { body: TriggerScoutBody })
+  .get("/horror-references", listHorrorReferencesController, {
+    query: ListHorrorReferencesQuery,
+  })
+  .post("/horror-references/scout", triggerHorrorReferenceScoutController, {
+    body: TriggerHorrorReferenceScoutBody,
+  });

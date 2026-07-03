@@ -38,6 +38,7 @@ export * from "./gameplay-ingest.service";
 export * from "./story.service";
 export * from "./reel.service";
 export * from "./trend-reference.service";
+export * from "./horror-reference.service";
 export * from "./trend-scout.service";
 export * from "./trend-insight.service";
 export * from "./voice-sample.service";

@@ -58,6 +58,8 @@ export {
   listTrendsController,
   getTrendSummaryController,
   triggerTrendScoutController,
+  listHorrorReferencesController,
+  triggerHorrorReferenceScoutController,
 } from "./trend.controller";
 
 // Maintenance controllers

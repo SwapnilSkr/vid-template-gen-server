@@ -23,3 +23,18 @@ export const TriggerScoutBody = t.Object({
 });
 
 export type TTriggerScoutBody = typeof TriggerScoutBody.static;
+
+export const ListHorrorReferencesQuery = t.Object({
+  status: t.Optional(t.String()),
+  genre: t.Optional(t.String()),
+  limit: t.Optional(t.String()),
+});
+
+export type TListHorrorReferencesQuery = typeof ListHorrorReferencesQuery.static;
+
+export const TriggerHorrorReferenceScoutBody = t.Object({
+  limit: t.Optional(t.Number()),
+});
+
+export type TTriggerHorrorReferenceScoutBody =
+  typeof TriggerHorrorReferenceScoutBody.static;

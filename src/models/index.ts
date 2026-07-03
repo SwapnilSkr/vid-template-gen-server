@@ -25,9 +25,17 @@ export {
   type IVoiceVariant,
   type IVoiceOverride,
   type IStoryBible,
+  type IHorrorReferencePayload,
   type ReelMotionMode,
 } from "./reel.model";
 export { Story, type IStory, type StorySource } from "./story.model";
+export {
+  HorrorReference,
+  type IHorrorReference,
+  type HorrorReferenceLicense,
+  type HorrorReferenceSource,
+  type HorrorReferenceStatus,
+} from "./horror-reference.model";
 export {
   TrendReference,
   type ITrendReference,
