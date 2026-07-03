@@ -2,7 +2,8 @@ import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText } from "ai";
 import { config } from "../config";
 import { resolveModels, type Tier } from "../config/models";
-import { Story, type StorySource } from "../models/story.model";
+import { Story, type IStory, type StorySource } from "../models/story.model";
+import { Reel } from "../models/reel.model";
 import { getErrorMessage } from "../types";
 import { getTrendDigest } from "./trend-insight.service";
 
@@ -250,6 +251,7 @@ async function redditToken(): Promise<string> {
 }
 
 interface RedditPost {
+  id: string;
   title: string;
   body: string;
   url: string;
@@ -258,6 +260,245 @@ interface RedditPost {
   ups: number;
   comments: number;
   ageHours: number;
+  createdUtc: number;
+}
+
+interface RedditContinuation {
+  title: string;
+  body: string;
+  url: string;
+  source: "op_comment" | "author_post";
+  createdUtc: number;
+}
+
+interface RedditListingJson {
+  data?: {
+    children?: {
+      data?: {
+        id?: string;
+        title?: string;
+        selftext?: string;
+        permalink?: string;
+        subreddit_name_prefixed?: string;
+        author?: string;
+        ups?: number;
+        num_comments?: number;
+        created_utc?: number;
+      };
+    }[];
+  };
+}
+
+function parseRedditListing(j: RedditListingJson, subreddit: string): RedditPost[] {
+  return (j.data?.children ?? [])
+    .map((c) => ({
+      id: c.data?.id ?? "",
+      title: c.data?.title ?? "",
+      body: cleanRedditBody(c.data?.selftext ?? ""),
+      url: c.data?.permalink ? `https://reddit.com${c.data.permalink}` : "",
+      subreddit: c.data?.subreddit_name_prefixed ?? subreddit,
+      author: c.data?.author ?? "unknown",
+      ups: c.data?.ups ?? 0,
+      comments: c.data?.num_comments ?? 0,
+      ageHours: Math.max(1, Math.round((Date.now() / 1000 - (c.data?.created_utc ?? Date.now() / 1000)) / 3600)),
+      createdUtc: c.data?.created_utc ?? 0,
+    }))
+    .filter((p) => {
+      const body = p.body.trim().toLowerCase();
+      return (
+        Boolean(p.title && p.url) &&
+        Boolean(p.id) &&
+        p.body.length > 200 &&
+        p.body.length < 12_000 &&
+        body !== "[removed]" &&
+        body !== "[deleted]" &&
+        wordCount(p.body) >= 60
+      );
+    });
+}
+
+async function fetchPublicRedditPosts(
+  subreddit: string,
+  limit: number,
+  t: RedditTimeRange,
+  sort: RedditSort
+): Promise<RedditPost[]> {
+  const sub = subreddit.replace(/^r\//, "");
+  const path = sort === "top" ? `top.json?t=${t}&` : `${sort}.json?`;
+  const res = await fetch(
+    `https://www.reddit.com/r/${sub}/${path}limit=${limit}&raw_json=1`,
+    { headers: { "User-Agent": config.redditUserAgent } }
+  );
+  if (!res.ok) throw new Error(`Reddit public fetch ${res.status}: ${await res.text()}`);
+  return parseRedditListing((await res.json()) as RedditListingJson, subreddit);
+}
+
+interface RedditCommentNode {
+  kind?: string;
+  data?: {
+    body?: string;
+    author?: string;
+    permalink?: string;
+    created_utc?: number;
+    score?: number;
+    replies?: "" | { data?: { children?: RedditCommentNode[] } };
+  };
+}
+
+interface RedditCommentsJsonListing {
+  data?: { children?: RedditCommentNode[] };
+}
+
+function isRemovedText(body: string): boolean {
+  const normalized = body.trim().toLowerCase();
+  return normalized === "[removed]" || normalized === "[deleted]";
+}
+
+function flattenComments(nodes: RedditCommentNode[] = []): RedditCommentNode[] {
+  const out: RedditCommentNode[] = [];
+  for (const node of nodes) {
+    if (node.kind === "more") continue;
+    out.push(node);
+    const replies = node.data?.replies;
+    if (replies && typeof replies === "object") {
+      out.push(...flattenComments(replies.data?.children ?? []));
+    }
+  }
+  return out;
+}
+
+function continuationCue(text: string): boolean {
+  return /\b(update|edit|final update|mini update|part\s*(?:two|three|four|\d+)|continued|continuation|follow[ -]?up|for everyone asking|since people asked|in the comments|comment update)\b/i.test(text);
+}
+
+function significantTitleWords(title: string): Set<string> {
+  const stop = new Set(["aita", "aitah", "update", "final", "part", "with", "that", "this", "from", "have", "after", "before", "because", "about"]);
+  return new Set(
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((word) => word.length > 3 && !stop.has(word))
+      .slice(0, 10)
+  );
+}
+
+function titleOverlap(a: string, b: string): number {
+  const aw = significantTitleWords(a);
+  const bw = significantTitleWords(b);
+  let count = 0;
+  for (const word of aw) if (bw.has(word)) count++;
+  return count;
+}
+
+async function redditFetchJson(path: string): Promise<unknown> {
+  const token = await redditToken();
+  const res = await fetch(`https://oauth.reddit.com${path}`, {
+    headers: { Authorization: `Bearer ${token}`, "User-Agent": config.redditUserAgent },
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    if (res.status === 403 || res.status === 429) {
+      const [pathname, query] = path.split("?", 2);
+      const jsonPath = pathname.endsWith(".json") ? pathname : `${pathname}.json`;
+      const publicRes = await fetch(`https://www.reddit.com${jsonPath}${query ? `?${query}` : ""}`, {
+        headers: { "User-Agent": config.redditUserAgent },
+      });
+      if (!publicRes.ok) {
+        throw new Error(
+          `Reddit fetch ${res.status}: ${detail}; public fallback ${publicRes.status}: ${await publicRes.text()}`
+        );
+      }
+      return publicRes.json();
+    }
+    throw new Error(`Reddit fetch ${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+async function fetchOpCommentContinuations(post: RedditPost): Promise<RedditContinuation[]> {
+  if (!post.id || !post.author || post.author === "[deleted]") return [];
+  const json = (await redditFetchJson(`/comments/${post.id}?limit=500&sort=qa&raw_json=1`)) as [
+    unknown,
+    RedditCommentsJsonListing,
+  ];
+  const comments = flattenComments(json[1]?.data?.children ?? []);
+  return comments
+    .filter((node) => node.data?.author?.toLowerCase() === post.author.toLowerCase())
+    .map((node): RedditContinuation | undefined => {
+      const body = cleanRedditBody(node.data?.body ?? "");
+      if (wordCount(body) < 25 || isRemovedText(body)) return undefined;
+      if (!continuationCue(body) && wordCount(body) < 70) return undefined;
+      return {
+        title: "OP comment update",
+        body,
+        url: node.data?.permalink ? `https://reddit.com${node.data.permalink}` : post.url,
+        source: "op_comment",
+        createdUtc: node.data?.created_utc ?? post.createdUtc,
+      };
+    })
+    .filter((item): item is RedditContinuation => Boolean(item))
+    .sort((a, b) => a.createdUtc - b.createdUtc)
+    .slice(0, 4);
+}
+
+async function fetchAuthorPostContinuations(post: RedditPost): Promise<RedditContinuation[]> {
+  if (!post.author || post.author === "[deleted]") return [];
+  const json = (await redditFetchJson(
+    `/user/${encodeURIComponent(post.author)}/submitted?sort=new&limit=50&raw_json=1`
+  )) as RedditListingJson;
+  return parseRedditListing(json, post.subreddit)
+    .filter((candidate) => candidate.url !== post.url)
+    .filter((candidate) => candidate.createdUtc > post.createdUtc)
+    .filter((candidate) => candidate.createdUtc - post.createdUtc < 60 * 60 * 24 * 120)
+    .filter((candidate) => {
+      const combined = `${candidate.title}\n${candidate.body}`;
+      return continuationCue(combined) || titleOverlap(post.title, candidate.title) >= 2;
+    })
+    .map((candidate) => ({
+      title: candidate.title,
+      body: candidate.body,
+      url: candidate.url,
+      source: "author_post" as const,
+      createdUtc: candidate.createdUtc,
+    }))
+    .sort((a, b) => a.createdUtc - b.createdUtc)
+    .slice(0, 3);
+}
+
+function combinePostWithContinuations(post: RedditPost, continuations: RedditContinuation[]): RedditPost {
+  if (!continuations.length) return post;
+  const unique = new Map<string, RedditContinuation>();
+  for (const continuation of continuations) {
+    const key = `${continuation.source}:${continuation.url}:${continuation.body.slice(0, 80)}`;
+    unique.set(key, continuation);
+  }
+  const ordered = [...unique.values()].sort((a, b) => a.createdUtc - b.createdUtc);
+  const body = [
+    post.body,
+    ...ordered.map((item) => `${item.title.toLowerCase().includes("update") ? item.title : "Update"}: ${item.body}`),
+  ].join("\n\n");
+  const latest = ordered[ordered.length - 1];
+  return {
+    ...post,
+    body,
+    comments: post.comments + ordered.length,
+    url: latest?.url ?? post.url,
+  };
+}
+
+async function resolveRedditStoryThread(post: RedditPost): Promise<RedditPost> {
+  const [comments, authorPosts] = await Promise.all([
+    fetchOpCommentContinuations(post).catch((error: unknown) => {
+      console.warn(`  reddit comments skipped for ${post.url}: ${getErrorMessage(error)}`);
+      return [];
+    }),
+    fetchAuthorPostContinuations(post).catch((error: unknown) => {
+      console.warn(`  reddit author updates skipped for u/${post.author}: ${getErrorMessage(error)}`);
+      return [];
+    }),
+  ]);
+  return combinePostWithContinuations(post, [...comments, ...authorPosts]);
 }
 
 async function fetchRedditPosts(
@@ -273,43 +514,19 @@ async function fetchRedditPosts(
     `https://oauth.reddit.com/r/${sub}/${path}limit=${limit}&raw_json=1`,
     { headers: { Authorization: `Bearer ${token}`, "User-Agent": config.redditUserAgent } }
   );
-  if (!res.ok) throw new Error(`Reddit fetch ${res.status}: ${await res.text()}`);
-  const j = (await res.json()) as {
-    data: {
-      children: {
-        data: {
-          title: string;
-          selftext: string;
-          permalink: string;
-          author: string;
-          ups: number;
-          num_comments: number;
-          created_utc: number;
-        };
-      }[];
-    };
-  };
-  return j.data.children
-    .map((c) => ({
-      title: c.data.title,
-      body: cleanRedditBody(c.data.selftext),
-      url: `https://reddit.com${c.data.permalink}`,
-      subreddit,
-      author: c.data.author,
-      ups: c.data.ups,
-      comments: c.data.num_comments,
-      ageHours: Math.max(1, Math.round((Date.now() / 1000 - c.data.created_utc) / 3600)),
-    }))
-    .filter((p) => {
-      const body = p.body.trim().toLowerCase();
-      return (
-        p.body.length > 200 &&
-        p.body.length < 12_000 &&
-        body !== "[removed]" &&
-        body !== "[deleted]" &&
-        wordCount(p.body) >= 60
-      );
-    });
+  if (!res.ok) {
+    const detail = await res.text();
+    if (res.status === 403 || res.status === 429) {
+      console.warn(`  reddit oauth fetch ${res.status} for ${subreddit}; trying public JSON fallback`);
+      try {
+        return await fetchPublicRedditPosts(subreddit, limit, t, sort);
+      } catch (fallbackError: unknown) {
+        throw new Error(`Reddit fetch ${res.status}: ${detail}; fallback failed: ${getErrorMessage(fallbackError)}`);
+      }
+    }
+    throw new Error(`Reddit fetch ${res.status}: ${detail}`);
+  }
+  return parseRedditListing((await res.json()) as RedditListingJson, subreddit);
 }
 
 // ---- dedupe ----
@@ -327,8 +544,13 @@ function premiseKey(title: string): string {
 }
 
 async function isDuplicate(title: string, seedUrl?: string): Promise<boolean> {
-  if (seedUrl && (await Story.exists({ seedUrl }))) return true;
+  if (seedUrl && ((await Story.exists({ seedUrl })) || (await isSeedUrlUsedByLiveReel(seedUrl)))) return true;
   return !!(await Story.exists({ premiseKey: premiseKey(title) }));
+}
+
+async function isSeedUrlUsedByLiveReel(seedUrl?: string): Promise<boolean> {
+  if (!seedUrl) return false;
+  return !!(await Reel.exists({ "redditStory.seedUrl": seedUrl }));
 }
 
 // ---- LLM helpers ----
@@ -431,9 +653,9 @@ async function pickRedditPost(genre: RedditGenre): Promise<RedditPost> {
   if (!posts.length) throw new Error(`No usable posts for reddit genre ${genre.id}`);
 
   for (const post of posts) {
-    if (!(await Story.exists({ seedUrl: post.url }))) return post;
+    if (!(await isDuplicate(post.title, post.url))) return post;
   }
-  return posts[0];
+  throw new Error(`No fresh unused posts for reddit genre ${genre.id}`);
 }
 
 function extractJson<T>(text: string): T {
@@ -707,17 +929,18 @@ export async function generateStory(
   const post = await pickRedditPost(genre);
 
   if (mode === "verbatim") {
+    const threadedPost = await resolveRedditStoryThread(post);
     return {
-      title: post.title,
-      body: trimBody(post.body),
+      title: threadedPost.title,
+      body: trimBody(threadedPost.body),
       source: "verbatim",
       theme: theme?.id,
       genre: genre.id,
-      subreddit: post.subreddit,
-      author: post.author,
-      upvotes: post.ups,
-      comments: post.comments,
-      ageHours: post.ageHours,
+      subreddit: threadedPost.subreddit,
+      author: threadedPost.author,
+      upvotes: threadedPost.ups,
+      comments: threadedPost.comments,
+      ageHours: threadedPost.ageHours,
       seedTitle: post.title,
       seedUrl: post.url,
     };
@@ -792,22 +1015,23 @@ export async function generateStorySeries(
     }));
   }
 
-  const body = cleanRedditBody(post.body);
+  const threadedPost = await resolveRedditStoryThread(post);
+  const body = cleanRedditBody(threadedPost.body);
   const words = wordCount(body);
   const partCount = resolvePartCount(requestedParts, words);
   if (partCount === 1) {
     return [
       {
-        title: post.title,
+        title: threadedPost.title,
         body: trimBody(body),
         source: "verbatim",
         theme: theme?.id,
         genre: genre.id,
-        subreddit: post.subreddit,
-        author: post.author,
-        upvotes: post.ups,
-        comments: post.comments,
-        ageHours: post.ageHours,
+        subreddit: threadedPost.subreddit,
+        author: threadedPost.author,
+        upvotes: threadedPost.ups,
+        comments: threadedPost.comments,
+        ageHours: threadedPost.ageHours,
         seedTitle: post.title,
         seedUrl: post.url,
         partNumber: 1,
@@ -821,16 +1045,16 @@ export async function generateStorySeries(
   if (resolvedPartCount === 1) {
     return [
       {
-        title: post.title,
+        title: threadedPost.title,
         body: trimBody(body),
         source: "verbatim",
         theme: theme?.id,
         genre: genre.id,
-        subreddit: post.subreddit,
-        author: post.author,
-        upvotes: post.ups,
-        comments: post.comments,
-        ageHours: post.ageHours,
+        subreddit: threadedPost.subreddit,
+        author: threadedPost.author,
+        upvotes: threadedPost.ups,
+        comments: threadedPost.comments,
+        ageHours: threadedPost.ageHours,
         seedTitle: post.title,
         seedUrl: post.url,
         partNumber: 1,
@@ -839,11 +1063,13 @@ export async function generateStorySeries(
     ];
   }
 
-  const cuts = await selectVerbatimCuts(post.title, sentences, resolvedPartCount, tier);
-  return buildVerbatimParts(post, post.subreddit, sentences, cuts).map((part) => ({
+  const cuts = await selectVerbatimCuts(threadedPost.title, sentences, resolvedPartCount, tier);
+  return buildVerbatimParts(threadedPost, threadedPost.subreddit, sentences, cuts).map((part) => ({
     ...part,
     theme: theme?.id,
     genre: genre.id,
+    seedTitle: post.title,
+    seedUrl: post.url,
   }));
 }
 
@@ -881,11 +1107,17 @@ export async function takeNextStory(
   mode: StorySource = "llm",
   tier: Tier = "value"
 ): Promise<StoryDraft & { source: StorySource; storyId?: string }> {
-  const doc = await Story.findOneAndUpdate(
-    { used: false },
-    { used: true, usedAt: new Date() },
-    { sort: { createdAt: 1 }, new: true }
-  );
+  const candidates = await Story.find({ used: false }).sort({ createdAt: 1 }).limit(25);
+  let doc: IStory | null = null;
+  for (const candidate of candidates) {
+    if (await isSeedUrlUsedByLiveReel(candidate.seedUrl)) continue;
+    doc = await Story.findOneAndUpdate(
+      { _id: candidate._id, used: false },
+      { used: true, usedAt: new Date() },
+      { new: true }
+    );
+    if (doc) break;
+  }
   if (doc) {
     return {
       title: doc.title,
@@ -910,6 +1142,11 @@ export async function takeNextStory(
     usedAt: new Date(),
   });
   return { ...draft, storyId: created._id.toString() };
+}
+
+export async function markStoryReel(storyId: string | undefined, reelId: string): Promise<void> {
+  if (!storyId) return;
+  await Story.findByIdAndUpdate(storyId, { reelId });
 }
 
 /** Bank stats for monitoring the farm. */
