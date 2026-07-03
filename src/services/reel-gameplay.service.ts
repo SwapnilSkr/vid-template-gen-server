@@ -1,5 +1,5 @@
 import ffmpeg from "fluent-ffmpeg";
-import { readdir, writeFile, unlink, stat } from "node:fs/promises";
+import { readFile, readdir, writeFile, unlink, stat } from "node:fs/promises";
 import { join, basename, resolve } from "node:path";
 import { config } from "../config";
 import { ensureDir } from "../utils";
@@ -198,6 +198,13 @@ async function renderGameplayReelInner(
     startTime: starts[i + 1],
     speech: speechDurs[i + 1],
   }));
+  if (outroText) {
+    capSegs.push({
+      text: outroText,
+      startTime: starts[segTexts.length - 1],
+      speech: speechDurs[segTexts.length - 1],
+    });
+  }
   const assPath = join(config.processingPath, `${reelId}.ass`);
   await writeFile(assPath, buildBouncingCaptions(capSegs), "utf-8");
 
@@ -351,11 +358,11 @@ function composite(
   out: string,
   outro?: { card?: { path: string; width: number; height: number }; start?: number }
 ): Promise<string> {
-  const ass = assPath.replace(/'/g, "\\'");
+  const ass = escapeFilterValue(resolve(assPath));
   const en = finiteSeconds(titleDur, "title duration").toFixed(2);
   const x = Math.round((W - card.width) / 2);
   const fullFilters = [
-    `[0:v]ass='${ass}'[base]`,
+    `[0:v]ass=filename='${ass}'[base]`,
     `[base][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`,
   ];
   const cardOnlyFilters = [`[0:v][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`];
@@ -393,6 +400,10 @@ function composite(
 function finiteSeconds(value: number, label: string): number {
   if (Number.isFinite(value) && value >= 0) return value;
   throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function escapeFilterValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
 function runComposite(
@@ -472,17 +483,32 @@ function buildBouncingCaptions(
 ScriptType: v4.00+
 PlayResX: ${W}
 PlayResY: ${H}
-WrapStyle: 2
+WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,Arial,76,&H00FFFFFF,&H0000D7FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,6,3,5,80,80,0,1
+Style: Cap,Arial,76,&H00FFFFFF,&H0000D7FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,6,3,5,130,130,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-  const CHUNK = 3;
+  return header + buildBouncingCaptionLines(segs).join("\n") + "\n";
+}
+
+export async function appendBouncingCaptionCues(
+  assPath: string,
+  segs: { text: string; startTime: number; speech: number }[]
+): Promise<void> {
+  const current = await readFile(assPath, "utf-8");
+  const lines = buildBouncingCaptionLines(segs);
+  if (!lines.length) return;
+  await writeFile(assPath, `${current.trimEnd()}\n${lines.join("\n")}\n`, "utf-8");
+}
+
+function buildBouncingCaptionLines(
+  segs: { text: string; startTime: number; speech: number }[]
+): string[] {
   const lines: string[] = [];
 
   for (const seg of segs) {
@@ -500,22 +526,63 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       ends.push(seg.startTime + (acc / totalW) * seg.speech);
     }
 
-    for (let i = 0; i < words.length; i++) {
-      const cs = Math.floor(i / CHUNK) * CHUNK;
-      const chunk = words.slice(cs, cs + CHUNK);
-      const active = i - cs;
-      const text = chunk
-        .map((w, k) =>
-          k === active
-            ? `{\\fscx118\\fscy118\\1c&H0000D7FF&}${assText(w)}{\\fscx100\\fscy100\\1c&H00FFFFFF&}`
-            : assText(w)
-        )
-        .join(" ");
-      lines.push(`Dialogue: 0,${assTime(starts[i])},${assTime(ends[i])},Cap,,0,0,0,,${text}`);
+    for (const { start: cs, end: ce, scale } of captionChunks(words)) {
+      const chunk = words.slice(cs, ce);
+      const lineScale = scale < 100 ? `{\\fscx${scale}\\fscy${scale}}` : "";
+
+      for (let i = cs; i < ce; i++) {
+        const active = i - cs;
+        const activeScale = scale < 100 ? Math.min(112, Math.round(scale * 1.18)) : 118;
+        const text = chunk
+          .map((w, k) =>
+            k === active
+              ? `{\\fscx${activeScale}\\fscy${activeScale}\\1c&H0000D7FF&}${assText(w)}{\\fscx${scale}\\fscy${scale}\\1c&H00FFFFFF&}`
+              : assText(w)
+          )
+          .join(" ");
+        lines.push(
+          `Dialogue: 0,${assTime(starts[i])},${assTime(ends[i])},Cap,,0,0,0,,${lineScale}${text}`
+        );
+      }
     }
   }
 
-  return header + lines.join("\n") + "\n";
+  return lines;
+}
+
+function captionChunks(words: string[]): { start: number; end: number; scale: number }[] {
+  const chunks: { start: number; end: number; scale: number }[] = [];
+  const maxWidth = W - 260;
+  let start = 0;
+
+  while (start < words.length) {
+    let end = start + 1;
+    while (
+      end < words.length &&
+      end - start < 3 &&
+      estimatedCaptionWidth(words.slice(start, end + 1)) <= maxWidth
+    ) {
+      end++;
+    }
+
+    const width = estimatedCaptionWidth(words.slice(start, end), 1.18);
+    const scale = width > maxWidth ? Math.max(72, Math.floor((maxWidth / width) * 100)) : 100;
+    chunks.push({ start, end, scale });
+    start = end;
+  }
+
+  return chunks;
+}
+
+function estimatedCaptionWidth(words: string[], activeMultiplier = 1): number {
+  const joined = words.join(" ");
+  const weight = [...joined].reduce((sum, ch) => {
+    if (ch === " ") return sum + 0.35;
+    if (/[A-Z0-9@#]/.test(ch)) return sum + 0.68;
+    if (/[il.,'!]/.test(ch)) return sum + 0.3;
+    return sum + 0.56;
+  }, 0);
+  return weight * 76 * activeMultiplier;
 }
 
 function assText(text: string): string {
