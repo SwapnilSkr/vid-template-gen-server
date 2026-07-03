@@ -86,10 +86,16 @@ export async function enqueuePublish(
   reelId: string,
   platform: PublishJobData["platform"] = "youtube"
 ): Promise<void> {
+  const activeJobs = await publishQueue.getJobs(["waiting", "delayed", "active"], 0, 100);
+  const duplicate = activeJobs.some(
+    (job) => job.data.reelId === reelId && job.data.platform === platform
+  );
+  if (duplicate) return;
+
   await publishQueue.add(
     "publish",
     { reelId, platform },
-    { jobId: `${reelId}-publish-${platform}` }
+    { jobId: `${reelId}-publish-${platform}-${Date.now()}` }
   );
 }
 
