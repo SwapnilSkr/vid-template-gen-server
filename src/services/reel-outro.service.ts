@@ -25,8 +25,15 @@ export interface OutroTts {
 }
 
 export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undefined> {
+  const explicitChannel = reel.outroChannelId
+    ? await YouTubeChannel.findOne({
+        channelKey: reel.outroChannelId,
+        status: "active",
+      })
+    : undefined;
+
   if (reel.niche === "reddit") {
-    const channel = await findChannelForNiche(["reddit", "reddit_stories", "aita"]);
+    const channel = explicitChannel ?? (await findChannelForNiche(["reddit", "reddit_stories", "aita"]));
     return {
       kind: "reddit",
       channelName: channel?.googleChannelTitle ?? channel?.label ?? "Reddit Stories",
@@ -36,7 +43,8 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
   }
 
   if (reel.niche.startsWith("horror")) {
-    const channel = await findChannelForNiche(["horror", "horror_comic", reel.genre ?? ""]);
+    const channel =
+      explicitChannel ?? (await findChannelForNiche(["horror", "horror_comic", reel.genre ?? ""]));
     return {
       kind: "horror",
       channelName: channel?.googleChannelTitle ?? channel?.label ?? "Midnight Horror",
@@ -208,6 +216,8 @@ async function renderOutroClip(
       ];
 
   return new Promise<string>((resolvePromise, reject) => {
+    let commandLine = "";
+    const stderr: string[] = [];
     const command = ffmpeg();
     if (backgroundVideo) {
       command.input(backgroundVideo).inputOptions(["-stream_loop", "-1"]);
@@ -219,10 +229,6 @@ async function renderOutroClip(
       .outputOptions([
         "-t",
         duration.toFixed(2),
-        "-map",
-        "[v]",
-        "-map",
-        "[a]",
         "-r",
         String(FPS),
         "-c:v",
@@ -242,7 +248,18 @@ async function renderOutroClip(
       ])
       .output(output)
       .on("end", () => resolvePromise(output))
-      .on("error", (err) => reject(new Error(`Outro clip render failed: ${err.message}`)))
+      .on("start", (cmd) => {
+        commandLine = cmd;
+      })
+      .on("stderr", (line) => {
+        stderr.push(line);
+        if (stderr.length > 50) stderr.shift();
+      })
+      .on("error", (err) => {
+        const detail = stderr.length ? `\n${stderr.join("\n")}` : "";
+        const commandDetail = commandLine ? `\nCommand: ${commandLine}` : "";
+        reject(new Error(`Outro clip render failed: ${err.message}${commandDetail}${detail}`));
+      })
       .run();
   });
 }
