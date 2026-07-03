@@ -21,6 +21,13 @@ export interface ImageModelOption {
   supportsReferenceArt: boolean;
   /** last validation result (scripts/validate-models.ts) — undefined = untested */
   healthy?: boolean;
+  /** "flat" = fixed $/image (predictable); "variable" = token/megapixel-billed
+   *  (cost scales with prompt + reference art, can spike). */
+  pricingType: "flat" | "variable";
+  /** exact $/image — set only for flat-priced models (predictable reel math). */
+  perImageUsd?: number;
+  /** a real measured sample cost from validation (a hint for variable models). */
+  probeCostUsd?: number;
 }
 
 // Health report written by scripts/validate-models.ts to S3. When present, the
@@ -144,6 +151,10 @@ function cheapestOutputCost(endpoint?: OpenRouterImageEndpoint): number {
   return Math.min(...costs, Number.POSITIVE_INFINITY);
 }
 
+function flatImagePrice(endpoint?: OpenRouterImageEndpoint): number | undefined {
+  return endpoint?.pricing?.find((item) => item.billable === "output_image" && item.unit === "image")?.cost_usd;
+}
+
 function imageTier(model: OpenRouterModel, endpoint?: OpenRouterImageEndpoint): ImageModelOption["recommendedTier"] {
   const cost = cheapestOutputCost(endpoint);
   if (model.id.includes("lite") || model.id.includes("mini") || cost <= 0.02) return "cheap";
@@ -212,6 +223,7 @@ export async function listImageModels(): Promise<ImageModelOption[]> {
       const endpoint = endpoints.get(model.id);
       const supportsReferenceArt = Boolean(model.supported_parameters?.input_references);
       const healthEntry = health.images?.[model.id];
+      const perImageUsd = flatImagePrice(endpoint);
       return {
         model: model.id,
         label: model.name ?? model.id,
@@ -219,10 +231,15 @@ export async function listImageModels(): Promise<ImageModelOption[]> {
         priceNote:
           `${endpoint?.provider_name ? `${endpoint.provider_name}. ` : ""}Raster image model from OpenRouter's dedicated Images API.` +
           `${supportsReferenceArt ? " Supports reference-art styles." : " No reference-art support (prompt-only)."}` +
+          `${perImageUsd !== undefined ? ` Predictable flat price: $${perImageUsd.toFixed(3)}/image.` : " Variable/token-priced: cost can increase with prompt length or reference art."}` +
+          `${healthEntry?.costUsd !== undefined ? ` Validation probe cost: $${healthEntry.costUsd.toFixed(4)}.` : ""}` +
           " Exact request cost is captured from usage after generation.",
         recommendedTier: imageTier(model, endpoint),
         supportsReferenceArt,
         healthy: healthEntry ? healthEntry.ok : undefined,
+        pricingType: perImageUsd !== undefined ? "flat" : "variable",
+        perImageUsd,
+        probeCostUsd: healthEntry?.costUsd,
       };
     })
     // When a health report exists, only surface models that PASSED validation
