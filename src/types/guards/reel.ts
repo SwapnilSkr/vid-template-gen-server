@@ -20,6 +20,8 @@ export const CreateReelBody = t.Object({
   gameplayKey: t.Optional(t.String()),
   /** explicit global S3 key (horror-audio/xxx.mp3) for horror background bed */
   horrorAudioKey: t.Optional(t.String()),
+  /** connected YouTube channel id used for rendered outro branding */
+  outroChannelId: t.Optional(t.String()),
   /** explicit image model pick from the compatible image model catalog */
   imageModel: t.Optional(t.String()),
   /** reference-art style id (config/art-styles.ts) for horror/image niches */

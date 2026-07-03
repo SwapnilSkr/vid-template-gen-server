@@ -45,6 +45,7 @@ interface CreateReelOptions {
   genre?: string;
   gameplayKey?: string;
   horrorAudioKey?: string;
+  outroChannelId?: string;
   imageModel?: string;
   artStyleId?: string;
   motionMode?: ReelMotionMode;
@@ -115,6 +116,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
       genre: options.genre,
       gameplayKey: options.gameplayKey,
       horrorAudioKey: options.horrorAudioKey,
+      outroChannelId: options.outroChannelId,
       imageModel: options.imageModel,
       ttsModel: options.ttsModel,
       ttsVoice: options.ttsVoice,
@@ -149,6 +151,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     motionMode,
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
+    outroChannelId: options.outroChannelId,
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
@@ -179,6 +182,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     strategy: "gameplay_overlay",
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
+    outroChannelId: options.outroChannelId,
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
@@ -219,6 +223,7 @@ async function createGameplayReelSeries(
       strategy: "gameplay_overlay",
       gameplayKey: options.gameplayKey,
       horrorAudioKey: options.horrorAudioKey,
+      outroChannelId: options.outroChannelId,
       imageModelOverride: options.imageModel,
       voiceOverride: toVoiceOverride(options),
       status: "pending",

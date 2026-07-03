@@ -187,6 +187,8 @@ export interface IReel extends Document {
    *  reuses the exact same background instead of swapping it. */
   gameplayKey?: string;
   horrorAudioKey?: string;
+  /** Connected YouTube channel id used for rendered outro branding. */
+  outroChannelId?: string;
   imageModelOverride?: string;
   voiceOverride?: IVoiceOverride;
   voiceVariants: IVoiceVariant[];
@@ -401,6 +403,7 @@ const reelSchema = new Schema<IReel>(
     partCount: Number,
     gameplayKey: String,
     horrorAudioKey: String,
+    outroChannelId: String,
     imageModelOverride: String,
     voiceOverride: voiceOverrideSchema,
     voiceVariants: { type: [voiceVariantSchema], default: [] },
