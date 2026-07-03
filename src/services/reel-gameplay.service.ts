@@ -352,30 +352,72 @@ function composite(
   outro?: { card?: { path: string; width: number; height: number }; start?: number }
 ): Promise<string> {
   const ass = assPath.replace(/'/g, "\\'");
-  const en = titleDur.toFixed(2);
+  const en = finiteSeconds(titleDur, "title duration").toFixed(2);
   const x = Math.round((W - card.width) / 2);
-  const filters = [
+  const fullFilters = [
     `[0:v]ass='${ass}'[base]`,
     `[base][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`,
   ];
+  const cardOnlyFilters = [`[0:v][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`];
   let outputLabel = "vtitle";
   if (outro?.card && outro.start !== undefined) {
+    const outroStart = finiteSeconds(outro.start, "outro start").toFixed(2);
     const outroX = Math.round((W - outro.card.width) / 2);
     const outroY = Math.round((H - outro.card.height) / 2);
-    filters.push(
-      `[vtitle][3:v]overlay=${outroX}:${outroY}:enable='gte(t,${outro.start.toFixed(2)})'[vout]`
-    );
+    const outroFilter = `[vtitle][3:v]overlay=${outroX}:${outroY}:enable='gte(t,${outroStart})'[vout]`;
+    fullFilters.push(outroFilter);
+    cardOnlyFilters.push(outroFilter);
     outputLabel = "vout";
   }
 
+  return runComposite(bg, narr, card, out, fullFilters, outputLabel, outro?.card).catch(
+    async (firstError) => {
+      console.warn(firstError.message);
+      await unlink(out).catch(() => {});
+      return runComposite(bg, narr, card, out, cardOnlyFilters, outputLabel, outro?.card).catch(
+        async (secondError) => {
+          console.warn(secondError.message);
+          await unlink(out).catch(() => {});
+          return runComposite(bg, narr, card, out, [], "0:v", outro?.card).catch((thirdError) => {
+            throw new Error(
+              `Gameplay composite failed after full/card/bare attempts.\n` +
+                `Full: ${firstError.message}\nCard-only: ${secondError.message}\nBare: ${thirdError.message}`
+            );
+          });
+        }
+      );
+    }
+  );
+}
+
+function finiteSeconds(value: number, label: string): number {
+  if (Number.isFinite(value) && value >= 0) return value;
+  throw new Error(`Invalid ${label}: ${value}`);
+}
+
+function runComposite(
+  bg: string,
+  narr: string,
+  card: { path: string; width: number; height: number },
+  out: string,
+  filters: string[],
+  outputLabel: string,
+  outroCard?: { path: string; width: number; height: number }
+): Promise<string> {
   return new Promise((resolve, reject) => {
+    let commandLine = "";
+    const stderr: string[] = [];
     const command = ffmpeg()
       .input(bg) // 0: gameplay
       .input(narr) // 1: narration
       .input(card.path); // 2: reddit card png
-    if (outro?.card) command.input(outro.card.path); // 3: outro card png
+    if (outroCard) command.input(outroCard.path); // 3: outro card png
+    if (filters.length > 0) {
+      command.complexFilter(filters, [outputLabel]);
+    } else {
+      command.outputOptions(["-map", outputLabel]);
+    }
     command
-      .complexFilter(filters, [outputLabel])
       .outputOptions([
         "-map", "1:a",
         "-c:v", "libx264",
@@ -389,7 +431,18 @@ function composite(
       ])
       .output(out)
       .on("end", () => resolve(out))
-      .on("error", (err) => reject(new Error(`Gameplay composite failed: ${err.message}`)))
+      .on("start", (cmd) => {
+        commandLine = cmd;
+      })
+      .on("stderr", (line) => {
+        stderr.push(line);
+        if (stderr.length > 40) stderr.shift();
+      })
+      .on("error", (err) => {
+        const detail = stderr.length ? `\n${stderr.join("\n")}` : "";
+        const commandDetail = commandLine ? `\nCommand: ${commandLine}` : "";
+        reject(new Error(`Gameplay composite attempt failed: ${err.message}${commandDetail}${detail}`));
+      })
       .run();
   });
 }
@@ -454,8 +507,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const text = chunk
         .map((w, k) =>
           k === active
-            ? `{\\fscx118\\fscy118\\1c&H0000D7FF&}${w}{\\fscx100\\fscy100\\1c&H00FFFFFF&}`
-            : w
+            ? `{\\fscx118\\fscy118\\1c&H0000D7FF&}${assText(w)}{\\fscx100\\fscy100\\1c&H00FFFFFF&}`
+            : assText(w)
         )
         .join(" ");
       lines.push(`Dialogue: 0,${assTime(starts[i])},${assTime(ends[i])},Cap,,0,0,0,,${text}`);
@@ -463,4 +516,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   }
 
   return header + lines.join("\n") + "\n";
+}
+
+function assText(text: string): string {
+  return text
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\\/g, "/")
+    .replace(/[{}]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
