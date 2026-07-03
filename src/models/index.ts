@@ -24,6 +24,8 @@ export {
   type ICostLine,
   type IVoiceVariant,
   type IVoiceOverride,
+  type IStoryBible,
+  type ReelMotionMode,
 } from "./reel.model";
 export { Story, type IStory, type StorySource } from "./story.model";
 export {

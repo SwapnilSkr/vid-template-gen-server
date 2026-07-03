@@ -28,10 +28,33 @@ export type ReelStatus =
   | "completed"
   | "failed";
 
-/** Ken Burns / motion config for animating a still. */
+/** Motion config for animating a still.
+ *  - ken_burns: classic pan/zoom (fake motion)
+ *  - static:    no motion
+ *  - parallax:  FFmpeg "living still" — layered drift + fog + breathing (free)
+ *  - ai_motion: real image-to-video clip generated from the still (paid) */
 export interface ISceneMotion {
-  type: "ken_burns" | "static";
+  type: "ken_burns" | "static" | "parallax" | "ai_motion";
   direction: "in" | "out";
+  /** 0-1 motion strength (parallax drift / breathing amplitude). Default ~0.5. */
+  intensity?: number;
+}
+
+/** Per-reel motion policy, resolved into per-scene motion types at plan time. */
+export type ReelMotionMode = "ken_burns" | "parallax" | "ai_hybrid" | "ai_full";
+
+/** Deep story materials produced by the two-pass horror planner (Pass 1).
+ *  Persisted so the story arc is inspectable and reusable (review/thumbnail). */
+export interface IStoryBible {
+  premise: string;
+  setting: string;
+  protagonist: string;
+  anchorObject: string; // the ordinary object/place that turns impossible
+  impossibleRule: string; // the single supernatural law of this story
+  escalation: string[]; // beat-by-beat dread ladder
+  soundCues?: string[]; // per-beat sound-design hints
+  artDirection: string; // recurring visual motifs (keeps scenes coherent)
+  finalTwist: string; // the recontextualizing last line
 }
 
 /** Caption cue produced by the align stage (drives ASS karaoke). */
@@ -140,12 +163,15 @@ export interface IReel extends Document {
   topic: string; // seed idea
   strategy: ReelStrategy;
   style: string; // visual style suffix (sepia, cinematic, ...)
+  artStyleId?: string; // reference-art style (config/art-styles.ts) if chosen
+  motionMode?: ReelMotionMode; // per-reel motion policy
   tier: "cheap" | "value" | "premium";
   storySource?: "llm" | "hybrid" | "verbatim";
   genre?: string;
 
   title?: string;
   hook?: string;
+  storyBible?: IStoryBible;
   scenes: IScene[];
   redditStory?: IRedditStoryPayload;
   seriesId?: string;
@@ -181,8 +207,28 @@ export interface IReel extends Document {
 
 const sceneMotionSchema = new Schema<ISceneMotion>(
   {
-    type: { type: String, enum: ["ken_burns", "static"], default: "ken_burns" },
+    type: {
+      type: String,
+      enum: ["ken_burns", "static", "parallax", "ai_motion"],
+      default: "ken_burns",
+    },
     direction: { type: String, enum: ["in", "out"], default: "in" },
+    intensity: { type: Number, min: 0, max: 1 },
+  },
+  { _id: false }
+);
+
+const storyBibleSchema = new Schema<IStoryBible>(
+  {
+    premise: { type: String, required: true },
+    setting: { type: String, required: true },
+    protagonist: { type: String, required: true },
+    anchorObject: { type: String, required: true },
+    impossibleRule: { type: String, required: true },
+    escalation: { type: [String], default: [] },
+    soundCues: { type: [String], default: [] },
+    artDirection: { type: String, required: true },
+    finalTwist: { type: String, required: true },
   },
   { _id: false }
 );
@@ -326,11 +372,17 @@ const reelSchema = new Schema<IReel>(
       default: "image_kenburns",
     },
     style: { type: String, default: "cinematic" },
+    artStyleId: String,
+    motionMode: {
+      type: String,
+      enum: ["ken_burns", "parallax", "ai_hybrid", "ai_full"],
+    },
     tier: { type: String, enum: ["cheap", "value", "premium"], default: "cheap" },
     storySource: { type: String, enum: ["llm", "hybrid", "verbatim"] },
     genre: String,
     title: String,
     hook: String,
+    storyBible: storyBibleSchema,
     scenes: { type: [sceneSchema], default: [] },
     redditStory: redditStorySchema,
     seriesId: { type: String, index: true },

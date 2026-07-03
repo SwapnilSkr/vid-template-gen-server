@@ -22,6 +22,17 @@ export const CreateReelBody = t.Object({
   horrorAudioKey: t.Optional(t.String()),
   /** explicit image model pick from the compatible image model catalog */
   imageModel: t.Optional(t.String()),
+  /** reference-art style id (config/art-styles.ts) for horror/image niches */
+  artStyleId: t.Optional(t.String()),
+  /** per-reel motion policy */
+  motionMode: t.Optional(
+    t.Union([
+      t.Literal("ken_burns"),
+      t.Literal("parallax"),
+      t.Literal("ai_hybrid"),
+      t.Literal("ai_full"),
+    ])
+  ),
   /** explicit TTS pick from the voice catalog — overrides the tier/niche default */
   ttsModel: t.Optional(t.String()),
   ttsVoice: t.Optional(t.String()),
