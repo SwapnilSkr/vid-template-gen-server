@@ -15,6 +15,7 @@ import { appendBouncingCaptionCues, renderGameplayReel, pickGameplay } from "./r
 import {
   generateStory,
   generateStorySeries,
+  markStoryReel,
   takeNextStory,
   type StoryDraft,
   type StoryPartDraft,
@@ -26,6 +27,8 @@ import { appendBrandedOutro } from "./reel-outro.service";
 import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
 import { buildReelCostBreakdown, type MeasuredCostInput } from "./reel-cost.service";
+import { markHorrorReferenceUsed } from "./horror-reference.service";
+import { resolveStoryMatchedTts } from "./reel-voice-match.service";
 import {
   uploadImage,
   uploadAudio,
@@ -46,6 +49,7 @@ interface CreateReelOptions {
   gameplayKey?: string;
   horrorAudioKey?: string;
   outroChannelId?: string;
+  thumbnailMode?: IReel["thumbnailMode"];
   imageModel?: string;
   artStyleId?: string;
   motionMode?: ReelMotionMode;
@@ -106,17 +110,18 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     throw new Error("Invalid horror audio key");
   }
 
-  if (recipe.strategy === "gameplay_overlay" && parts !== "off") {
+  if (recipe.strategy === "gameplay_overlay" && (parts !== "off" || options.source === "verbatim")) {
     return createGameplayReelSeries({
       niche,
       topic,
       tier,
-      parts,
+      parts: options.source === "verbatim" && parts === "off" ? "auto" : parts,
       source: options.source,
       genre: options.genre,
       gameplayKey: options.gameplayKey,
       horrorAudioKey: options.horrorAudioKey,
       outroChannelId: options.outroChannelId,
+      thumbnailMode: options.thumbnailMode,
       imageModel: options.imageModel,
       ttsModel: options.ttsModel,
       ttsVoice: options.ttsVoice,
@@ -152,6 +157,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     outroChannelId: options.outroChannelId,
+    thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
@@ -183,6 +189,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     outroChannelId: options.outroChannelId,
+    thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
     status: "pending",
@@ -224,6 +231,7 @@ async function createGameplayReelSeries(
       gameplayKey: options.gameplayKey,
       horrorAudioKey: options.horrorAudioKey,
       outroChannelId: options.outroChannelId,
+      thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
       voiceOverride: toVoiceOverride(options),
       status: "pending",
@@ -354,6 +362,7 @@ export async function processReel(reelId: string): Promise<void> {
     // 1. Plan (LLM script + scene graph)
     await updateStatus(reelId, "planning", 5);
     const canReusePlan = reel.scenes.length > 0 && Boolean(reel.title && reel.hook);
+    reel.narrationVoice = tts;
     if (canReusePlan) {
       console.log(`♻️  Reusing existing plan/assets for reel ${reelId}`);
     } else {
@@ -369,6 +378,7 @@ export async function processReel(reelId: string): Promise<void> {
       reel.hook = plan.hook;
       reel.style = style.promptSuffix;
       if (plan.storyBible) reel.storyBible = plan.storyBible;
+      if (plan.horrorReference) reel.horrorReference = plan.horrorReference;
       reel.scenes = plan.scenes.map((s, i) => ({
         index: i,
         narration: s.narration,
@@ -629,6 +639,7 @@ export async function processReel(reelId: string): Promise<void> {
     reel.status = "completed";
     reel.progress = 100;
     await reel.save();
+    await markHorrorReferenceUsed(reel.horrorReference?.referenceId?.toString(), reelId);
     if (config.autoPublishYoutube) await enqueuePublish(reelId, "youtube");
 
     await cleanupFiles(localFiles);
@@ -644,9 +655,7 @@ export async function processReel(reelId: string): Promise<void> {
 async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void> {
   const reelId = reel._id.toString();
   const localFiles: string[] = [];
-  // precedence: tier default < niche voice override < explicit pick at creation
   const models = resolveModels(reel.tier as Tier);
-  const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
 
   try {
     await ensureDir(config.processingPath);
@@ -668,8 +677,29 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     // Cache is only for this render — S3 stays the source of truth (pickGameplay
     // re-downloads on demand), so don't let clips accumulate on local disk.
     localFiles.push(gameplayPath);
+    const storyMeta = story as StoryDraft & { source?: StorySource; storyId?: string };
     reel.title = story.title;
     reel.hook = story.title;
+    if (!reel.redditStory) {
+      reel.redditStory = toSingleRedditStoryPayload({
+        title: story.title,
+        body: story.body,
+        source: story.source ?? storySource,
+        genre: storyMeta.genre ?? reel.genre,
+        subreddit: storyMeta.subreddit,
+        author: storyMeta.author,
+        upvotes: storyMeta.upvotes,
+        comments: storyMeta.comments,
+        ageHours: storyMeta.ageHours,
+        seedTitle: storyMeta.seedTitle,
+        seedUrl: storyMeta.seedUrl,
+      });
+    }
+    const tts = resolveStoryMatchedTts(models.tts, recipe.voice ?? {}, reel.voiceOverride, {
+      title: story.title,
+      body: story.body,
+    });
+    reel.narrationVoice = tts;
     reel.scenes = [
       {
         index: 0,
@@ -682,6 +712,7 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
       },
     ];
     await reel.save();
+    await markStoryReel(storyMeta.storyId, reelId);
 
     // 2. Narrate + render (TTS happens inside the gameplay renderer)
     await updateStatus(reelId, "rendering", 45);
