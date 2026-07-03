@@ -96,6 +96,8 @@ export interface IYouTubePublish {
   videoId?: string;
   url?: string;
   error?: string;
+  thumbnailStatus?: "pending" | "uploaded" | "missing" | "failed";
+  thumbnailError?: string;
   publishedAt?: Date;
 }
 
@@ -299,6 +301,11 @@ const youtubePublishSchema = new Schema<IYouTubePublish>(
     videoId: String,
     url: String,
     error: String,
+    thumbnailStatus: {
+      type: String,
+      enum: ["pending", "uploaded", "missing", "failed"],
+    },
+    thumbnailError: String,
     publishedAt: Date,
   },
   { _id: false }

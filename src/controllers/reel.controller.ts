@@ -260,6 +260,7 @@ export async function publishReelController({ params, set }: GetReelContext) {
     videoId: reel.youtube?.videoId,
     url: reel.youtube?.url,
     publishedAt: reel.youtube?.publishedAt,
+    thumbnailStatus: reel.review?.thumbnailUrl ? "pending" : "missing",
   };
   await reel.save();
   await enqueuePublish(params.id, "youtube");
