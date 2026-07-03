@@ -37,3 +37,5 @@ export {
   type TrendScanWindow,
 } from "./trend-reference.model";
 export { TrendInsight, type ITrendInsight } from "./trend-insight.model";
+export { YouTubeChannel, type IYouTubeChannel } from "./youtube-channel.model";
+export { OAuthState, type IOAuthState } from "./oauth-state.model";
