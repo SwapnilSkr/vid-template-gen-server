@@ -11,7 +11,7 @@ import { getRecipe, pickStyle, type NicheRecipe } from "../config/niche-styles";
 import { pickArtStyle } from "../config/art-styles";
 import { resolveArtStyleRefKeys } from "./art-style.service";
 import { renderMotionReel, type MotionScene } from "./reel-motion.service";
-import { renderGameplayReel, pickGameplay } from "./reel-gameplay.service";
+import { appendBouncingCaptionCues, renderGameplayReel, pickGameplay } from "./reel-gameplay.service";
 import {
   generateStory,
   generateStorySeries,
@@ -590,6 +590,9 @@ export async function processReel(reelId: string): Promise<void> {
       localFiles.push(outroResult.videoPath);
       result.videoPath = outroResult.videoPath;
       result.totalDuration += outroResult.durationAdded;
+      if (outroResult.subtitle) {
+        await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
+      }
     }
     localFiles.push(result.videoPath, result.assPath);
 

@@ -70,7 +70,14 @@ export async function appendBrandedOutro(
   tts: OutroTts,
   onUsage?: MediaUsageCallback,
   options: { backgroundVideo?: string } = {}
-): Promise<{ videoPath: string; durationAdded: number } | undefined> {
+): Promise<
+  | {
+      videoPath: string;
+      durationAdded: number;
+      subtitle?: { text: string; startTime: number; speech: number };
+    }
+  | undefined
+> {
   const brand = await resolveOutroBrand(reel);
   if (!brand) return undefined;
 
@@ -100,9 +107,18 @@ export async function appendBrandedOutro(
     await renderOutroClip(cardPath, audioPath, outroClip, brand.kind, options.backgroundVideo);
 
     const output = join(config.processingPath, `${reel._id}_with_outro.mp4`);
+    const mainDuration = await videoDuration(inputVideo);
     await appendWithoutOverlap(inputVideo, outroClip, output);
     const durationAdded = await videoDuration(outroClip);
-    return { videoPath: output, durationAdded };
+    return {
+      videoPath: output,
+      durationAdded,
+      subtitle: {
+        text: line,
+        startTime: mainDuration,
+        speech: durationAdded,
+      },
+    };
   } catch (error) {
     console.warn(
       `Skipping branded outro for reel ${reel._id}: ${error instanceof Error ? error.message : String(error)}`
