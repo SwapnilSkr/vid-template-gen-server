@@ -22,6 +22,7 @@ import {
 import { generateImage, generateNarration } from "./openrouter-media.service";
 import { renderImageKenBurns, type RenderScene } from "./reel-render.service";
 import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
+import { appendBrandedOutro } from "./reel-outro.service";
 import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
 import { buildReelCostBreakdown, type MeasuredCostInput } from "./reel-cost.service";
@@ -572,6 +573,19 @@ export async function processReel(reelId: string): Promise<void> {
             horrorAudioKey: reel.horrorAudioKey,
           }
         );
+    const outroResult = await appendBrandedOutro(result.videoPath, reel, tts, (usage) => {
+      measuredCosts.push({
+        label: "Outro narration",
+        model: `${tts.model}/${tts.voice}`,
+        costUsd: usage.costUsd,
+        source: usage.costUsd !== undefined ? "actual" : "estimated",
+      });
+    });
+    if (outroResult) {
+      localFiles.push(outroResult.videoPath);
+      result.videoPath = outroResult.videoPath;
+      result.totalDuration += outroResult.durationAdded;
+    }
     localFiles.push(result.videoPath, result.assPath);
 
     // record resolved timings
@@ -663,7 +677,21 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
 
     // 2. Narrate + render (TTS happens inside the gameplay renderer)
     await updateStatus(reelId, "rendering", 45);
+    const gameplayMeasuredCosts: MeasuredCostInput[] = [];
     const result = await renderGameplayReel(reelId, story, gameplayPath, tts);
+    const outroResult = await appendBrandedOutro(result.videoPath, reel, tts, (usage) => {
+      gameplayMeasuredCosts.push({
+        label: "Outro narration",
+        model: `${tts.model}/${tts.voice}`,
+        costUsd: usage.costUsd,
+        source: usage.costUsd !== undefined ? "actual" : "estimated",
+      });
+    });
+    if (outroResult) {
+      localFiles.push(outroResult.videoPath);
+      result.videoPath = outroResult.videoPath;
+      result.totalDuration += outroResult.durationAdded;
+    }
     localFiles.push(result.videoPath, result.assPath);
     reel.scenes[0].duration = result.totalDuration;
 
@@ -673,7 +701,6 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
-    const gameplayMeasuredCosts: MeasuredCostInput[] = [];
     reel.review = await buildReelReviewPackage(reel, (usage) => {
       gameplayMeasuredCosts.push({
         label: "Thumbnail image",
