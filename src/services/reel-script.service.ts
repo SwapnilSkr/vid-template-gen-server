@@ -4,6 +4,7 @@ import { config } from "../config";
 import { resolveModels, type Tier } from "../config/models";
 import { getRecipe, type NicheRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
+import type { IStoryBible } from "../models/reel.model";
 import { getTrendInsight } from "./trend-insight.service";
 
 const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
@@ -19,6 +20,38 @@ async function buildTrendBlock(niche: string, genre?: string): Promise<string> {
   return `\nCURRENT WINNING PATTERNS (from trending videos in this genre this week):\n${insight.digest}\n${hookBlock}`;
 }
 
+// Per-token prices (USD/token) for the planners we actually use, so the cost
+// ledger reflects the REAL script model + every pass (the two-pass horror
+// planner makes two calls). Keeps expensive models from hiding in a flat
+// estimate. Update when a model's price changes; unknown models use DEFAULT.
+const LLM_PRICE: Record<string, { in: number; out: number }> = {
+  "deepseek/deepseek-v4-flash": { in: 0.1e-6, out: 0.2e-6 },
+  "google/gemini-2.5-flash": { in: 0.3e-6, out: 2.5e-6 },
+  "anthropic/claude-sonnet-5": { in: 3e-6, out: 15e-6 },
+};
+const LLM_PRICE_DEFAULT = { in: 0.5e-6, out: 1.5e-6 };
+
+export interface LlmUsageLine {
+  label: string;
+  model: string;
+  costUsd: number;
+}
+
+export type LlmUsageCallback = (usage: LlmUsageLine) => void;
+
+function reportLlmUsage(
+  onUsage: LlmUsageCallback | undefined,
+  label: string,
+  model: string,
+  usage: { inputTokens?: number; outputTokens?: number } | undefined
+): void {
+  if (!onUsage) return;
+  const price = LLM_PRICE[model] ?? LLM_PRICE_DEFAULT;
+  const inTok = usage?.inputTokens ?? 0;
+  const outTok = usage?.outputTokens ?? 0;
+  onUsage({ label, model, costUsd: inTok * price.in + outTok * price.out });
+}
+
 export interface PlannedScene {
   narration: string;
   visualPrompt: string;
@@ -28,6 +61,8 @@ export interface PlannedReel {
   title: string;
   hook: string;
   scenes: PlannedScene[];
+  /** deep story materials — present for horror (two-pass planner) */
+  storyBible?: IStoryBible;
 }
 
 function planningModelFor(recipe: NicheRecipe, tier: Tier): string {
@@ -87,9 +122,12 @@ export async function planReel(
   niche: string,
   topic: string,
   tier: Tier = "value",
-  genre?: string
+  genre?: string,
+  onLlmUsage?: LlmUsageCallback
 ): Promise<PlannedReel> {
   const recipe = getRecipe(niche);
+  // Horror runs a two-pass planner (story bible → scene script) for depth.
+  if (isHorrorRecipe(recipe)) return planHorrorReel(niche, topic, tier, genre, onLlmUsage);
   const llm = planningModelFor(recipe, tier);
   const trendBlock = await buildTrendBlock(niche, genre);
   const horror = isHorrorRecipe(recipe);
@@ -140,11 +178,12 @@ OUTPUT JSON ONLY (no markdown):
 }`;
 
   try {
-    const { text } = await generateText({
+    const { text, usage } = await generateText({
       model: openrouter(llm),
       prompt,
       temperature: horror ? 0.85 : undefined,
     });
+    reportLlmUsage(onLlmUsage, "Script planning", llm, usage);
 
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON in model response");
@@ -161,6 +200,111 @@ OUTPUT JSON ONLY (no markdown):
     return planned;
   } catch (error: unknown) {
     throw new Error(`Reel planning failed: ${getErrorMessage(error)}`);
+  }
+}
+
+function extractJson<T>(text: string): T {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("No JSON in model response");
+  return JSON.parse(match[0]) as T;
+}
+
+/**
+ * Two-pass in-depth horror planner. Pass 1 develops a STORY BIBLE (premise,
+ * the ordinary anchor object, the single impossible rule, an escalation ladder,
+ * sound cues, art-direction motifs, and the recontextualizing final line).
+ * Pass 2 dramatizes that bible into the exact scene graph — so every reel has a
+ * real, coherent arc with a recurring object and a payoff, instead of a thin
+ * one-shot script. The recurring motifs also keep the reference-art style
+ * consistent across scenes.
+ */
+export async function planHorrorReel(
+  niche: string,
+  topic: string,
+  tier: Tier = "value",
+  genre?: string,
+  onLlmUsage?: LlmUsageCallback
+): Promise<PlannedReel> {
+  const recipe = getRecipe(niche);
+  const llm = planningModelFor(recipe, tier);
+  const trendBlock = await buildTrendBlock(niche, genre);
+  const seed = topic?.trim() && topic.trim().toLowerCase() !== "auto" ? topic.trim() : "";
+
+  // ---- Pass 1: Story Bible ----
+  const biblePrompt = `You are a literary horror author developing a short, believable first-person horror story for a 60-second vertical video. Genre flavor: ${genre ?? "unsettling everyday horror"}.
+${seed ? `SEED IDEA: ${seed}` : "Invent an original, specific premise."}${trendBlock}
+
+Develop the story's foundations. The horror must come from an ordinary object or place quietly breaking one impossible rule, escalating until the narrator is personally trapped — no monsters, no gore, no clichés.
+
+OUTPUT JSON ONLY (no markdown):
+{
+  "premise": "one-sentence logline",
+  "setting": "specific place + time",
+  "protagonist": "who is telling this, one line",
+  "anchorObject": "the single ordinary object/place that becomes impossible",
+  "impossibleRule": "the one supernatural law this story obeys",
+  "escalation": ["beat 1 (ordinary)", "beat 2 (first wrong detail)", "... 6-9 escalating beats ending in personal danger + a final consequence"],
+  "soundCues": ["one concrete diegetic sound per major beat"],
+  "artDirection": "recurring visual motifs, palette, lighting, and how the anchor object should always look — so every shot feels like one story",
+  "finalTwist": "the last spoken line that recontextualizes everything"
+}`;
+
+  let bible: IStoryBible;
+  try {
+    const { text, usage } = await generateText({ model: openrouter(llm), prompt: biblePrompt, temperature: 0.9 });
+    reportLlmUsage(onLlmUsage, "Story bible", llm, usage);
+    bible = extractJson<IStoryBible>(text);
+    if (!bible.anchorObject || !bible.impossibleRule || !bible.escalation?.length) {
+      throw new Error("Incomplete story bible");
+    }
+  } catch (error: unknown) {
+    throw new Error(`Horror story-bible pass failed: ${getErrorMessage(error)}`);
+  }
+  console.log(`📖 Story bible: "${bible.premise}" — anchor: ${bible.anchorObject}`);
+
+  // ---- Pass 2: Scene script from the bible ----
+  const scriptPrompt = `You are dramatizing a developed horror story into a ${recipe.sceneCount}-scene vertical reel. Follow the STORY BIBLE exactly — same anchor object, same rule, same escalation order, ending on the final twist.
+
+STORY BIBLE:
+- Premise: ${bible.premise}
+- Setting: ${bible.setting}
+- Narrator: ${bible.protagonist}
+- Anchor object: ${bible.anchorObject}
+- Impossible rule: ${bible.impossibleRule}
+- Escalation: ${bible.escalation.map((b, i) => `${i + 1}. ${b}`).join("  ")}
+- Art direction (apply to EVERY visualPrompt): ${bible.artDirection}
+- Final line: ${bible.finalTwist}
+
+HORROR QUALITY BAR:
+- Believable first-person witness account recorded after the fact, not a campfire story.
+- Target a finished 55-75 second story. Each scene narration is 16-32 words, ONE clear new beat, in the escalation order above.
+- Concrete sensory detail: sounds, distances, timestamps, object positions, temperature, reflections.
+- Fear from implication and pattern-breaking, never gore, monsters, jump-scare wording, or lore.
+- The FINAL scene must land the final twist and quietly prove the danger was already in the room.
+- Avoid: creepy, terrifying, scary, demon, monster, haunted, suddenly.
+- Each visualPrompt describes ONLY imagery (subject, setting, mood, lighting) and MUST re-use the art-direction motifs and show the anchor object consistently. No style words, no text-in-image.
+
+OUTPUT JSON ONLY (no markdown):
+{
+  "title": "catchy title",
+  "hook": "on-screen hook text (<= 8 words)",
+  "scenes": [ { "narration": "spoken line", "visualPrompt": "image description" } ]
+}
+Exactly ${recipe.sceneCount} scenes. Scene 1's narration is the HOOK — grab attention in the first 3 seconds.`;
+
+  try {
+    const { text, usage } = await generateText({ model: openrouter(llm), prompt: scriptPrompt, temperature: 0.85 });
+    reportLlmUsage(onLlmUsage, "Scene script", llm, usage);
+    const parsed = extractJson<PlannedReel>(text);
+    if (!parsed.scenes?.length) throw new Error("No scenes returned");
+    const planned = tightenHorrorPlan(parsed);
+    planned.storyBible = bible;
+    const warnings = horrorQualityWarnings(planned);
+    if (warnings.length) console.warn(`⚠️ Horror script quality warning: ${warnings.join(", ")}`);
+    console.log(`📝 Planned "${planned.title}" — ${planned.scenes.length} scenes (${recipe.niche}) via ${llm} [2-pass]`);
+    return planned;
+  } catch (error: unknown) {
+    throw new Error(`Horror scene-script pass failed: ${getErrorMessage(error)}`);
   }
 }
 
