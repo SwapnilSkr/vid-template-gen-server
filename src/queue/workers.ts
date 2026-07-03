@@ -62,7 +62,7 @@ export function startWorkers(): void {
     "reel-publishing",
     async (job: Job<PublishJobData, void, "publish">) => {
       if (job.data.platform === "youtube") {
-        await publishReelToYouTube(job.data.reelId);
+        await publishReelToYouTube(job.data.reelId, job.data.channelId);
       }
     },
     { connection: redisConnection, concurrency: config.queueConcurrency }

@@ -6,6 +6,7 @@ import {
   RevoiceReelBody,
   VariantParams,
   ThumbnailFrameBody,
+  PublishReelBody,
 } from "../types/guards";
 import {
   createReelController,
@@ -20,6 +21,7 @@ import {
   revoiceReelController,
   promoteVoiceVariantController,
   useReelFrameAsThumbnailController,
+  listYouTubeChannelsController,
 } from "../controllers";
 
 // ============================================
@@ -34,6 +36,9 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
 
   // List all reels
   .get("/", listReelsController)
+
+  // List configured YouTube publish targets. Refresh tokens are never returned.
+  .get("/youtube/channels", listYouTubeChannelsController)
 
   // Get reel status/progress
   .get("/:id/status", getReelStatusController, {
@@ -85,4 +90,5 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   // Publish (or retry publishing) a completed reel to YouTube
   .post("/:id/publish", publishReelController, {
     params: IdParams,
+    body: PublishReelBody,
   });

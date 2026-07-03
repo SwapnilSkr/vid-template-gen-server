@@ -37,6 +37,7 @@ export interface RegenerateCompositionJobData {
 export interface PublishJobData {
   reelId: string;
   platform: "youtube";
+  channelId?: string;
 }
 
 export interface RevoiceJobData {
@@ -84,18 +85,22 @@ export async function removeReelJob(reelId: string): Promise<void> {
 
 export async function enqueuePublish(
   reelId: string,
-  platform: PublishJobData["platform"] = "youtube"
+  platform: PublishJobData["platform"] = "youtube",
+  channelId?: string
 ): Promise<void> {
   const activeJobs = await publishQueue.getJobs(["waiting", "delayed", "active"], 0, 100);
   const duplicate = activeJobs.some(
-    (job) => job.data.reelId === reelId && job.data.platform === platform
+    (job) =>
+      job.data.reelId === reelId &&
+      job.data.platform === platform &&
+      job.data.channelId === channelId
   );
   if (duplicate) return;
 
   await publishQueue.add(
     "publish",
-    { reelId, platform },
-    { jobId: `${reelId}-publish-${platform}-${Date.now()}` }
+    { reelId, platform, channelId },
+    { jobId: `${reelId}-publish-${platform}-${channelId ?? "default"}-${Date.now()}` }
   );
 }
 

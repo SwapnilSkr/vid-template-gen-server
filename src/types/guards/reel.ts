@@ -73,6 +73,12 @@ export const UpdateReelReviewBody = t.Object({
 
 export type TUpdateReelReviewBody = typeof UpdateReelReviewBody.static;
 
+export const PublishReelBody = t.Object({
+  channelId: t.Optional(t.String()),
+});
+
+export type TPublishReelBody = typeof PublishReelBody.static;
+
 export const ThumbnailFrameBody = t.Object({
   atSeconds: t.Number({ minimum: 0 }),
 });
@@ -92,3 +98,23 @@ export const ReelDefaultsQuery = t.Object({
 });
 
 export type TReelDefaultsQuery = typeof ReelDefaultsQuery.static;
+
+export const ConnectYouTubeBody = t.Object({
+  label: t.String({ minLength: 1 }),
+  channelKey: t.Optional(t.String()),
+  privacyStatus: t.Optional(
+    t.Union([t.Literal("private"), t.Literal("unlisted"), t.Literal("public")])
+  ),
+  categoryId: t.Optional(t.String()),
+  niches: t.Optional(t.Array(t.String())),
+});
+
+export type TConnectYouTubeBody = typeof ConnectYouTubeBody.static;
+
+export const YouTubeCallbackQuery = t.Object({
+  code: t.Optional(t.String()),
+  state: t.Optional(t.String()),
+  error: t.Optional(t.String()),
+});
+
+export type TYouTubeCallbackQuery = typeof YouTubeCallbackQuery.static;

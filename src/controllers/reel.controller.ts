@@ -17,6 +17,7 @@ import {
   getReelDefaults,
   listHorrorAudioLibrary,
   listArtStyles,
+  listAllYouTubePublishChannels,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { TTS_VOICE_CATALOG } from "../config/models";
@@ -25,6 +26,7 @@ import type {
   TCreateReelBody,
   TUpdateReelReviewBody,
   TRevoiceReelBody,
+  TPublishReelBody,
   TVariantParams,
   TThumbnailFrameBody,
   TVoiceSampleQuery,
@@ -56,6 +58,11 @@ interface ListReelsContext extends Context {
 interface RevoiceReelContext extends Context {
   params: TIdParams;
   body: TRevoiceReelBody;
+}
+
+interface PublishReelContext extends Context {
+  params: TIdParams;
+  body: TPublishReelBody;
 }
 
 interface VoiceSampleContext extends Context {
@@ -240,8 +247,12 @@ export async function regenerateReelThumbnailController({
   return { success: true, data: review };
 }
 
+export async function listYouTubeChannelsController() {
+  return { success: true, data: await listAllYouTubePublishChannels() };
+}
+
 /** Enqueue (or retry) a YouTube publish job for a completed reel. */
-export async function publishReelController({ params, set }: GetReelContext) {
+export async function publishReelController({ params, body, set }: PublishReelContext) {
   const reel = await getReel(params.id);
   if (!reel) {
     set.status = 404;
@@ -255,15 +266,26 @@ export async function publishReelController({ params, set }: GetReelContext) {
     };
   }
 
+  const channels = body?.channelId ? await listAllYouTubePublishChannels() : [];
+  const channel = body?.channelId
+    ? channels.find((candidate) => candidate.id === body.channelId)
+    : undefined;
+  if (body?.channelId && !channel) {
+    set.status = 400;
+    return { success: false, error: `Unknown YouTube channel: ${body.channelId}` };
+  }
+
   reel.youtube = {
     status: reel.youtube?.status === "uploading" ? "uploading" : "pending",
     videoId: reel.youtube?.videoId,
     url: reel.youtube?.url,
     publishedAt: reel.youtube?.publishedAt,
     thumbnailStatus: reel.review?.thumbnailUrl ? "pending" : "missing",
+    channelId: body?.channelId ?? reel.youtube?.channelId,
+    channelLabel: channel?.label ?? reel.youtube?.channelLabel,
   };
   await reel.save();
-  await enqueuePublish(params.id, "youtube");
+  await enqueuePublish(params.id, "youtube", body?.channelId);
   return {
     success: true,
     data: { youtube: reel.youtube },
