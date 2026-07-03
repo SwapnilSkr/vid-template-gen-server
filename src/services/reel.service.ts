@@ -679,14 +679,20 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     await updateStatus(reelId, "rendering", 45);
     const gameplayMeasuredCosts: MeasuredCostInput[] = [];
     const result = await renderGameplayReel(reelId, story, gameplayPath, tts);
-    const outroResult = await appendBrandedOutro(result.videoPath, reel, tts, (usage) => {
-      gameplayMeasuredCosts.push({
-        label: "Outro narration",
-        model: `${tts.model}/${tts.voice}`,
-        costUsd: usage.costUsd,
-        source: usage.costUsd !== undefined ? "actual" : "estimated",
-      });
-    });
+    const outroResult = await appendBrandedOutro(
+      result.videoPath,
+      reel,
+      tts,
+      (usage) => {
+        gameplayMeasuredCosts.push({
+          label: "Outro narration",
+          model: `${tts.model}/${tts.voice}`,
+          costUsd: usage.costUsd,
+          source: usage.costUsd !== undefined ? "actual" : "estimated",
+        });
+      },
+      { backgroundVideo: gameplayPath }
+    );
     if (outroResult) {
       localFiles.push(outroResult.videoPath);
       result.videoPath = outroResult.videoPath;

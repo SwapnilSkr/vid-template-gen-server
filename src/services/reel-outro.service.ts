@@ -10,10 +10,10 @@ import { generateNarration, type MediaUsageCallback } from "./openrouter-media.s
 const W = 1080;
 const H = 1920;
 const FPS = 30;
-const XFADE = 0.45;
 
 export interface OutroBrand {
   channelName: string;
+  channelHandle?: string;
   logoUrl?: string;
   kind: "reddit" | "horror";
 }
@@ -29,7 +29,8 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
     const channel = await findChannelForNiche(["reddit", "reddit_stories", "aita"]);
     return {
       kind: "reddit",
-      channelName: channel?.label ?? channel?.googleChannelTitle ?? "Reddit Stories",
+      channelName: channel?.googleChannelTitle ?? channel?.label ?? "Reddit Stories",
+      channelHandle: channel?.googleChannelHandle,
       logoUrl: channel?.logoUrl,
     };
   }
@@ -38,7 +39,8 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
     const channel = await findChannelForNiche(["horror", "horror_comic", reel.genre ?? ""]);
     return {
       kind: "horror",
-      channelName: channel?.label ?? channel?.googleChannelTitle ?? "Midnight Horror",
+      channelName: channel?.googleChannelTitle ?? channel?.label ?? "Midnight Horror",
+      channelHandle: channel?.googleChannelHandle,
       logoUrl: channel?.logoUrl,
     };
   }
@@ -58,7 +60,8 @@ export async function appendBrandedOutro(
   inputVideo: string,
   reel: IReel,
   tts: OutroTts,
-  onUsage?: MediaUsageCallback
+  onUsage?: MediaUsageCallback,
+  options: { backgroundVideo?: string } = {}
 ): Promise<{ videoPath: string; durationAdded: number } | undefined> {
   const brand = await resolveOutroBrand(reel);
   if (!brand) return undefined;
@@ -68,7 +71,7 @@ export async function appendBrandedOutro(
     await ensureDir(config.processingPath);
     const line =
       brand.kind === "reddit"
-        ? `Follow ${brand.channelName} for the update.`
+        ? `Follow ${brand.channelName} for more stories.`
         : `Subscribe to ${brand.channelName}. The next story is already waiting.`;
     const { audioPath } = await generateNarration(line, {
       ...tts,
@@ -78,15 +81,15 @@ export async function appendBrandedOutro(
     });
     tmp.push(audioPath);
 
-    const cardPath = await renderOutroCard(brand);
+    const cardPath = await renderOutroCard(brand, Boolean(options.backgroundVideo && brand.kind === "reddit"));
     tmp.push(cardPath);
     const outroClip = join(config.processingPath, `${reel._id}_outro_clip.mp4`);
     tmp.push(outroClip);
-    await renderOutroClip(cardPath, audioPath, outroClip, brand.kind);
+    await renderOutroClip(cardPath, audioPath, outroClip, brand.kind, options.backgroundVideo);
 
     const output = join(config.processingPath, `${reel._id}_with_outro.mp4`);
-    await appendWithCrossfade(inputVideo, outroClip, output);
-    const durationAdded = Math.max(await videoDuration(outroClip) - XFADE, 0);
+    await appendWithoutOverlap(inputVideo, outroClip, output);
+    const durationAdded = await videoDuration(outroClip);
     return { videoPath: output, durationAdded };
   } catch (error) {
     console.warn(
@@ -98,7 +101,7 @@ export async function appendBrandedOutro(
   }
 }
 
-async function renderOutroCard(brand: OutroBrand): Promise<string> {
+async function renderOutroCard(brand: OutroBrand, transparent = false): Promise<string> {
   const isHorror = brand.kind === "horror";
   const initials = brand.channelName
     .split(/\s+/)
@@ -106,13 +109,19 @@ async function renderOutroCard(brand: OutroBrand): Promise<string> {
     .join("")
     .slice(0, 2)
     .toUpperCase();
-  const title = isHorror ? "DON'T WATCH ALONE" : "FOLLOW FOR THE UPDATE";
+  const title = isHorror ? "DON'T WATCH ALONE" : "FOLLOW FOR MORE";
   const subtitle = isHorror
     ? "New nightmares every night"
     : "More stories after this one";
   const accent = isHorror ? "#b91c1c" : "#ff4500";
   const bgA = isHorror ? "#050505" : "#111827";
   const bgB = isHorror ? "#1f0505" : "#1f2937";
+  const logo = await logoDataUri(brand.logoUrl);
+  const handle = brand.channelHandle ? brand.channelHandle.replace(/^@?/, "@") : "";
+  const background = transparent
+    ? ""
+    : `<rect width="${W}" height="${H}" fill="url(#bg)"/>`;
+  const subscribeY = transparent ? 1325 : 1195;
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -123,18 +132,28 @@ async function renderOutroCard(brand: OutroBrand): Promise<string> {
       <feGaussianBlur stdDeviation="18" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
+    <filter id="panelShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="24" flood-color="#000000" flood-opacity="0.48"/>
+    </filter>
+    <clipPath id="logoClip"><circle cx="540" cy="${transparent ? 700 : 640}" r="100"/></clipPath>
   </defs>
-  <rect width="${W}" height="${H}" fill="url(#bg)"/>
-  <circle cx="540" cy="640" r="156" fill="${accent}" opacity="0.18" filter="url(#glow)"/>
-  <circle cx="540" cy="640" r="118" fill="${accent}"/>
-  <circle cx="540" cy="640" r="100" fill="${isHorror ? "#130606" : "#ffffff"}"/>
-  <text x="540" y="682" text-anchor="middle" font-family="Arial" font-size="78" font-weight="900" fill="${isHorror ? "#f8fafc" : accent}">${esc(initials)}</text>
-  <text x="540" y="890" text-anchor="middle" font-family="Arial" font-size="46" font-weight="900" fill="${accent}" letter-spacing="3">${esc(title)}</text>
-  <text x="540" y="990" text-anchor="middle" font-family="Arial" font-size="74" font-weight="900" fill="#f8fafc">${esc(brand.channelName)}</text>
-  <text x="540" y="1080" text-anchor="middle" font-family="Arial" font-size="36" font-weight="700" fill="#cbd5e1">${esc(subtitle)}</text>
-  <rect x="270" y="1195" width="540" height="78" rx="39" fill="${accent}"/>
-  <text x="540" y="1247" text-anchor="middle" font-family="Arial" font-size="34" font-weight="900" fill="#ffffff">SUBSCRIBE</text>
-  ${isHorror ? `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#64748b">it already knows you're here</text>` : `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#94a3b8">new stories daily</text>`}
+  ${background}
+  ${transparent ? `<rect x="118" y="430" width="844" height="1040" rx="34" fill="#050505" opacity="0.68" filter="url(#panelShadow)"/>` : ""}
+  <circle cx="540" cy="${transparent ? 700 : 640}" r="156" fill="${accent}" opacity="0.18" filter="url(#glow)"/>
+  <circle cx="540" cy="${transparent ? 700 : 640}" r="118" fill="${accent}"/>
+  <circle cx="540" cy="${transparent ? 700 : 640}" r="100" fill="${isHorror ? "#130606" : "#ffffff"}"/>
+  ${
+    logo
+      ? `<image href="${logo}" x="440" y="${transparent ? 600 : 540}" width="200" height="200" preserveAspectRatio="xMidYMid slice" clip-path="url(#logoClip)"/>`
+      : `<text x="540" y="${transparent ? 742 : 682}" text-anchor="middle" font-family="Arial" font-size="78" font-weight="900" fill="${isHorror ? "#f8fafc" : accent}">${esc(initials)}</text>`
+  }
+  <text x="540" y="${transparent ? 950 : 890}" text-anchor="middle" font-family="Arial" font-size="46" font-weight="900" fill="${accent}" letter-spacing="3">${esc(title)}</text>
+  <text x="540" y="${transparent ? 1050 : 990}" text-anchor="middle" font-family="Arial" font-size="68" font-weight="900" fill="#f8fafc">${esc(brand.channelName)}</text>
+  ${handle ? `<text x="540" y="${transparent ? 1110 : 1042}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="800" fill="#cbd5e1">${esc(handle)}</text>` : ""}
+  <text x="540" y="${transparent ? 1190 : 1100}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="700" fill="#cbd5e1">${esc(subtitle)}</text>
+  <rect x="270" y="${subscribeY}" width="540" height="78" rx="39" fill="${accent}"/>
+  <text x="540" y="${subscribeY + 52}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="900" fill="#ffffff">SUBSCRIBE</text>
+  ${isHorror ? `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#64748b">it already knows you're here</text>` : ""}
 </svg>`;
 
   const png = new Resvg(svg, {
@@ -150,27 +169,60 @@ function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-async function renderOutroClip(cardPath: string, audioPath: string, output: string, kind: OutroBrand["kind"]) {
+async function logoDataUri(url?: string): Promise<string | undefined> {
+  if (!url) return undefined;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return undefined;
+    const contentType = res.headers.get("content-type") || "image/png";
+    const data = Buffer.from(await res.arrayBuffer()).toString("base64");
+    return `data:${contentType};base64,${data}`;
+  } catch {
+    return undefined;
+  }
+}
+
+async function renderOutroClip(
+  cardPath: string,
+  audioPath: string,
+  output: string,
+  kind: OutroBrand["kind"],
+  backgroundVideo?: string
+) {
   const audioDur = await videoDuration(audioPath);
   const duration = Math.max(audioDur + 0.65, 3.2);
   const fadeOut = Math.max(duration - (kind === "horror" ? 0.45 : 0.35), 0).toFixed(2);
-  const visual =
-    kind === "horror"
-      ? `scale=1080:1920,noise=alls=7:allf=t,vignette=PI/3.1,fade=t=in:st=0:d=0.25,fade=t=out:st=${fadeOut}:d=0.45`
-      : `scale=1080:1920,fade=t=in:st=0:d=0.25,fade=t=out:st=${fadeOut}:d=0.35`;
+  const audioFilter = `apad,atrim=0:${duration.toFixed(2)},afade=t=out:st=${Math.max(duration - 0.4, 0).toFixed(2)}:d=0.4`;
+  const filters = backgroundVideo
+    ? [
+        `[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},fps=${FPS},trim=0:${duration.toFixed(2)},setpts=PTS-STARTPTS,fade=t=in:st=0:d=0.18,fade=t=out:st=${fadeOut}:d=0.35[bg]`,
+        `[1:v]scale=${W}:${H},format=rgba,fade=t=in:st=0:d=0.22:alpha=1,fade=t=out:st=${fadeOut}:d=0.35:alpha=1[ov]`,
+        `[bg][ov]overlay=0:0:format=auto[v]`,
+        `[2:a]${audioFilter}[a]`,
+      ]
+    : [
+        kind === "horror"
+          ? `[0:v]scale=${W}:${H},noise=alls=7:allf=t,vignette=PI/3.1,fade=t=in:st=0:d=0.25,fade=t=out:st=${fadeOut}:d=0.45[v]`
+          : `[0:v]scale=${W}:${H},fade=t=in:st=0:d=0.25,fade=t=out:st=${fadeOut}:d=0.35[v]`,
+        `[1:a]${audioFilter}[a]`,
+      ];
 
   return new Promise<string>((resolvePromise, reject) => {
-    ffmpeg()
-      .input(cardPath)
-      .inputOptions(["-loop", "1", "-framerate", String(FPS)])
+    const command = ffmpeg();
+    if (backgroundVideo) {
+      command.input(backgroundVideo).inputOptions(["-stream_loop", "-1"]);
+    }
+    command.input(cardPath).inputOptions(["-loop", "1", "-framerate", String(FPS)]);
+    command
       .input(audioPath)
+      .complexFilter(filters, ["v", "a"])
       .outputOptions([
         "-t",
         duration.toFixed(2),
-        "-vf",
-        visual,
-        "-af",
-        `apad,atrim=0:${duration.toFixed(2)},afade=t=out:st=${Math.max(duration - 0.4, 0).toFixed(2)}:d=0.4`,
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
         "-r",
         String(FPS),
         "-c:v",
@@ -195,17 +247,18 @@ async function renderOutroClip(cardPath: string, audioPath: string, output: stri
   });
 }
 
-async function appendWithCrossfade(input: string, outro: string, output: string): Promise<string> {
-  const mainDur = await videoDuration(input);
-  const offset = Math.max(mainDur - XFADE, 0);
+async function appendWithoutOverlap(input: string, outro: string, output: string): Promise<string> {
   return new Promise((resolvePromise, reject) => {
     ffmpeg()
       .input(input)
       .input(outro)
       .complexFilter(
         [
-          `[0:v][1:v]xfade=transition=fadeblack:duration=${XFADE}:offset=${offset.toFixed(3)}[v]`,
-          `[0:a][1:a]acrossfade=d=${XFADE}:c1=tri:c2=tri[a]`,
+          `[0:v]setsar=1,fps=${FPS},format=yuv420p[v0]`,
+          `[1:v]setsar=1,fps=${FPS},format=yuv420p[v1]`,
+          `[0:a]aformat=sample_rates=44100:channel_layouts=stereo[a0]`,
+          `[1:a]aformat=sample_rates=44100:channel_layouts=stereo[a1]`,
+          `[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]`,
         ],
         ["v", "a"]
       )
