@@ -72,8 +72,18 @@ export const config = {
   youtubeClientId: process.env.YOUTUBE_CLIENT_ID || "",
   youtubeClientSecret: process.env.YOUTUBE_CLIENT_SECRET || "",
   youtubeRefreshToken: process.env.YOUTUBE_REFRESH_TOKEN || "",
+  youtubeChannelsJson: process.env.YOUTUBE_CHANNELS_JSON || "",
+  youtubeTokenEncryptionKey: process.env.YOUTUBE_TOKEN_ENCRYPTION_KEY || "",
+  youtubeConnectClientId:
+    process.env.YOUTUBE_CONNECT_CLIENT_ID || process.env.YOUTUBE_CLIENT_ID || "",
+  youtubeConnectClientSecret:
+    process.env.YOUTUBE_CONNECT_CLIENT_SECRET || process.env.YOUTUBE_CLIENT_SECRET || "",
   youtubeRedirectUri:
     process.env.YOUTUBE_REDIRECT_URI || "http://localhost:53682/oauth2callback",
+  youtubeConnectRedirectUri:
+    process.env.YOUTUBE_CONNECT_REDIRECT_URI ||
+    process.env.YOUTUBE_REDIRECT_URI ||
+    "http://localhost:3000/api/youtube/connect/callback",
   // 22 = "People & Blogs" (safe default for faceless niche content)
   youtubeCategoryId: process.env.YOUTUBE_CATEGORY_ID || "22",
   youtubePrivacyStatus: (process.env.YOUTUBE_PRIVACY_STATUS || "private") as
