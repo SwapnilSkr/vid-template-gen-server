@@ -7,3 +7,4 @@ export { audioRoutes } from "./audio.routes";
 export { metaRoutes } from "./meta.routes";
 export { trendRoutes } from "./trend.routes";
 export { maintenanceRoutes } from "./maintenance.routes";
+export { youtubeRoutes } from "./youtube.routes";

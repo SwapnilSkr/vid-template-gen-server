@@ -13,6 +13,7 @@ import {
   metaRoutes,
   trendRoutes,
   maintenanceRoutes,
+  youtubeRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
 import { startStoryTopUpScheduler } from "./services/story-scheduler.service";
@@ -101,6 +102,7 @@ const app = new Elysia({
   .use(audioRoutes)
   .use(metaRoutes)
   .use(trendRoutes)
+  .use(youtubeRoutes)
   .use(maintenanceRoutes);
 
 // Start server

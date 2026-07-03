@@ -50,6 +50,7 @@ export {
   listTtsVoicesController,
   useReelFrameAsThumbnailController,
   getVoiceSampleController,
+  listYouTubeChannelsController,
 } from "./reel.controller";
 
 // Trend controllers
@@ -64,6 +65,14 @@ export { reconcileS3Controller, purgeFailedReelsController } from "./maintenance
 
 // Voice controllers
 export { listVoicesController } from "./voice.controller";
+
+// YouTube channel controllers
+export {
+  listYouTubePublishChannelsController,
+  startYouTubeConnectController,
+  completeYouTubeConnectController,
+  deleteYouTubeChannelController,
+} from "./youtube.controller";
 
 // Audio Test controllers
 export {
