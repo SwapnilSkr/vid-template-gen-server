@@ -40,7 +40,13 @@ export async function publishReelToYouTube(reelId: string): Promise<void> {
     );
   }
 
-  reel.youtube = { status: "uploading" };
+  const previousPublish = {
+    videoId: reel.youtube?.videoId,
+    url: reel.youtube?.url,
+    publishedAt: reel.youtube?.publishedAt,
+  };
+
+  reel.youtube = { ...previousPublish, status: "uploading" };
   await reel.save();
 
   try {
@@ -91,7 +97,7 @@ export async function publishReelToYouTube(reelId: string): Promise<void> {
     await reel.save();
     console.log(`📤 Published reel ${reelId} to YouTube: ${reel.youtube.url}`);
   } catch (error: unknown) {
-    reel.youtube = { status: "failed", error: getErrorMessage(error) };
+    reel.youtube = { ...previousPublish, status: "failed", error: getErrorMessage(error) };
     await reel.save();
     throw error;
   }

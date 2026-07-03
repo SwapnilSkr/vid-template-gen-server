@@ -255,8 +255,19 @@ export async function publishReelController({ params, set }: GetReelContext) {
     };
   }
 
+  reel.youtube = {
+    status: reel.youtube?.status === "uploading" ? "uploading" : "pending",
+    videoId: reel.youtube?.videoId,
+    url: reel.youtube?.url,
+    publishedAt: reel.youtube?.publishedAt,
+  };
+  await reel.save();
   await enqueuePublish(params.id, "youtube");
-  return { success: true, message: "YouTube publish job queued" };
+  return {
+    success: true,
+    data: { youtube: reel.youtube },
+    message: "YouTube publish job queued",
+  };
 }
 
 /** Download completed reel (returns the S3/CDN URL). */
