@@ -91,6 +91,18 @@ function supportsValue(capability: ImageModelCapability | undefined, key: string
   return Boolean(descriptor && (!descriptor.values || descriptor.values.includes(value)));
 }
 
+/** Whether a model advertises reference-image / image-editing conditioning
+ * (OpenRouter `input_references`). Reference-art styles only take effect on
+ * models that support this — otherwise we silently fall back to prompt-only. */
+export function supportsReferenceImages(capability: ImageModelCapability | undefined): boolean {
+  return Boolean(capability?.supported_parameters?.input_references);
+}
+
+/** Public capability probe for the model catalog (reference-art support badge). */
+export async function modelSupportsReferenceImages(model: string): Promise<boolean> {
+  return supportsReferenceImages(await getImageModelCapability(model));
+}
+
 function enumValues(capability: ImageModelCapability | undefined, key: string): string[] {
   return capability?.supported_parameters?.[key]?.values ?? [];
 }
@@ -99,10 +111,24 @@ function isImageValidationError(status: number, body: string): boolean {
   return status === 400 && /size|pixel|resolution|parameter|aspect|format|quality|background/i.test(body);
 }
 
-function imageRequestBodies(model: string, prompt: string, capability: ImageModelCapability | undefined): Record<string, unknown>[] {
+function imageRequestBodies(
+  model: string,
+  prompt: string,
+  capability: ImageModelCapability | undefined,
+  referenceImageUrls?: string[]
+): Record<string, unknown>[] {
   const base: Record<string, unknown> = { model, prompt, n: 1 };
   if (supportsValue(capability, "aspect_ratio", "9:16")) base.aspect_ratio = "9:16";
   if (supportsValue(capability, "output_format", "png")) base.output_format = "png";
+  // Reference-art conditioning — only when the model advertises it, else the
+  // request is rejected. Falls back to prompt-only for unsupported models.
+  // Each reference is a chat-style image part: { type: "image_url",
+  // image_url: { url } }. The API rejects bare strings and a flat image_url
+  // string (Zod: type must be "image_url"; image_url must be an object).
+  const refs = referenceImageUrls?.filter(Boolean) ?? [];
+  if (refs.length && supportsReferenceImages(capability)) {
+    base.input_references = refs.map((url) => ({ type: "image_url", image_url: { url } }));
+  }
 
   const bodies: Record<string, unknown>[] = [];
   const resolutions = enumValues(capability, "resolution");
@@ -130,7 +156,13 @@ function imageRequestBodies(model: string, prompt: string, capability: ImageMode
 export async function generateImage(
   prompt: string,
   styleSuffix = "",
-  opts: { model?: string; outputDir?: string; onUsage?: MediaUsageCallback } = {}
+  opts: {
+    model?: string;
+    outputDir?: string;
+    onUsage?: MediaUsageCallback;
+    /** reference-art images (S3/CDN URLs) → `input_references` on supported models */
+    referenceImageUrls?: string[];
+  } = {}
 ): Promise<string> {
   const targetDir = opts.outputDir || config.processingPath;
   const model = opts.model || resolveModels().image;
@@ -140,12 +172,12 @@ export async function generateImage(
     .filter(Boolean)
     .join(". ");
 
-  try {
-    const modelsToTry = model === IMAGE_FALLBACK_MODEL ? [model] : [model, IMAGE_FALLBACK_MODEL];
+  const modelsToTry = model === IMAGE_FALLBACK_MODEL ? [model] : [model, IMAGE_FALLBACK_MODEL];
+  const attempt = async (refs?: string[]): Promise<string> => {
     let lastError: unknown;
     for (const activeModel of modelsToTry) {
       try {
-        return await generateImageWithModel(activeModel, fullPrompt, prompt, targetDir, opts.onUsage);
+        return await generateImageWithModel(activeModel, fullPrompt, prompt, targetDir, opts.onUsage, refs);
       } catch (error: unknown) {
         lastError = error;
         if (activeModel !== modelsToTry[modelsToTry.length - 1]) {
@@ -154,7 +186,22 @@ export async function generateImage(
       }
     }
     throw lastError;
+  };
+
+  try {
+    return await attempt(opts.referenceImageUrls);
   } catch (error: unknown) {
+    // Reference-art conditioning is the most likely thing to be rejected (a bad
+    // ref URL, an unsupported model, a content filter). Never let it sink a
+    // whole paid reel — retry once prompt-only before giving up.
+    if (opts.referenceImageUrls?.length) {
+      console.warn(`Reference-art image gen failed (${getErrorMessage(error)}); retrying prompt-only`);
+      try {
+        return await attempt(undefined);
+      } catch (retryError: unknown) {
+        throw new Error(`Image generation failed: ${getErrorMessage(retryError)}`);
+      }
+    }
     throw new Error(`Image generation failed: ${getErrorMessage(error)}`);
   }
 }
@@ -164,10 +211,18 @@ async function generateImageWithModel(
   fullPrompt: string,
   logPrompt: string,
   targetDir: string,
-  onUsage?: MediaUsageCallback
+  onUsage?: MediaUsageCallback,
+  referenceImageUrls?: string[]
 ): Promise<string> {
     const capability = await getImageModelCapability(model);
-    const bodies = imageRequestBodies(model, fullPrompt, capability);
+    const bodies = imageRequestBodies(model, fullPrompt, capability, referenceImageUrls);
+    if (referenceImageUrls?.length) {
+      console.log(
+        supportsReferenceImages(capability)
+          ? `🎨 Using ${referenceImageUrls.length} reference-art image(s) for ${model}`
+          : `⚠️  ${model} does not support reference images — generating from prompt only`
+      );
+    }
     let res: Response | undefined;
     let lastErrorText = "";
     for (let attempt = 0; attempt < bodies.length; attempt++) {
@@ -222,6 +277,32 @@ async function generateImageWithModel(
     await writeFile(imagePath, buffer);
     console.log(`🖼️  Generated image [${model}]: "${logPrompt.substring(0, 40)}..."`);
     return imagePath;
+}
+
+/**
+ * Validate a SINGLE image model with a real minimal generation — no fallback,
+ * so a broken model surfaces as a failure instead of being silently masked.
+ * Used by scripts/validate-models.ts. Cleans up the probe image.
+ */
+export async function probeImageModel(
+  model: string
+): Promise<{ ok: boolean; costUsd?: number; error?: string }> {
+  let cost: number | undefined;
+  try {
+    const path = await generateImageWithModel(
+      model,
+      "a simple red circle centered on a plain white background",
+      "validation probe",
+      config.processingPath,
+      (u) => {
+        cost = u.costUsd;
+      }
+    );
+    await unlink(path).catch(() => {});
+    return { ok: true, costUsd: cost };
+  } catch (error: unknown) {
+    return { ok: false, costUsd: cost, error: getErrorMessage(error) };
+  }
 }
 
 /**
@@ -357,6 +438,33 @@ async function generateNarrationWithChoice(
   }
 }
 
+/**
+ * Validate a SINGLE TTS model/voice with a short real synthesis — no fallback.
+ * Used by scripts/validate-models.ts. Cleans up the probe audio.
+ */
+export async function probeTtsVoice(
+  model: string,
+  voice: string,
+  format: "mp3" | "pcm"
+): Promise<{ ok: boolean; costUsd?: number; error?: string }> {
+  let cost: number | undefined;
+  try {
+    const { audioPath } = await generateNarrationWithChoice(
+      "Testing one two three.",
+      config.processingPath,
+      { model, voice, format },
+      undefined,
+      (u) => {
+        cost = u.costUsd;
+      }
+    );
+    await unlink(audioPath).catch(() => {});
+    return { ok: true, costUsd: cost };
+  } catch (error: unknown) {
+    return { ok: false, costUsd: cost, error: getErrorMessage(error) };
+  }
+}
+
 /** Convert raw s16le/24kHz/mono PCM (Gemini TTS output) to mp3. */
 function pcmToMp3(input: string, output: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -451,6 +559,10 @@ export interface HeroVideoOptions {
   pollIntervalMs?: number; // default 30s — these jobs take minutes, not seconds
   maxPollAttempts?: number; // default 60 (30 min ceiling)
   onUsage?: MediaUsageCallback;
+  /** first-frame image (S3/CDN URL) → image-to-video via `frame_images`.
+   *  This is how a generated still is animated into real motion; the reference
+   *  art style baked into the still therefore carries into the moving clip. */
+  frameImageUrl?: string;
 }
 
 export interface HeroVideoResult {
@@ -475,12 +587,20 @@ interface VideoJobResponse {
  * always false — narration/sound design for the scene are handled separately
  * and mixed in during render, not baked in by the video model.
  */
+/** Snap a requested clip length to a duration every current video model accepts.
+ *  veo-3.1 only takes 4/6/8s (rejects 5/7); seedance accepts these too. The clip
+ *  is looped/trimmed to the narration afterward, so exact length doesn't matter. */
+function snapVideoDuration(sec: number): number {
+  const allowed = [4, 6, 8];
+  return allowed.reduce((best, v) => (Math.abs(v - sec) < Math.abs(best - sec) ? v : best), allowed[0]);
+}
+
 export async function generateHeroVideo(
   prompt: string,
   opts: HeroVideoOptions = {}
 ): Promise<HeroVideoResult> {
   const model = opts.model || resolveModels().video;
-  const durationSec = opts.durationSec ?? 5;
+  const durationSec = snapVideoDuration(opts.durationSec ?? 5);
   const targetDir = opts.outputDir || config.processingPath;
   await ensureDir(targetDir);
 
@@ -498,6 +618,16 @@ export async function generateHeroVideo(
       duration: durationSec,
       aspect_ratio: opts.aspectRatio ?? "9:16",
       generate_audio: false,
+      // Present → image-to-video (animate the still), absent → text-to-video.
+      // Each frame is { type, frame_type, image_url:{url} } (chat-style part +
+      // required frame_type); a bare URL or flat image_url string is rejected.
+      ...(opts.frameImageUrl
+        ? {
+            frame_images: [
+              { type: "image_url", frame_type: "first_frame", image_url: { url: opts.frameImageUrl } },
+            ],
+          }
+        : {}),
     }),
   });
   if (!submitRes.ok) {
@@ -547,6 +677,15 @@ export async function generateHeroVideo(
 
   const videoPath = join(targetDir, generateFilename("hero", "mp4"));
   await writeFile(videoPath, buffer);
-  console.log(`🎬 Hero video [${model}]: "${prompt.substring(0, 40)}..." (${durationSec}s)`);
+  console.log(
+    `🎬 ${opts.frameImageUrl ? "Motion clip (img2vid)" : "Hero video"} [${model}]: "${prompt.substring(0, 40)}..." (${durationSec}s)`
+  );
   return { videoPath, durationSec };
 }
+
+/**
+ * Animate a still into a real moving clip (image-to-video). Same OpenRouter
+ * `/videos` job as `generateHeroVideo`, but always seeded with a first-frame
+ * image. Used by the motion engine to bring reference-art stills to life.
+ */
+export const generateMotionClip = generateHeroVideo;
