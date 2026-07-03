@@ -282,7 +282,7 @@ export function renderSceneClip(
  * into one another. A subtle fade-from-black / fade-to-black is applied only at
  * the very start and end. Falls back to a straight re-encode for one scene.
  */
-function assembleCrossfade(
+export function assembleCrossfade(
   timings: SceneTiming[],
   total: number,
   out: string
@@ -458,7 +458,7 @@ async function downloadUrlToFile(url: string, output: string): Promise<string> {
   return output;
 }
 
-async function applyHorrorFinalMix(
+export async function applyHorrorFinalMix(
   input: string,
   output: string,
   tmp: string[],

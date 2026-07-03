@@ -1,13 +1,16 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Reel, type IReel, type StorySource } from "../models";
+import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion } from "../models";
 import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
 import { ensureDir, cleanupFiles } from "../utils";
 import { getErrorMessage } from "../types";
 import { planReel, planRedditStory } from "./reel-script.service";
 import { getRecipe, pickStyle, type NicheRecipe } from "../config/niche-styles";
+import { pickArtStyle } from "../config/art-styles";
+import { resolveArtStyleRefKeys } from "./art-style.service";
+import { renderMotionReel, type MotionScene } from "./reel-motion.service";
 import { renderGameplayReel, pickGameplay } from "./reel-gameplay.service";
 import {
   generateStory,
@@ -28,6 +31,7 @@ import {
   uploadVideo,
   uploadSubtitles,
   deleteFromS3,
+  cdnUrlFor,
 } from "./s3.service";
 import { enqueueReel, enqueuePublish, removeReelJob } from "../queue/queues";
 
@@ -41,9 +45,36 @@ interface CreateReelOptions {
   gameplayKey?: string;
   horrorAudioKey?: string;
   imageModel?: string;
+  artStyleId?: string;
+  motionMode?: ReelMotionMode;
   ttsModel?: string;
   ttsVoice?: string;
   ttsFormat?: "mp3" | "pcm";
+}
+
+/** Default per-scene motion type for a reel's motion mode. */
+function motionTypeFor(mode: ReelMotionMode, i: number, total: number): ISceneMotion["type"] {
+  switch (mode) {
+    case "ai_full":
+      return "ai_motion";
+    case "ai_hybrid":
+      // gate real image-to-video to the hook (first) + climax (last) only
+      return i === 0 || i === total - 1 ? "ai_motion" : "parallax";
+    case "parallax":
+      return "parallax";
+    case "ken_burns":
+    default:
+      return "ken_burns";
+  }
+}
+
+function isHorror(niche: string): boolean {
+  return niche.startsWith("horror");
+}
+
+/** Resolve the motion mode for a reel: explicit → else parallax for horror, Ken Burns otherwise. */
+function resolveMotionMode(reel: IReel): ReelMotionMode {
+  return reel.motionMode ?? (isHorror(reel.niche) ? "parallax" : "ken_burns");
 }
 
 /** Pick a random genre from this niche's scout targets (undefined if the niche has none, e.g. reddit picks its own way). */
@@ -100,6 +131,12 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
   // here: it has its own untouched auto-topic flow via generateStory.
   const genre = options.genre ?? (recipe.strategy !== "gameplay_overlay" ? pickRandomGenre(niche) : undefined);
 
+  // Reference-art style + motion policy (horror/image niches). A style is
+  // rotated from the niche's pool when the caller didn't pin one; motion
+  // defaults to the free parallax "living still" (AI motion is opt-in).
+  const artStyleId = options.artStyleId ?? (isHorror(niche) ? pickArtStyle(niche)?.id : undefined);
+  const motionMode = options.motionMode ?? (isHorror(niche) ? "parallax" : undefined);
+
   const reel = new Reel({
     niche,
     topic,
@@ -107,6 +144,8 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     storySource: options.source,
     genre,
     strategy: recipe.strategy,
+    artStyleId,
+    motionMode,
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     imageModelOverride: options.imageModel,
@@ -293,7 +332,14 @@ export async function processReel(reelId: string): Promise<void> {
   const imageModel = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image; // niche-appropriate stills
   // precedence: tier default < niche voice override < explicit pick at creation
   const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
-  const style = pickStyle(recipe); // rotate one style from the niche pool
+  // Reference-art style (if one is set) wins over the niche prompt-suffix pool,
+  // and supplies the reference images fed to the image model as style anchors.
+  const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
+  const referenceImageUrls = artRef?.keys.length ? artRef.keys.map(cdnUrlFor) : undefined;
+  const style = artRef
+    ? { id: artRef.style.id, promptSuffix: artRef.style.promptSuffix }
+    : pickStyle(recipe); // rotate one style from the niche pool
+  const motionMode = resolveMotionMode(reel);
   const measuredCosts: MeasuredCostInput[] = [];
 
   try {
@@ -305,15 +351,26 @@ export async function processReel(reelId: string): Promise<void> {
     if (canReusePlan) {
       console.log(`♻️  Reusing existing plan/assets for reel ${reelId}`);
     } else {
-      const plan = await planReel(reel.niche, reel.topic, reel.tier as Tier, reel.genre);
+      const plan = await planReel(reel.niche, reel.topic, reel.tier as Tier, reel.genre, (usage) => {
+        measuredCosts.push({
+          label: usage.label,
+          model: usage.model,
+          costUsd: usage.costUsd,
+          source: "actual",
+        });
+      });
       reel.title = plan.title;
       reel.hook = plan.hook;
       reel.style = style.promptSuffix;
+      if (plan.storyBible) reel.storyBible = plan.storyBible;
       reel.scenes = plan.scenes.map((s, i) => ({
         index: i,
         narration: s.narration,
         visualPrompt: s.visualPrompt,
-        motion: { type: "ken_burns", direction: i % 2 === 0 ? "in" : "out" },
+        motion: {
+          type: motionTypeFor(motionMode, i, plan.scenes.length),
+          direction: i % 2 === 0 ? "in" : "out",
+        },
         startTime: 0,
         duration: 0,
         // heroPolicy "one_climax" (horror/mythology/movie_recap today): the
@@ -325,7 +382,8 @@ export async function processReel(reelId: string): Promise<void> {
       await reel.save();
     }
     console.log(
-      `🎨 Style: ${canReusePlan ? "reused" : style.id} | image=${imageModel} | voice=${tts.model}/${tts.voice}` +
+      `🎨 Style: ${canReusePlan ? "reused" : style.id}${artRef ? ` (art-ref×${referenceImageUrls?.length ?? 0})` : ""} | ` +
+        `motion=${motionMode} | image=${imageModel} | voice=${tts.model}/${tts.voice}` +
         (isHybrid ? ` | hero=${models.video}` : "")
     );
 
@@ -358,6 +416,7 @@ export async function processReel(reelId: string): Promise<void> {
       }
       const imagePath = await generateImage(scene.visualPrompt, reel.style, {
         model: imageModel,
+        referenceImageUrls,
         onUsage: (usage) => {
           measuredCosts.push({
             label: `Image ${i + 1}`,
@@ -425,7 +484,40 @@ export async function processReel(reelId: string): Promise<void> {
 
     // 4. Render (align happens inside, from actual durations)
     await updateStatus(reelId, "rendering", 75);
-    const result = isHybrid
+    // Motion engine handles any reel whose scenes use parallax or real
+    // image-to-video; it reuses the same crossfade/caption/horror-mix assembly.
+    const useMotion = reel.scenes.some(
+      (s) => s.motion.type === "parallax" || s.motion.type === "ai_motion"
+    );
+    const result = useMotion
+      ? await renderMotionReel(
+          reelId,
+          reel.scenes.map(
+            (s, i): MotionScene => ({
+              imagePath: imagePaths[i]!,
+              assetUrl: s.assetUrl,
+              audioPath: audioPaths[i],
+              narration: s.narration,
+              visualPrompt: s.visualPrompt,
+              motion: s.motion,
+            })
+          ),
+          {
+            videoModel: models.video,
+            horrorEffects: isHorrorNiche(reel.niche),
+            comicEffects: reel.niche === "horror_comic",
+            horrorAudioKey: reel.horrorAudioKey,
+            onMotionUsage: (index, usage) => {
+              measuredCosts.push({
+                label: `Motion ${index + 1}`,
+                model: models.video,
+                costUsd: usage.costUsd,
+                source: usage.costUsd !== undefined ? "actual" : "estimated",
+              });
+            },
+          }
+        )
+      : isHybrid
       ? await renderHybridScene(
           reelId,
           reel.scenes.map(
