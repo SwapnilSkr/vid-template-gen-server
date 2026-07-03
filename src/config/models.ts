@@ -31,9 +31,18 @@ export interface ModelSet {
 export const REGISTRY: Record<Tier, ModelSet> = {
   cheap: {
     llm: "deepseek/deepseek-v4-flash", // ~$0.10/$0.20 per Mtok
-    image: "google/gemini-3.1-flash-lite-image", // cheapest current-gen image tier
+    // Flat $0.04/image (validated) → PREDICTABLE cost regardless of prompt/reference,
+    // supports reference-art, strong on stylized looks. The token-billed gemini/gpt
+    // image models get pricier + unpredictable once a reference image is attached
+    // (gemini-3.1-flash-image measured ~$0.068, gpt-image-2 ~$0.15 WITH a reference).
+    image: "bytedance-seed/seedream-4.5",
     tts: { model: "google/gemini-3.1-flash-tts-preview", voice: "Charon", format: "pcm" }, // natural; cost delta is negligible
-    video: "bytedance/seedance-2.0-fast", // ~$0.022/s
+    // seedance-2.0-fast (~$0.12/s) is the PROVEN image-to-video default (accepts our
+    // request shape + 5s clips end-to-end). veo-3.1-fast is cheaper (~$0.08/s) but
+    // only accepts 4/6/8s durations (handled by snapping) and isn't yet live-verified
+    // end-to-end — swap here once validated. Video jobs can't be cancelled once
+    // submitted, so we never auto-probe them.
+    video: "bytedance/seedance-2.0-fast",
   },
   value: {
     llm: "google/gemini-2.5-flash",

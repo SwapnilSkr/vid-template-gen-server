@@ -271,7 +271,7 @@ export const NICHE_RECIPES: Record<string, NicheRecipe> = {
     captionSkin: "karaoke_word",
     musicMood: "ambient_drone",
     heroPolicy: "never",
-    scriptModel: "google/gemini-2.5-flash",
+    scriptModel: "google/gemini-2.5-flash", // good horror prose, cheap; the two-pass planner adds the depth (not the model)
     voice: { model: "x-ai/grok-voice-tts-1.0", voice: "Rex", format: "mp3" },
     scriptGuide:
       "One-minute horror story that feels like a real whispered confession recorded after midnight. It must complete a full story arc: normal world, first impossible detail, investigation, failed rational explanation, escalation, personal danger, attempted escape, and final consequence. Use one ordinary object or place, one impossible detail, and a final line that recontextualizes the whole story. Keep the voice intimate, quiet, and disturbed: concrete sensory details, uneasy pauses, no monsters, no gore, no clichés, no 'suddenly', no explaining the evil. Every scene should make the situation more wrong, more personal, and harder to dismiss as imagination.",
@@ -288,7 +288,7 @@ export const NICHE_RECIPES: Record<string, NicheRecipe> = {
     captionSkin: "karaoke_word",
     musicMood: "ambient_drone",
     heroPolicy: "never",
-    scriptModel: "google/gemini-2.5-flash",
+    scriptModel: "google/gemini-2.5-flash", // good horror prose, cheap; the two-pass planner adds the depth (not the model)
     voice: { model: "x-ai/grok-voice-tts-1.0", voice: "Rex", format: "mp3" },
     scriptGuide:
       "One-minute horror story told as a 2D motion comic. It must complete a full story arc: normal world, first impossible detail, investigation, failed rational explanation, escalation, personal danger, attempted escape, and final consequence. Write visual beats as comic panels with bold silhouettes, close-ups, distorted shadows, panel-worthy reveals, and one ordinary object becoming impossible. Keep the narration intimate and disturbed: concrete sensory details, uneasy pauses, no monsters, no gore, no clichés, no 'suddenly', no explaining the evil. Every scene should become a stronger comic panel and make the situation more wrong, more personal, and harder to dismiss as imagination.",

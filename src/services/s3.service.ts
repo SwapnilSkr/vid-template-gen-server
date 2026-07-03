@@ -27,7 +27,8 @@ export type S3Folder =
   | "audio"
   | "subtitles"
   | "gameplay"
-  | "voice-samples";
+  | "voice-samples"
+  | "art-styles";
 
 /** Public delivery URL for a key — CloudFront if configured, else direct S3. */
 export function cdnUrlFor(key: string): string {
@@ -114,6 +115,35 @@ export async function uploadToS3(
   console.log(`☁️  Uploaded to S3: ${key}`);
 
   return url;
+}
+
+/** Read + parse a JSON object straight from S3 (bypasses CDN caching, so it's
+ *  always current — use for server-side reads of files that change, e.g. the
+ *  model-health report). Returns undefined if missing/unreadable. */
+export async function getJson<T>(key: string): Promise<T | undefined> {
+  try {
+    const res = await s3Client.send(new GetObjectCommand({ Bucket: config.s3Bucket, Key: key }));
+    const body = await res.Body?.transformToString();
+    return body ? (JSON.parse(body) as T) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Upload a JSON object to an exact S3 key (no folder prefix). Returns its CDN URL. */
+export async function putJson(key: string, data: unknown): Promise<string> {
+  const upload = new Upload({
+    client: s3Client,
+    params: {
+      Bucket: config.s3Bucket,
+      Key: key,
+      Body: Buffer.from(JSON.stringify(data, null, 2)),
+      ContentType: "application/json",
+    },
+  });
+  await upload.done();
+  console.log(`☁️  Uploaded to S3: ${key}`);
+  return cdnUrlFor(key);
 }
 
 /**
