@@ -91,7 +91,7 @@ export async function appendBrandedOutro(
     const { audioPath } = await generateNarration(line, {
       ...tts,
       outputDir: config.processingPath,
-      profile: brand.kind === "horror" ? "horror" : undefined,
+      profile: brand.kind === "horror" ? "horror" : "reddit",
       onUsage,
     });
     tmp.push(audioPath);

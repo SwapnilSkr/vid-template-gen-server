@@ -145,6 +145,7 @@ async function renderGameplayReelInner(
     const { audioPath } = await generateNarration(segTexts[i], {
       ...ttsOpts,
       outputDir: config.processingPath,
+      profile: "reddit",
     });
     tmp.push(audioPath);
 

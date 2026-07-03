@@ -318,7 +318,7 @@ export async function generateNarration(
     voice?: string;
     format?: "mp3" | "pcm";
     outputDir?: string;
-    profile?: "horror";
+    profile?: "horror" | "reddit";
     onUsage?: MediaUsageCallback;
   } = {}
 ): Promise<{ audioPath: string; duration: number }> {
@@ -353,7 +353,7 @@ async function generateNarrationWithChoice(
   text: string,
   targetDir: string,
   choice: TtsChoice,
-  profile?: "horror",
+  profile?: "horror" | "reddit",
   onUsage?: MediaUsageCallback
 ): Promise<{ audioPath: string; duration: number }> {
   const { model, voice, format } = choice; // some models (Gemini) only emit pcm
@@ -419,6 +419,9 @@ async function generateNarrationWithChoice(
     const audioPath = join(targetDir, generateFilename("narration", "mp3"));
     if (profile === "horror") {
       await applyHorrorVoiceTreatment(trimmedPath, audioPath);
+      await unlink(trimmedPath).catch(() => {});
+    } else if (profile === "reddit") {
+      await applyRedditVoiceTreatment(trimmedPath, audioPath);
       await unlink(trimmedPath).catch(() => {});
     } else {
       await trimSilence(trimmedPath, audioPath);
@@ -523,6 +526,36 @@ function applyHorrorVoiceTreatment(input: string, output: string): Promise<strin
       .output(output)
       .on("end", () => resolve(output))
       .on("error", (err) => reject(new Error(`Horror voice treatment failed: ${err.message}`)))
+      .run();
+  });
+}
+
+/**
+ * Reddit narration should feel like a lively short-form story read, not a raw
+ * audiobook export. Keep it subtle: speech-focused EQ, mild compression, a tiny
+ * room reflection, and platform loudness. Tempo is still handled by the gameplay
+ * renderer after this step so caption timing remains based on final paced audio.
+ */
+function applyRedditVoiceTreatment(input: string, output: string): Promise<string> {
+  const filters = [
+    "aresample=48000",
+    "highpass=f=85",
+    "lowpass=f=7600",
+    "equalizer=f=180:t=q:w=1.1:g=-1.5",
+    "equalizer=f=2900:t=q:w=1.0:g=2.2",
+    "equalizer=f=5200:t=q:w=1.2:g=1.0",
+    "acompressor=threshold=-20dB:ratio=1.8:attack=5:release=95:makeup=1.5",
+    "aecho=0.35:0.25:28:0.035",
+    "loudnorm=I=-16:LRA=7:TP=-1.3",
+  ].join(",");
+
+  return new Promise((resolve, reject) => {
+    ffmpeg(input)
+      .audioFilters(filters)
+      .outputOptions(["-c:a", "libmp3lame", "-q:a", "4"])
+      .output(output)
+      .on("end", () => resolve(output))
+      .on("error", (err) => reject(new Error(`Reddit voice treatment failed: ${err.message}`)))
       .run();
   });
 }
