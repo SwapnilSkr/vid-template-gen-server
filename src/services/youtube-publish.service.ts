@@ -333,7 +333,7 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
-  const channel = await resolveYouTubePublishChannel(channelId);
+  const channel = await resolveYouTubePublishChannel(channelId ?? reel.outroChannelId);
 
   const previousPublish = {
     videoId: reel.youtube?.videoId,
