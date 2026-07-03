@@ -5,6 +5,7 @@ export interface IYouTubeChannel extends Document {
   label: string;
   googleChannelId?: string;
   googleChannelTitle?: string;
+  logoUrl?: string;
   encryptedRefreshToken: string;
   privacyStatus: "private" | "unlisted" | "public";
   categoryId: string;
@@ -23,6 +24,7 @@ const youtubeChannelSchema = new Schema<IYouTubeChannel>(
     label: { type: String, required: true, trim: true },
     googleChannelId: { type: String, index: true },
     googleChannelTitle: String,
+    logoUrl: String,
     encryptedRefreshToken: { type: String, required: true },
     privacyStatus: {
       type: String,

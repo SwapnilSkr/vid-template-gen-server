@@ -23,6 +23,7 @@ export interface PublicYouTubePublishChannel {
   label: string;
   googleChannelId?: string;
   googleChannelTitle?: string;
+  logoUrl?: string;
   privacyStatus: "private" | "unlisted" | "public";
   categoryId: string;
   niches?: string[];
@@ -195,6 +196,7 @@ export async function listAllYouTubePublishChannels(): Promise<PublicYouTubePubl
       label: channel.label,
       googleChannelId: channel.googleChannelId,
       googleChannelTitle: channel.googleChannelTitle,
+      logoUrl: channel.logoUrl,
       privacyStatus: channel.privacyStatus,
       categoryId: channel.categoryId,
       niches: channel.niches,
@@ -282,6 +284,10 @@ export async function completeYouTubeChannelConnect(code: string, state: string)
   const youtube = google.youtube({ version: "v3", auth });
   const channelRes = await youtube.channels.list({ part: ["snippet"], mine: true });
   const googleChannel = channelRes.data.items?.[0];
+  const logoUrl =
+    googleChannel?.snippet?.thumbnails?.high?.url ??
+    googleChannel?.snippet?.thumbnails?.medium?.url ??
+    googleChannel?.snippet?.thumbnails?.default?.url;
   const channelKey = pending.payload.channelKey || slugifyChannelKey(pending.payload.label);
 
   const channel = await YouTubeChannel.findOneAndUpdate(
@@ -291,6 +297,7 @@ export async function completeYouTubeChannelConnect(code: string, state: string)
       label: pending.payload.label,
       googleChannelId: googleChannel?.id,
       googleChannelTitle: googleChannel?.snippet?.title,
+      logoUrl,
       encryptedRefreshToken: encryptToken(tokens.refresh_token),
       privacyStatus: pending.payload.privacyStatus,
       categoryId: pending.payload.categoryId,
@@ -303,6 +310,11 @@ export async function completeYouTubeChannelConnect(code: string, state: string)
   );
   await pending.deleteOne();
   return channel;
+}
+
+export async function cancelYouTubeChannelConnect(state?: string): Promise<void> {
+  if (!state) return;
+  await OAuthState.deleteOne({ state, provider: "youtube" });
 }
 
 export async function disableYouTubeChannel(channelId: string): Promise<void> {

@@ -1,5 +1,6 @@
 import type { Context } from "elysia";
 import {
+  cancelYouTubeChannelConnect,
   completeYouTubeChannelConnect,
   disableYouTubeChannel,
   listAllYouTubePublishChannels,
@@ -38,8 +39,9 @@ export async function completeYouTubeConnectController({
   set,
 }: YouTubeCallbackContext) {
   if (query.error) {
+    await cancelYouTubeChannelConnect(query.state);
     set.headers["content-type"] = "text/html; charset=utf-8";
-    return renderCallbackHtml(false, query.error);
+    return renderCallbackHtml(false, getOAuthErrorMessage(query.error, query.error_description));
   }
   if (!query.code || !query.state) {
     set.headers["content-type"] = "text/html; charset=utf-8";
@@ -64,11 +66,26 @@ export async function deleteYouTubeChannelController({
   return { success: true, data: { id: params.id } };
 }
 
+function getOAuthErrorMessage(error: string, description?: string) {
+  if (error === "access_denied") {
+    return (
+      "Google did not grant access. Choose the YouTube account again and approve both YouTube permissions. " +
+      "If Google says the app is in testing, use one of the accounts added as a test user."
+    );
+  }
+  return description || `Google OAuth failed: ${error}`;
+}
+
 function renderCallbackHtml(success: boolean, message: string) {
   const escaped = message
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+  const payload = JSON.stringify({
+    type: "youtube-channel-connected",
+    success,
+    message,
+  });
   return `<!doctype html>
 <html>
   <head>
@@ -87,7 +104,7 @@ function renderCallbackHtml(success: boolean, message: string) {
       <p>${escaped}</p>
       <script>
         if (window.opener) {
-          window.opener.postMessage({ type: "youtube-channel-connected", success: ${success} }, "*");
+          window.opener.postMessage(${payload}, "*");
         }
       </script>
     </main>
