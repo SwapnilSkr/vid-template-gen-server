@@ -79,8 +79,11 @@ export async function buildReelCostBreakdown(
   }
 ): Promise<ICostBreakdown> {
   const measured = (opts.measuredCosts ?? []).map(measuredLine).filter((item): item is ICostLine => Boolean(item));
+  // Prefer the metered LLM line(s) (real model + every pass) over the flat
+  // estimate — that estimate is only a fallback when metering didn't report.
+  const hasMeteredLlm = measured.some((item) => /^(Script planning|Story bible|Scene script)/.test(item.label));
   const lines: ICostLine[] = [
-    line("Script planning (estimated)", 1, "plan", LLM_PLANNING_ESTIMATE_USD, opts.llmModel),
+    ...(hasMeteredLlm ? [] : [line("Script planning (estimated)", 1, "plan", LLM_PLANNING_ESTIMATE_USD, opts.llmModel)]),
     ...measured,
   ];
 

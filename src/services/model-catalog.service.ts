@@ -1,5 +1,6 @@
 import { config } from "../config";
 import { getRecipe } from "../config/niche-styles";
+import { getJson } from "./s3.service";
 import { resolveModels, resolveTtsChoice, TTS_VOICE_CATALOG, type Tier, type TtsVoiceOption } from "../config/models";
 
 export interface PricedTtsVoiceOption extends TtsVoiceOption {
@@ -16,6 +17,29 @@ export interface ImageModelOption {
   priceLabel: string;
   priceNote: string;
   recommendedTier: "cheap" | "value" | "premium";
+  /** advertises OpenRouter `input_references` → can follow reference-art styles */
+  supportsReferenceArt: boolean;
+  /** last validation result (scripts/validate-models.ts) — undefined = untested */
+  healthy?: boolean;
+}
+
+// Health report written by scripts/validate-models.ts to S3. When present, the
+// image-model list is filtered to models that PASSED a real generation, so the
+// picker can never offer a model that would fail mid-reel.
+interface ModelHealth {
+  images?: Record<string, { ok: boolean; error?: string; costUsd?: number }>;
+  generatedAt?: string;
+}
+
+let modelHealthCache: { at: number; data: ModelHealth } | undefined;
+
+async function fetchModelHealth(): Promise<ModelHealth> {
+  if (modelHealthCache && Date.now() - modelHealthCache.at < 60_000) return modelHealthCache.data;
+  // Read straight from S3 (not the CDN) — CloudFront caches this file and
+  // ignores query cache-busters, so it would serve a stale report.
+  const data = (await getJson<ModelHealth>("model-health.json")) ?? {};
+  modelHealthCache = { at: Date.now(), data };
+  return data;
 }
 
 export interface ReelDefaultOption {
@@ -169,7 +193,10 @@ export function getReelDefaults(niche: string, tier: Tier = "cheap"): ReelDefaul
 }
 
 export async function listImageModels(): Promise<ImageModelOption[]> {
-  const models = await fetchOpenRouterModels().catch(() => []);
+  const [models, health] = await Promise.all([
+    fetchOpenRouterModels().catch(() => []),
+    fetchModelHealth(),
+  ]);
   const concrete = models.filter(isConcreteImageModel);
   const endpointEntries = await Promise.all(
     concrete.map(async (model) => [model.id, (await fetchImageEndpoints(model.id))[0]] as const)
@@ -183,13 +210,22 @@ export async function listImageModels(): Promise<ImageModelOption[]> {
     .sort((a, b) => cheapestOutputCost(endpoints.get(a.id)) - cheapestOutputCost(endpoints.get(b.id)))
     .map((model): ImageModelOption => {
       const endpoint = endpoints.get(model.id);
+      const supportsReferenceArt = Boolean(model.supported_parameters?.input_references);
+      const healthEntry = health.images?.[model.id];
       return {
         model: model.id,
         label: model.name ?? model.id,
         priceLabel: imagePriceLabel(endpoint),
         priceNote:
-          `${endpoint?.provider_name ? `${endpoint.provider_name}. ` : ""}Raster image model from OpenRouter's dedicated Images API. Exact request cost is captured from usage after generation.`,
+          `${endpoint?.provider_name ? `${endpoint.provider_name}. ` : ""}Raster image model from OpenRouter's dedicated Images API.` +
+          `${supportsReferenceArt ? " Supports reference-art styles." : " No reference-art support (prompt-only)."}` +
+          " Exact request cost is captured from usage after generation.",
         recommendedTier: imageTier(model, endpoint),
+        supportsReferenceArt,
+        healthy: healthEntry ? healthEntry.ok : undefined,
       };
-    });
+    })
+    // When a health report exists, only surface models that PASSED validation
+    // (drop the ones that failed) so the picker can't offer a broken model.
+    .filter((option) => (health.images ? health.images[option.model]?.ok !== false : true));
 }
