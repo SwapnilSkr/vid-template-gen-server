@@ -23,6 +23,7 @@ export interface PublicYouTubePublishChannel {
   label: string;
   googleChannelId?: string;
   googleChannelTitle?: string;
+  googleChannelHandle?: string;
   logoUrl?: string;
   privacyStatus: "private" | "unlisted" | "public";
   categoryId: string;
@@ -196,6 +197,7 @@ export async function listAllYouTubePublishChannels(): Promise<PublicYouTubePubl
       label: channel.label,
       googleChannelId: channel.googleChannelId,
       googleChannelTitle: channel.googleChannelTitle,
+      googleChannelHandle: channel.googleChannelHandle,
       logoUrl: channel.logoUrl,
       privacyStatus: channel.privacyStatus,
       categoryId: channel.categoryId,
@@ -288,6 +290,7 @@ export async function completeYouTubeChannelConnect(code: string, state: string)
     googleChannel?.snippet?.thumbnails?.high?.url ??
     googleChannel?.snippet?.thumbnails?.medium?.url ??
     googleChannel?.snippet?.thumbnails?.default?.url;
+  const googleChannelHandle = googleChannel?.snippet?.customUrl;
   const channelKey = pending.payload.channelKey || slugifyChannelKey(pending.payload.label);
 
   const channel = await YouTubeChannel.findOneAndUpdate(
@@ -297,6 +300,7 @@ export async function completeYouTubeChannelConnect(code: string, state: string)
       label: pending.payload.label,
       googleChannelId: googleChannel?.id,
       googleChannelTitle: googleChannel?.snippet?.title,
+      googleChannelHandle,
       logoUrl,
       encryptedRefreshToken: encryptToken(tokens.refresh_token),
       privacyStatus: pending.payload.privacyStatus,
