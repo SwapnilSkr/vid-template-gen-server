@@ -585,7 +585,14 @@ export async function processReel(reelId: string): Promise<void> {
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
-    reel.review = await buildReelReviewPackage(reel);
+    reel.review = await buildReelReviewPackage(reel, (usage) => {
+      measuredCosts.push({
+        label: "Thumbnail image",
+        model: resolveModels("cheap").image,
+        costUsd: usage.costUsd,
+        source: usage.costUsd !== undefined ? "actual" : "estimated",
+      });
+    });
     const heroScene = isHybrid ? result.scenes.find((_, i) => reel.scenes[i]?.isHero) : undefined;
     const costBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
@@ -666,10 +673,19 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
-    reel.review = await buildReelReviewPackage(reel);
+    const gameplayMeasuredCosts: MeasuredCostInput[] = [];
+    reel.review = await buildReelReviewPackage(reel, (usage) => {
+      gameplayMeasuredCosts.push({
+        label: "Thumbnail image",
+        model: resolveModels("cheap").image,
+        costUsd: usage.costUsd,
+        source: usage.costUsd !== undefined ? "actual" : "estimated",
+      });
+    });
     const costBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
       tts,
+      measuredCosts: gameplayMeasuredCosts,
     });
     reel.costBreakdown = costBreakdown;
     reel.costUsd = costBreakdown.totalUsd;

@@ -7,7 +7,7 @@ import { resolveModels } from "../config/models";
 import { Reel, type IReel, type IReelReviewPackage } from "../models";
 import { getErrorMessage } from "../types";
 import { ensureDir, generateFilename } from "../utils";
-import { generateImage } from "./openrouter-media.service";
+import { generateImage, type MediaUsageCallback } from "./openrouter-media.service";
 import { uploadImage } from "./s3.service";
 import { listTrendReferences } from "./trend-reference.service";
 import { getTrendDigest } from "./trend-insight.service";
@@ -268,7 +268,13 @@ function overlayThumbnailText(background: string, overlay: string, output: strin
 /** Real AI thumbnail: generate a dramatic background from `thumbnailPrompt`,
  * composite the bold hook text + niche badge on top. Falls back to the flat
  * mockup design if image generation or compositing fails. */
-async function renderThumbnailPng(title: string, subtitle: string, niche: string, thumbnailPrompt?: string): Promise<string> {
+async function renderThumbnailPng(
+  title: string,
+  subtitle: string,
+  niche: string,
+  thumbnailPrompt?: string,
+  onImageUsage?: MediaUsageCallback
+): Promise<string> {
   await ensureDir(config.processingPath);
   if (!thumbnailPrompt) return renderFlatThumbnailPng(title, subtitle, niche);
 
@@ -278,7 +284,7 @@ async function renderThumbnailPng(title: string, subtitle: string, niche: string
     const rawBgPath = await generateImage(
       thumbnailPrompt,
       "dramatic wide shot, high contrast, cinematic, YouTube thumbnail composition",
-      { model: imageModel, outputDir: config.processingPath }
+      { model: imageModel, outputDir: config.processingPath, onUsage: onImageUsage }
     );
     localFiles.push(rawBgPath);
 
@@ -302,7 +308,10 @@ async function renderThumbnailPng(title: string, subtitle: string, niche: string
   }
 }
 
-export async function buildReelReviewPackage(reel: IReel): Promise<IReelReviewPackage> {
+export async function buildReelReviewPackage(
+  reel: IReel,
+  onThumbnailImageUsage?: MediaUsageCallback
+): Promise<IReelReviewPackage> {
   const title = buildTitle(reel).slice(0, 100);
   const nicheTags = reel.niche === "reddit" ? DEFAULT_REDDIT_TAGS : isHorrorNiche(reel.niche) ? DEFAULT_HORROR_TAGS : [reel.niche];
   const tags = normalizeTags([
@@ -315,7 +324,13 @@ export async function buildReelReviewPackage(reel: IReel): Promise<IReelReviewPa
   const thumbnailPrompt = await buildThumbnailPrompt(reel, title);
   const visibilityNotes = await buildVisibilityNotes(reel);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
-  const thumbnailPath = await renderThumbnailPng(title, subtitle, reel.niche, thumbnailPrompt);
+  const thumbnailPath = await renderThumbnailPng(
+    title,
+    subtitle,
+    reel.niche,
+    thumbnailPrompt,
+    onThumbnailImageUsage
+  );
   const thumbnailUrl = await uploadImage(await readFile(thumbnailPath), "reels", `${reel._id}_thumbnail.png`);
 
   return {
