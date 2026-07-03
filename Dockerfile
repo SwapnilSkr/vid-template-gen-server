@@ -1,64 +1,64 @@
 # ===========================================
 # Multi-stage Dockerfile for Video Generator
+# glibc (debian-slim) base — avoids musl breakage with the
+# native @resvg/resvg-js addon.
 # ===========================================
 
-# Stage 1: Build stage
-FROM oven/bun:1.1-alpine AS builder
+# Stage 1: Build (install deps + native prebuilds)
+FROM oven/bun:1-slim AS builder
 
 WORKDIR /app
 
-# Copy package files
 COPY package.json bun.lock* ./
-
-# Install dependencies
 RUN bun install --frozen-lockfile --production
 
-# Copy source code
-COPY src ./src
-COPY tsconfig.json ./
+# Stage 2: Production
+FROM oven/bun:1-slim AS runner
 
-# Stage 2: Production stage
-FROM oven/bun:1.1-alpine AS runner
+# System deps:
+#  - ffmpeg / ffprobe: video pipeline
+#  - fontconfig + fonts: REQUIRED by resvg (reddit-card) and drawtext.
+#    fonts-liberation gives a metric-compatible "Arial"; dejavu is a
+#    broad unicode fallback so text never renders as tofu.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg \
+      fontconfig \
+      fonts-liberation \
+      fonts-dejavu-core \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install FFmpeg
-RUN apk add --no-cache ffmpeg
-
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S vidgen -u 1001
+# Non-root user
+RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs -M -s /usr/sbin/nologin vidgen
 
 WORKDIR /app
 
-# Copy dependencies from builder
 COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/src ./src
+COPY package.json ./
+COPY src ./src
+# assets/ holds BowlbyOne-Regular.ttf used by ffmpeg drawtext (textfile=).
+# Without this the render dies with "Cannot find a valid font".
+COPY assets ./assets
 
-# Create storage directories
-RUN mkdir -p storage/templates storage/characters storage/processing storage/output && \
-    chown -R vidgen:nodejs /app
+RUN mkdir -p storage/templates storage/characters storage/processing \
+             storage/output storage/gameplay \
+    && chown -R vidgen:nodejs /app
 
-# Switch to non-root user
 USER vidgen
 
-# Expose port
 EXPOSE 3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+# Healthcheck via bun (no wget dependency on slim base)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD bun -e "fetch('http://localhost:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# Set environment variables
-ENV NODE_ENV=production
-ENV PORT=3000
-ENV HOST=0.0.0.0
-ENV STORAGE_PATH=/app/storage
-ENV TEMPLATES_PATH=/app/storage/templates
-ENV CHARACTERS_PATH=/app/storage/characters
-ENV PROCESSING_PATH=/app/storage/processing
-ENV OUTPUT_PATH=/app/storage/output
-ENV FFMPEG_PATH=/usr/bin/ffmpeg
-ENV FFPROBE_PATH=/usr/bin/ffprobe
+ENV NODE_ENV=production \
+    PORT=3000 \
+    HOST=0.0.0.0 \
+    STORAGE_PATH=/app/storage \
+    PROCESSING_PATH=/app/storage/processing \
+    GAMEPLAY_DIR=/app/storage/gameplay \
+    FFMPEG_PATH=/usr/bin/ffmpeg \
+    FFPROBE_PATH=/usr/bin/ffprobe
 
-# Start the server
 CMD ["bun", "run", "src/index.ts"]
