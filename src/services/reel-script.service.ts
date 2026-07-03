@@ -1,11 +1,13 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateText } from "ai";
+import { Types } from "mongoose";
 import { config } from "../config";
 import { resolveModels, type Tier } from "../config/models";
 import { getRecipe, type NicheRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
-import type { IStoryBible } from "../models/reel.model";
+import type { IHorrorReferencePayload, IStoryBible } from "../models/reel.model";
 import { getTrendInsight } from "./trend-insight.service";
+import { pickHorrorReferenceSeed } from "./horror-reference.service";
 
 const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
 
@@ -63,6 +65,8 @@ export interface PlannedReel {
   scenes: PlannedScene[];
   /** deep story materials — present for horror (two-pass planner) */
   storyBible?: IStoryBible;
+  /** public-domain/reference story used as inspiration for horror planning */
+  horrorReference?: IHorrorReferencePayload;
 }
 
 function planningModelFor(recipe: NicheRecipe, tier: Tier): string {
@@ -229,10 +233,17 @@ export async function planHorrorReel(
   const llm = planningModelFor(recipe, tier);
   const trendBlock = await buildTrendBlock(niche, genre);
   const seed = topic?.trim() && topic.trim().toLowerCase() !== "auto" ? topic.trim() : "";
+  const reference = await pickHorrorReferenceSeed(genre).catch((error: unknown) => {
+    console.warn(`⚠️ Horror reference seed unavailable: ${getErrorMessage(error)}`);
+    return undefined;
+  });
+  const referenceBlock = reference
+    ? `\nPUBLIC-DOMAIN HORROR REFERENCE FOR INSPIRATION ONLY:\n${reference.promptBrief}\n\nREFERENCE RULES:\n- This is allowed reference material, but the output must be an original modern story.\n- Borrow only atmosphere, dread mechanics, sensory texture, escalation shape, or twist discipline.\n- Do NOT copy plot events, character names, locations, sentences, or distinctive phrasing.\n`
+    : "";
 
   // ---- Pass 1: Story Bible ----
   const biblePrompt = `You are a literary horror author developing a short, believable first-person horror story for a 60-second vertical video. Genre flavor: ${genre ?? "unsettling everyday horror"}.
-${seed ? `SEED IDEA: ${seed}` : "Invent an original, specific premise."}${trendBlock}
+${seed ? `SEED IDEA: ${seed}` : "Invent an original, specific premise."}${trendBlock}${referenceBlock}
 
 Develop the story's foundations. The horror must come from an ordinary object or place quietly breaking one impossible rule, escalating until the narrator is personally trapped — no monsters, no gore, no clichés.
 
@@ -299,6 +310,15 @@ Exactly ${recipe.sceneCount} scenes. Scene 1's narration is the HOOK — grab at
     if (!parsed.scenes?.length) throw new Error("No scenes returned");
     const planned = tightenHorrorPlan(parsed);
     planned.storyBible = bible;
+    if (reference) {
+      planned.horrorReference = {
+        referenceId: new Types.ObjectId(reference.id),
+        title: reference.title,
+        author: reference.author,
+        sourceUrl: reference.sourceUrl,
+        license: reference.license,
+      };
+    }
     const warnings = horrorQualityWarnings(planned);
     if (warnings.length) console.warn(`⚠️ Horror script quality warning: ${warnings.join(", ")}`);
     console.log(`📝 Planned "${planned.title}" — ${planned.scenes.length} scenes (${recipe.niche}) via ${llm} [2-pass]`);

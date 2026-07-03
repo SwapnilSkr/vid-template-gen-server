@@ -147,6 +147,14 @@ export interface IRedditStoryPayload {
   partCount?: number;
 }
 
+export interface IHorrorReferencePayload {
+  referenceId?: Types.ObjectId;
+  title: string;
+  author?: string;
+  sourceUrl: string;
+  license?: "public_domain" | "unknown";
+}
+
 /** One beat: a generated visual + its narration + motion + caption timing. */
 export interface IScene {
   index: number;
@@ -178,6 +186,7 @@ export interface IReel extends Document {
   storyBible?: IStoryBible;
   scenes: IScene[];
   redditStory?: IRedditStoryPayload;
+  horrorReference?: IHorrorReferencePayload;
   seriesId?: string;
   partNumber?: number;
   partCount?: number;
@@ -189,8 +198,10 @@ export interface IReel extends Document {
   horrorAudioKey?: string;
   /** Connected YouTube channel id used for rendered outro branding. */
   outroChannelId?: string;
+  thumbnailMode?: "frame" | "ai";
   imageModelOverride?: string;
   voiceOverride?: IVoiceOverride;
+  narrationVoice?: IVoiceOverride;
   voiceVariants: IVoiceVariant[];
 
   status: ReelStatus;
@@ -263,6 +274,17 @@ const redditStorySchema = new Schema<IRedditStoryPayload>(
     seedUrl: String,
     partNumber: Number,
     partCount: Number,
+  },
+  { _id: false }
+);
+
+const horrorReferenceSchema = new Schema<IHorrorReferencePayload>(
+  {
+    referenceId: { type: Schema.Types.ObjectId, ref: "HorrorReference" },
+    title: { type: String, required: true },
+    author: String,
+    sourceUrl: { type: String, required: true },
+    license: { type: String, enum: ["public_domain", "unknown"] },
   },
   { _id: false }
 );
@@ -398,14 +420,17 @@ const reelSchema = new Schema<IReel>(
     storyBible: storyBibleSchema,
     scenes: { type: [sceneSchema], default: [] },
     redditStory: redditStorySchema,
+    horrorReference: horrorReferenceSchema,
     seriesId: { type: String, index: true },
     partNumber: Number,
     partCount: Number,
     gameplayKey: String,
     horrorAudioKey: String,
     outroChannelId: String,
+    thumbnailMode: { type: String, enum: ["frame", "ai"], default: "frame" },
     imageModelOverride: String,
     voiceOverride: voiceOverrideSchema,
+    narrationVoice: voiceOverrideSchema,
     voiceVariants: { type: [voiceVariantSchema], default: [] },
     status: {
       type: String,
@@ -433,5 +458,8 @@ const reelSchema = new Schema<IReel>(
   },
   { timestamps: true }
 );
+
+reelSchema.index({ "redditStory.seedUrl": 1 });
+reelSchema.index({ "horrorReference.sourceUrl": 1 });
 
 export const Reel = model<IReel>("Reel", reelSchema);
