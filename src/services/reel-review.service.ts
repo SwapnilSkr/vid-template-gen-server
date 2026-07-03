@@ -7,6 +7,8 @@ import { resolveModels } from "../config/models";
 import { Reel, type IReel, type IReelReviewPackage } from "../models";
 import { getErrorMessage } from "../types";
 import { ensureDir, generateFilename } from "../utils";
+import { generateText } from "ai";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateImage, type MediaUsageCallback } from "./openrouter-media.service";
 import { uploadImage } from "./s3.service";
 import { listTrendReferences } from "./trend-reference.service";
@@ -37,6 +39,10 @@ const DEFAULT_HORROR_TAGS = [
   "scarystories",
   "creepypasta",
 ];
+
+const openrouter = createOpenRouter({
+  apiKey: config.openRouterApiKey,
+});
 
 function esc(value: string): string {
   return value
@@ -86,6 +92,91 @@ function buildTitle(reel: IReel): string {
     return `${base} | Part ${reel.partNumber}`;
   }
   return base;
+}
+
+function storySeed(reel: IReel): string {
+  if (reel.niche === "reddit" && reel.redditStory) {
+    return [
+      reel.redditStory.title,
+      reel.redditStory.body,
+      reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  return [
+    reel.title,
+    reel.hook,
+    reel.topic,
+    ...reel.scenes.map((scene) => scene.narration).filter(Boolean),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function extractReviewJson(text: string): { title?: string; description?: string } {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return {};
+  const parsed = JSON.parse(jsonMatch[0]) as unknown;
+  if (!parsed || typeof parsed !== "object") return {};
+  const record = parsed as Record<string, unknown>;
+  return {
+    title: typeof record.title === "string" ? record.title : undefined,
+    description: typeof record.description === "string" ? record.description : undefined,
+  };
+}
+
+function cleanTitle(title: string): string {
+  return title
+    .replace(/^["']|["']$/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 100);
+}
+
+async function buildReviewCopy(reel: IReel, tags: string[]): Promise<{ title: string; description: string }> {
+  const fallbackTitle = buildTitle(reel).slice(0, 100);
+  const fallbackDescription = buildDescription(reel, fallbackTitle, tags);
+  const source = storySeed(reel).slice(0, 2600);
+  if (!source || !config.openRouterApiKey) {
+    return { title: fallbackTitle, description: fallbackDescription };
+  }
+
+  const nicheLabel =
+    reel.niche === "reddit"
+      ? "Reddit story / AITA short"
+      : isHorrorNiche(reel.niche)
+        ? "horror short"
+        : getRecipe(reel.niche).displayName;
+
+  try {
+    const { text } = await generateText({
+      model: openrouter(config.openRouterModel),
+      prompt: `Write YouTube Shorts review copy for this ${nicheLabel}.
+
+SOURCE STORY:
+${source}
+
+Rules:
+- Output JSON only: {"title":"...","description":"..."}.
+- Title must be specific to the conflict/twist, 55-90 characters, curiosity-gap style.
+- Avoid generic format words such as gameplay, AI, video generation, horror video, short-form, content, captions, or thumbnail.
+- Do not invent facts not present in the source.
+- Description should be 1-2 natural sentences plus relevant hashtags.
+- Keep description under 500 characters.
+- Include part info if the source says this is one part of a series.
+- Make it punchy, human, and platform-ready, not templated slop.`,
+    });
+
+    const parsed = extractReviewJson(text);
+    const title = parsed.title ? cleanTitle(parsed.title) : fallbackTitle;
+    const description = parsed.description?.trim().slice(0, 500) || fallbackDescription;
+    return { title, description };
+  } catch (error: unknown) {
+    console.warn(`Review copy generation failed, using fallback: ${getErrorMessage(error)}`);
+    return { title: fallbackTitle, description: fallbackDescription };
+  }
 }
 
 function buildDescription(reel: IReel, title: string, tags: string[]): string {
@@ -312,7 +403,6 @@ export async function buildReelReviewPackage(
   reel: IReel,
   onThumbnailImageUsage?: MediaUsageCallback
 ): Promise<IReelReviewPackage> {
-  const title = buildTitle(reel).slice(0, 100);
   const nicheTags = reel.niche === "reddit" ? DEFAULT_REDDIT_TAGS : isHorrorNiche(reel.niche) ? DEFAULT_HORROR_TAGS : [reel.niche];
   const tags = normalizeTags([
     reel.niche,
@@ -320,18 +410,14 @@ export async function buildReelReviewPackage(
     reel.redditStory?.subreddit?.replace(/^r\//i, "") ?? "",
     ...nicheTags,
   ]);
-  const description = buildDescription(reel, title, tags);
+  const { title, description } = await buildReviewCopy(reel, tags);
   const thumbnailPrompt = await buildThumbnailPrompt(reel, title);
   const visibilityNotes = await buildVisibilityNotes(reel);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
-  const thumbnailPath = await renderThumbnailPng(
-    title,
-    subtitle,
-    reel.niche,
-    thumbnailPrompt,
-    onThumbnailImageUsage
-  );
-  const thumbnailUrl = await uploadImage(await readFile(thumbnailPath), "reels", `${reel._id}_thumbnail.png`);
+  const thumbnailUrl =
+    reel.thumbnailMode === "ai"
+      ? await renderAndUploadThumbnail(reel, title, subtitle, thumbnailPrompt, onThumbnailImageUsage)
+      : undefined;
 
   return {
     title,
@@ -345,10 +431,31 @@ export async function buildReelReviewPackage(
   };
 }
 
+async function renderAndUploadThumbnail(
+  reel: IReel,
+  title: string,
+  subtitle: string,
+  thumbnailPrompt: string,
+  onThumbnailImageUsage?: MediaUsageCallback
+): Promise<string> {
+  const thumbnailPath = await renderThumbnailPng(
+    title,
+    subtitle,
+    reel.niche,
+    thumbnailPrompt,
+    onThumbnailImageUsage
+  );
+  try {
+    return await uploadImage(await readFile(thumbnailPath), "reels", `${reel._id}_thumbnail.png`);
+  } finally {
+    await unlink(thumbnailPath).catch(() => {});
+  }
+}
+
 export async function ensureReelReviewPackage(reelId: string): Promise<IReelReviewPackage> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
-  if (!reel.review?.thumbnailUrl || !reel.review?.title) {
+  if (!reel.review?.title || (reel.thumbnailMode === "ai" && !reel.review.thumbnailUrl)) {
     reel.review = await buildReelReviewPackage(reel);
     await reel.save();
   }
@@ -392,11 +499,15 @@ export async function regenerateReelThumbnail(
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
   const thumbnailPrompt = nextReview.thumbnailPrompt || (await buildThumbnailPrompt(reel, title));
   const thumbnailPath = await renderThumbnailPng(title, subtitle, reel.niche, thumbnailPrompt);
-  nextReview.thumbnailUrl = await uploadImage(
-    await readFile(thumbnailPath),
-    "reels",
-    `${reel._id}_thumbnail.png`
-  );
+  try {
+    nextReview.thumbnailUrl = await uploadImage(
+      await readFile(thumbnailPath),
+      "reels",
+      `${reel._id}_thumbnail.png`
+    );
+  } finally {
+    await unlink(thumbnailPath).catch(() => {});
+  }
   nextReview.title = title;
   nextReview.thumbnailPrompt = thumbnailPrompt;
 
@@ -412,7 +523,7 @@ function extractVideoFrame(videoUrl: string, atSeconds: number, output: string):
       .outputOptions([
         "-vframes", "1",
         "-vf",
-        `scale=${THUMB_W}:${THUMB_H}:force_original_aspect_ratio=increase,crop=${THUMB_W}:${THUMB_H}`,
+        `split=2[bg][fg];[bg]scale=${THUMB_W}:${THUMB_H}:force_original_aspect_ratio=increase,crop=${THUMB_W}:${THUMB_H},gblur=sigma=28,eq=brightness=-0.08:saturation=0.85[back];[fg]scale=-2:${THUMB_H}:force_original_aspect_ratio=decrease[front];[back][front]overlay=(W-w)/2:(H-h)/2`,
       ])
       .output(output)
       .on("end", () => resolve(output))

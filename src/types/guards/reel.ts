@@ -22,6 +22,8 @@ export const CreateReelBody = t.Object({
   horrorAudioKey: t.Optional(t.String()),
   /** connected YouTube channel id used for rendered outro branding */
   outroChannelId: t.Optional(t.String()),
+  /** thumbnail generation policy: pick a video frame later, or generate AI thumbnail during render */
+  thumbnailMode: t.Optional(t.Union([t.Literal("frame"), t.Literal("ai")])),
   /** explicit image model pick from the compatible image model catalog */
   imageModel: t.Optional(t.String()),
   /** reference-art style id (config/art-styles.ts) for horror/image niches */
