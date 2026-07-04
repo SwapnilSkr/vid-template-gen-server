@@ -45,6 +45,14 @@ export interface RevoiceJobData {
   variantIds: string[];
 }
 
+export interface YtImportJobData {
+  importId: string;
+}
+
+export interface YtImportFramesJobData {
+  importId: string;
+}
+
 export const reelQueue = new Queue<ReelJobData, void, "process">(
   "reel-processing",
   { connection: redisConnection, defaultJobOptions }
@@ -68,6 +76,16 @@ export const publishQueue = new Queue<PublishJobData, void, "publish">(
 
 export const revoiceQueue = new Queue<RevoiceJobData, void, "revoice">(
   "reel-revoicing",
+  { connection: redisConnection, defaultJobOptions }
+);
+
+export const ytImportQueue = new Queue<YtImportJobData, void, "process">(
+  "yt-import-processing",
+  { connection: redisConnection, defaultJobOptions }
+);
+
+export const ytImportFramesQueue = new Queue<YtImportFramesJobData, void, "extract">(
+  "yt-import-frames",
   { connection: redisConnection, defaultJobOptions }
 );
 
@@ -109,6 +127,18 @@ export async function enqueueRevoice(reelId: string, variantIds: string[]): Prom
     "revoice",
     { reelId, variantIds },
     { jobId: `${reelId}-revoice-${Date.now()}` }
+  );
+}
+
+export async function enqueueYtImport(importId: string): Promise<void> {
+  await ytImportQueue.add("process", { importId }, { jobId: `yt-import-${importId}` });
+}
+
+export async function enqueueYtImportFrames(importId: string): Promise<void> {
+  await ytImportFramesQueue.add(
+    "extract",
+    { importId },
+    { jobId: `yt-frames-${importId}-${Date.now()}` }
   );
 }
 

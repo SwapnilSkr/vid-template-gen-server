@@ -1,0 +1,600 @@
+import { spawn } from "node:child_process";
+import { createReadStream } from "node:fs";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import ffmpeg from "fluent-ffmpeg";
+import { config } from "../config";
+import { YtImport, type IYtImport, type IYtImportCaptionCue } from "../models";
+import { getVideoMetadata } from "./ffmpeg.service";
+import { getYoutubeVideoMetadata } from "./youtube-search.service";
+import {
+  cdnUrlFor,
+  deleteKey,
+  listKeys,
+  uploadFileAtKey,
+} from "./s3.service";
+import { cleanupFiles, ensureDir, fileExists } from "../utils";
+
+const YT_DLP_BIN = resolve(import.meta.dir, "../../bin/yt-dlp");
+const YT_IMPORTS_DIR = join(config.storagePath, "yt-imports");
+const S3_ROOT = "yt-imports";
+
+if (config.ffmpegPath) ffmpeg.setFfmpegPath(config.ffmpegPath);
+if (config.ffprobePath) ffmpeg.setFfprobePath(config.ffprobePath);
+
+export interface CreateYtImportInput {
+  videoId: string;
+  storage: "local" | "s3";
+  downloadCaptions?: boolean;
+  extractFrames?: boolean;
+  frameRangeStartSec?: number;
+  frameRangeEndSec?: number;
+}
+
+export interface FrameExtractRange {
+  startSec: number;
+  endSec: number;
+}
+
+/** Normalize and validate a frame extraction window against video duration. */
+export function normalizeFrameRange(
+  startSec: number | undefined,
+  endSec: number | undefined,
+  durationSec?: number
+): FrameExtractRange {
+  const start = Math.max(0, startSec ?? 0);
+  const maxEnd = durationSec && durationSec > 0 ? durationSec : undefined;
+  let end = endSec ?? maxEnd ?? start + 1;
+  if (maxEnd != null) end = Math.min(end, maxEnd);
+  if (end <= start) end = maxEnd != null ? Math.min(start + 0.04, maxEnd) : start + 1;
+  if (end <= start) {
+    throw new Error("Frame range end must be after start");
+  }
+  return { startSec: start, endSec: end };
+}
+
+function slugifyTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
+export function buildAssetId(videoId: string, title: string): string {
+  const slug = slugifyTitle(title) || "video";
+  return `${videoId}_${slug}`;
+}
+
+function assetPaths(assetId: string) {
+  const baseKey = `${S3_ROOT}/${assetId}`;
+  return {
+    localDir: join(YT_IMPORTS_DIR, assetId),
+    s3Prefix: `${baseKey}/`,
+    videoFile: "video.mp4",
+    audioFile: "audio.m4a",
+    captionsFile: "captions.en.vtt",
+    framesDir: "frames",
+    framePattern: "frame_%06d.jpg",
+  };
+}
+
+function runCommand(bin: string, args: string[]): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const proc = spawn(bin, args);
+    let stderr = "";
+    proc.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    proc.on("error", reject);
+    proc.on("exit", (code) => {
+      if (code === 0) resolvePromise();
+      else reject(new Error(`${bin} exited ${code}: ${stderr.slice(-500)}`));
+    });
+  });
+}
+
+async function downloadVideo(videoId: string, outPath: string): Promise<void> {
+  await ensureDir(join(outPath, ".."));
+  await runCommand(YT_DLP_BIN, [
+    "-f",
+    "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
+    "--merge-output-format",
+    "mp4",
+    "-o",
+    outPath,
+    "--no-playlist",
+    `https://www.youtube.com/watch?v=${videoId}`,
+  ]);
+}
+
+async function downloadCaptionsFile(videoId: string, outDir: string): Promise<string | undefined> {
+  await ensureDir(outDir);
+  try {
+    await runCommand(YT_DLP_BIN, [
+      "--write-subs",
+      "--write-auto-subs",
+      "--sub-langs",
+      "en.*,en",
+      "--convert-subs",
+      "vtt",
+      "--skip-download",
+      "-o",
+      join(outDir, "captions"),
+      "--no-playlist",
+      `https://www.youtube.com/watch?v=${videoId}`,
+    ]);
+  } catch {
+    return undefined;
+  }
+
+  const files = await readdir(outDir);
+  const vtt = files.find((f) => f.endsWith(".vtt"));
+  if (!vtt) return undefined;
+
+  const src = join(outDir, vtt);
+  const dest = join(outDir, assetPaths("x").captionsFile);
+  if (src !== dest) {
+    const content = await readFile(src, "utf-8");
+    await Bun.write(dest, content);
+    if (vtt !== assetPaths("x").captionsFile) await rm(src, { force: true });
+  }
+  return dest;
+}
+
+export function parseVtt(content: string): IYtImportCaptionCue[] {
+  const cues: IYtImportCaptionCue[] = [];
+  const blocks = content.replace(/\r\n/g, "\n").split("\n\n");
+  for (const block of blocks) {
+    const lines = block.trim().split("\n");
+    if (lines.length < 2) continue;
+    const timingLine = lines.find((l) => l.includes("-->"));
+    if (!timingLine) continue;
+    const [startRaw, endRaw] = timingLine.split("-->").map((s) => s.trim());
+    const startSec = vttTimestampToSec(startRaw);
+    const endSec = vttTimestampToSec(endRaw.split(" ")[0]);
+    const text = lines
+      .slice(lines.indexOf(timingLine) + 1)
+      .join(" ")
+      .replace(/<[^>]+>/g, "")
+      .trim();
+    if (text) cues.push({ startSec, endSec, text });
+  }
+  return cues;
+}
+
+function vttTimestampToSec(raw: string): number {
+  const parts = raw.trim().split(":");
+  if (parts.length === 3) {
+    return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+  }
+  if (parts.length === 2) {
+    return parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
+  }
+  return parseFloat(raw) || 0;
+}
+
+async function extractAudioTrack(videoPath: string, audioPath: string): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    ffmpeg(videoPath)
+      .noVideo()
+      .audioCodec("copy")
+      .output(audioPath)
+      .on("end", () => resolvePromise())
+      .on("error", (err) => reject(new Error(`Audio extract failed: ${err.message}`)))
+      .run();
+  });
+}
+
+async function extractFramesInRange(
+  videoPath: string,
+  framesDir: string,
+  range: FrameExtractRange,
+  onProgress?: (pct: number) => void
+): Promise<{ frameCount: number; fps: number }> {
+  await ensureDir(framesDir);
+  const meta = await getVideoMetadata(videoPath);
+  const fps = meta.frameRate || 30;
+  const duration = meta.duration ?? range.endSec;
+  const normalized = normalizeFrameRange(range.startSec, range.endSec, duration);
+  const clipDuration = normalized.endSec - normalized.startSec;
+  const startFrameIndex = Math.round(normalized.startSec * fps);
+
+  await new Promise<void>((resolvePromise, reject) => {
+    ffmpeg(videoPath)
+      .setStartTime(normalized.startSec)
+      .setDuration(clipDuration)
+      .outputOptions(["-vsync", "0", "-q:v", "2", "-start_number", String(startFrameIndex)])
+      .output(join(framesDir, assetPaths("x").framePattern))
+      .on("progress", (p) => {
+        if (p.percent != null && onProgress) onProgress(Math.min(99, p.percent));
+      })
+      .on("end", () => resolvePromise())
+      .on("error", (err) => reject(new Error(`Frame extraction failed: ${err.message}`)))
+      .run();
+  });
+
+  const files = (await readdir(framesDir)).filter((f) => f.endsWith(".jpg"));
+  return { frameCount: files.length, fps };
+}
+
+async function clearExistingFrames(doc: IYtImport): Promise<void> {
+  const paths = assetPaths(doc.assetId);
+  if (doc.storage === "local" && doc.localDir) {
+    await rm(join(doc.localDir, paths.framesDir), { recursive: true, force: true }).catch(() => {});
+  }
+  if (doc.storage === "s3" && doc.s3Prefix) {
+    const keys = await listKeys(`${doc.s3Prefix}${paths.framesDir}/`);
+    await Promise.all(keys.map((key) => deleteKey(key)));
+  }
+}
+
+async function updateImport(
+  id: string,
+  patch: Partial<IYtImport> & { progress?: number }
+): Promise<void> {
+  await YtImport.findByIdAndUpdate(id, patch);
+}
+
+export async function createYtImport(input: CreateYtImportInput): Promise<IYtImport> {
+  const meta = await getYoutubeVideoMetadata(input.videoId);
+  const assetId = buildAssetId(meta.videoId, meta.title);
+
+  const existing = await YtImport.findOne({ assetId });
+  if (existing && existing.status !== "failed") {
+    return existing;
+  }
+
+  const paths = assetPaths(assetId);
+  const frameRange =
+    input.extractFrames && (input.frameRangeStartSec != null || input.frameRangeEndSec != null)
+      ? normalizeFrameRange(
+          input.frameRangeStartSec,
+          input.frameRangeEndSec,
+          meta.durationSec
+        )
+      : undefined;
+
+  const doc = await YtImport.findOneAndUpdate(
+    { assetId },
+    {
+      assetId,
+      youtubeVideoId: meta.videoId,
+      sourceUrl: `https://www.youtube.com/watch?v=${meta.videoId}`,
+      title: meta.title,
+      channelTitle: meta.channelTitle,
+      thumbnailUrl: meta.thumbnailUrl,
+      durationSec: meta.durationSec,
+      storage: input.storage,
+      downloadCaptions: input.downloadCaptions ?? true,
+      extractFrames: input.extractFrames ?? false,
+      frameRangeStartSec: input.extractFrames ? frameRange?.startSec ?? 0 : undefined,
+      frameRangeEndSec: input.extractFrames
+        ? frameRange?.endSec ?? meta.durationSec
+        : undefined,
+      status: "pending",
+      progress: 0,
+      error: undefined,
+      localDir: input.storage === "local" ? paths.localDir : undefined,
+      s3Prefix: input.storage === "s3" ? paths.s3Prefix : undefined,
+      frameCount: 0,
+      framesExtracted: false,
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  return doc!;
+}
+
+export async function processYtImport(importId: string): Promise<void> {
+  const doc = await YtImport.findById(importId);
+  if (!doc) throw new Error(`YtImport not found: ${importId}`);
+
+  const paths = assetPaths(doc.assetId);
+  const workDir =
+    doc.storage === "local" ? paths.localDir : join(config.processingPath, `yt_${doc.assetId}`);
+
+  try {
+    await updateImport(importId, { status: "downloading", progress: 5, error: undefined });
+    await ensureDir(workDir);
+
+    const videoPath = join(workDir, paths.videoFile);
+    await downloadVideo(doc.youtubeVideoId, videoPath);
+    await updateImport(importId, { progress: 35 });
+
+    let captionsPath: string | undefined;
+    let captions: IYtImportCaptionCue[] = [];
+    if (doc.downloadCaptions) {
+      captionsPath = await downloadCaptionsFile(doc.youtubeVideoId, workDir);
+      if (captionsPath && (await fileExists(captionsPath))) {
+        captions = parseVtt(await readFile(captionsPath, "utf-8"));
+      }
+    }
+    await updateImport(importId, { progress: 50 });
+
+    const audioPath = join(workDir, paths.audioFile);
+    await extractAudioTrack(videoPath, audioPath);
+    await updateImport(importId, { progress: 60 });
+
+    const videoMeta = await getVideoMetadata(videoPath);
+
+    if (doc.storage === "s3") {
+      await updateImport(importId, { status: "uploading", progress: 65 });
+
+      const videoKey = `${paths.s3Prefix}${paths.videoFile}`;
+      const audioKey = `${paths.s3Prefix}${paths.audioFile}`;
+      await uploadFileAtKey(videoPath, videoKey, "video/mp4");
+      await uploadFileAtKey(audioPath, audioKey, "audio/mp4");
+
+      let captionsUrl: string | undefined;
+      if (captionsPath && (await fileExists(captionsPath))) {
+        const captionsKey = `${paths.s3Prefix}${paths.captionsFile}`;
+        captionsUrl = await uploadFileAtKey(captionsPath, captionsKey, "text/vtt");
+      }
+
+      await rm(workDir, { recursive: true, force: true });
+
+      await updateImport(importId, {
+        status: doc.extractFrames ? "extracting_frames" : "completed",
+        progress: doc.extractFrames ? 70 : 100,
+        videoUrl: cdnUrlFor(videoKey),
+        audioUrl: cdnUrlFor(audioKey),
+        captionsUrl,
+        captions,
+        fps: videoMeta.frameRate,
+        localDir: undefined,
+      });
+
+      if (doc.extractFrames) {
+        await extractFramesForImport(importId);
+      }
+      return;
+    }
+
+    let captionsUrl: string | undefined;
+    if (captionsPath && (await fileExists(captionsPath))) {
+      captionsUrl = `/api/yt-imports/${importId}/captions`;
+    }
+
+    await updateImport(importId, {
+      status: doc.extractFrames ? "extracting_frames" : "completed",
+      progress: doc.extractFrames ? 70 : 100,
+      videoUrl: `/api/yt-imports/${importId}/video`,
+      audioUrl: `/api/yt-imports/${importId}/audio`,
+      captionsUrl,
+      captions,
+      fps: videoMeta.frameRate,
+      localDir: workDir,
+    });
+
+    if (doc.extractFrames) {
+      await extractFramesForImport(importId);
+    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    await updateImport(importId, { status: "failed", error: message });
+    if (doc.storage === "s3") {
+      await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    }
+    throw error;
+  }
+}
+
+export async function extractFramesForImport(
+  importId: string,
+  rangeOverride?: FrameExtractRange
+): Promise<void> {
+  const doc = await YtImport.findById(importId);
+  if (!doc) throw new Error(`YtImport not found: ${importId}`);
+
+  const paths = assetPaths(doc.assetId);
+  const range = normalizeFrameRange(
+    rangeOverride?.startSec ?? doc.frameRangeStartSec,
+    rangeOverride?.endSec ?? doc.frameRangeEndSec,
+    doc.durationSec
+  );
+
+  await clearExistingFrames(doc);
+  await updateImport(importId, {
+    status: "extracting_frames",
+    progress: 75,
+    framesExtracted: false,
+    frameCount: 0,
+    frameRangeStartSec: range.startSec,
+    frameRangeEndSec: range.endSec,
+  });
+
+  let videoPath: string;
+  let framesDir: string;
+  let tempDir: string | undefined;
+
+  if (doc.storage === "local") {
+    videoPath = join(doc.localDir!, paths.videoFile);
+    framesDir = join(doc.localDir!, paths.framesDir);
+  } else {
+    tempDir = join(config.processingPath, `yt_frames_${doc.assetId}`);
+    await ensureDir(tempDir);
+    videoPath = join(tempDir, paths.videoFile);
+    framesDir = join(tempDir, paths.framesDir);
+
+    const videoKey = `${paths.s3Prefix}${paths.videoFile}`;
+    const res = await fetch(cdnUrlFor(videoKey));
+    if (!res.ok) throw new Error("Failed to fetch video from S3 for frame extraction");
+    await Bun.write(videoPath, await res.arrayBuffer());
+  }
+
+  const { frameCount, fps } = await extractFramesInRange(videoPath, framesDir, range, (pct) => {
+    void updateImport(importId, { progress: 75 + Math.round(pct * 0.24) });
+  });
+
+  if (doc.storage === "s3") {
+    const frameFiles = (await readdir(framesDir)).filter((f) => f.endsWith(".jpg")).sort();
+    let uploaded = 0;
+    for (const file of frameFiles) {
+      const key = `${paths.s3Prefix}${paths.framesDir}/${file}`;
+      await uploadFileAtKey(join(framesDir, file), key, "image/jpeg");
+      uploaded++;
+      if (uploaded % 50 === 0) {
+        await updateImport(importId, {
+          progress: 75 + Math.round((uploaded / frameFiles.length) * 24),
+        });
+      }
+    }
+    if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  }
+
+  await updateImport(importId, {
+    status: "completed",
+    progress: 100,
+    frameCount,
+    fps,
+    framesExtracted: true,
+  });
+}
+
+export async function listYtImports(limit = 50): Promise<IYtImport[]> {
+  return YtImport.find().sort({ createdAt: -1 }).limit(limit).lean();
+}
+
+export async function getYtImport(id: string): Promise<IYtImport | null> {
+  return YtImport.findById(id).lean();
+}
+
+export function captionAtTime(
+  captions: IYtImportCaptionCue[] | undefined,
+  timestampSec: number
+): IYtImportCaptionCue | undefined {
+  if (!captions?.length) return undefined;
+  return captions.find((c) => timestampSec >= c.startSec && timestampSec <= c.endSec);
+}
+
+export async function getLocalAssetPath(
+  doc: IYtImport,
+  kind: "video" | "audio" | "captions" | "frame",
+  frameIndex?: number
+): Promise<string | null> {
+  if (doc.storage !== "local" || !doc.localDir) return null;
+  const paths = assetPaths(doc.assetId);
+  switch (kind) {
+    case "video":
+      return join(doc.localDir, paths.videoFile);
+    case "audio":
+      return join(doc.localDir, paths.audioFile);
+    case "captions":
+      return join(doc.localDir, paths.captionsFile);
+    case "frame": {
+      if (frameIndex == null) return null;
+      const file = `frame_${String(frameIndex).padStart(6, "0")}.jpg`;
+      return join(doc.localDir, paths.framesDir, file);
+    }
+  }
+}
+
+export function frameUrlFor(doc: IYtImport, frameIndex: number): string {
+  if (doc.storage === "local") {
+    return `/api/yt-imports/${doc._id}/frames/${frameIndex}`;
+  }
+  const paths = assetPaths(doc.assetId);
+  const file = `frame_${String(frameIndex).padStart(6, "0")}.jpg`;
+  return cdnUrlFor(`${paths.s3Prefix}${paths.framesDir}/${file}`);
+}
+
+export async function listFrameIndices(doc: IYtImport): Promise<number[]> {
+  const paths = assetPaths(doc.assetId);
+  if (doc.storage === "local" && doc.localDir) {
+    const dir = join(doc.localDir, paths.framesDir);
+    try {
+      const files = await readdir(dir);
+      return files
+        .filter((f) => f.startsWith("frame_") && f.endsWith(".jpg"))
+        .map((f) => parseInt(f.replace("frame_", "").replace(".jpg", ""), 10))
+        .filter((n) => !Number.isNaN(n))
+        .sort((a, b) => a - b);
+    } catch {
+      return [];
+    }
+  }
+  if (doc.storage === "s3" && doc.s3Prefix) {
+    const keys = await listKeys(`${doc.s3Prefix}${paths.framesDir}/`);
+    return keys
+      .map((k) => {
+        const name = k.split("/").pop() ?? "";
+        const match = name.match(/^frame_(\d+)\.jpg$/);
+        return match ? parseInt(match[1], 10) : NaN;
+      })
+      .filter((n) => !Number.isNaN(n))
+      .sort((a, b) => a - b);
+  }
+  return [];
+}
+
+export async function extractAudioClip(
+  doc: IYtImport,
+  atSec: number,
+  durationSec = 3
+): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const paths = assetPaths(doc.assetId);
+  const outPath = join(config.processingPath, `clip_${doc.assetId}_${Math.round(atSec * 1000)}.m4a`);
+  await ensureDir(config.processingPath);
+
+  let sourceVideo: string;
+  let cleanupSource: string[] = [];
+
+  if (doc.storage === "local" && doc.localDir) {
+    sourceVideo = join(doc.localDir, paths.videoFile);
+  } else {
+    const tempVideo = join(config.processingPath, `clip_src_${doc.assetId}.mp4`);
+    const res = await fetch(doc.videoUrl!);
+    if (!res.ok) throw new Error("Failed to fetch source video for audio clip");
+    await Bun.write(tempVideo, await res.arrayBuffer());
+    sourceVideo = tempVideo;
+    cleanupSource = [tempVideo];
+  }
+
+  await new Promise<void>((resolvePromise, reject) => {
+    ffmpeg(sourceVideo)
+      .setStartTime(Math.max(0, atSec))
+      .setDuration(durationSec)
+      .noVideo()
+      .audioCodec("copy")
+      .output(outPath)
+      .on("end", () => resolvePromise())
+      .on("error", (err) => reject(new Error(`Audio clip failed: ${err.message}`)))
+      .run();
+  });
+
+  return {
+    path: outPath,
+    cleanup: async () => {
+      await cleanupFiles([outPath, ...cleanupSource]);
+    },
+  };
+}
+
+export async function deleteYtImport(id: string): Promise<void> {
+  const doc = await YtImport.findById(id);
+  if (!doc) return;
+
+  if (doc.storage === "local" && doc.localDir) {
+    await rm(doc.localDir, { recursive: true, force: true });
+  }
+
+  if (doc.storage === "s3" && doc.s3Prefix) {
+    const keys = await listKeys(doc.s3Prefix);
+    await Promise.all(keys.map((key) => deleteKey(key)));
+  }
+
+  await YtImport.findByIdAndDelete(id);
+}
+
+export function createAssetReadStream(filePath: string) {
+  return createReadStream(filePath);
+}
+
+export async function getAssetStat(filePath: string) {
+  return stat(filePath);
+}
+
+export async function ensureYtImportsStorage(): Promise<void> {
+  await ensureDir(YT_IMPORTS_DIR);
+}

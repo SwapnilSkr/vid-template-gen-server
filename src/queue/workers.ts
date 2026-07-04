@@ -15,7 +15,10 @@ import type {
   RegenerateCompositionJobData,
   PublishJobData,
   RevoiceJobData,
+  YtImportJobData,
+  YtImportFramesJobData,
 } from "./queues";
+import { processYtImport, extractFramesForImport } from "../services/yt-import.service";
 
 // ============================================
 // BullMQ workers — one process per queue, started on server boot. Each
@@ -76,12 +79,30 @@ export function startWorkers(): void {
     { connection: redisConnection, concurrency: config.queueConcurrency }
   );
 
+  const ytImportWorker = new Worker<YtImportJobData, void, "process">(
+    "yt-import-processing",
+    async (job: Job<YtImportJobData, void, "process">) => {
+      await processYtImport(job.data.importId);
+    },
+    { connection: redisConnection, concurrency: 1 }
+  );
+
+  const ytImportFramesWorker = new Worker<YtImportFramesJobData, void, "extract">(
+    "yt-import-frames",
+    async (job: Job<YtImportFramesJobData, void, "extract">) => {
+      await extractFramesForImport(job.data.importId);
+    },
+    { connection: redisConnection, concurrency: 1 }
+  );
+
   for (const [name, worker] of [
     ["reel", reelWorker],
     ["composition", compositionWorker],
     ["composition-regen", compositionRegenerateWorker],
     ["publish", publishWorker],
     ["revoice", revoiceWorker],
+    ["yt-import", ytImportWorker],
+    ["yt-import-frames", ytImportFramesWorker],
   ] as const) {
     worker.on("completed", (job) => console.log(`✅ [${name}] job ${job.id} completed`));
     worker.on("failed", (job, error) =>
@@ -90,6 +111,6 @@ export function startWorkers(): void {
   }
 
   console.log(
-    `🛠️  Queue workers started (concurrency=${config.queueConcurrency}): reel, composition, composition-regen, publish, revoice`
+    `🛠️  Queue workers started (concurrency=${config.queueConcurrency}): reel, composition, composition-regen, publish, revoice, yt-import, yt-import-frames`
   );
 }
