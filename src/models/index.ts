@@ -47,3 +47,10 @@ export {
 export { TrendInsight, type ITrendInsight } from "./trend-insight.model";
 export { YouTubeChannel, type IYouTubeChannel } from "./youtube-channel.model";
 export { OAuthState, type IOAuthState } from "./oauth-state.model";
+export {
+  YtImport,
+  type IYtImport,
+  type IYtImportCaptionCue,
+  type YtImportStatus,
+  type YtImportStorage,
+} from "./yt-import.model";

@@ -28,7 +28,8 @@ export type S3Folder =
   | "subtitles"
   | "gameplay"
   | "voice-samples"
-  | "art-styles";
+  | "art-styles"
+  | "yt-imports";
 
 /** Public delivery URL for a key — CloudFront if configured, else direct S3. */
 export function cdnUrlFor(key: string): string {
@@ -211,6 +212,28 @@ export async function getPresignedUrl(
   });
 
   return getSignedUrl(s3Client, command, { expiresIn: expiresInSeconds });
+}
+
+/** Upload a local file to an exact S3 key. Returns the CDN URL. */
+export async function uploadFileAtKey(
+  localPath: string,
+  key: string,
+  contentType: string
+): Promise<string> {
+  const { readFile } = await import("node:fs/promises");
+  const buffer = await readFile(localPath);
+  const upload = new Upload({
+    client: s3Client,
+    params: {
+      Bucket: config.s3Bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    },
+  });
+  await upload.done();
+  console.log(`☁️  Uploaded to S3: ${key}`);
+  return cdnUrlFor(key);
 }
 
 /** Delete an object by its raw S3 key (e.g. "reels/video_123.mp4"). */
