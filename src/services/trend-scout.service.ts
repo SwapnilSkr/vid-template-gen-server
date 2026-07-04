@@ -267,12 +267,22 @@ export async function getTrendSummary(
   const out: TrendGenreSummary[] = [];
 
   for (const target of getScoutTargets(niche)) {
+    const totalSamples = await TrendReference.countDocuments({ niche, genre: target.genre });
+    if (!totalSamples) continue;
+
     const refs = await TrendReference.find({ niche, genre: target.genre, scanWindow: { $in: scanWindow } })
       .sort({ "metrics.views": -1 })
       .limit(50);
-    if (!refs.length) continue;
+    // Period filter may lag behind the latest scout tag (e.g. backfill used
+    // last_30d while the dashboard scout writes weekly_scan) — still show the
+    // genre card using totalSamples, and fall back to all refs for the leaderboard.
+    const leaderboardRefs = refs.length
+      ? refs
+      : await TrendReference.find({ niche, genre: target.genre })
+          .sort({ "metrics.views": -1 })
+          .limit(50);
 
-    const topPerformers: TrendTopPerformer[] = refs.slice(0, 5).map((r) => ({
+    const topPerformers: TrendTopPerformer[] = leaderboardRefs.slice(0, 5).map((r) => ({
       title: r.title,
       thumbnailUrl: r.thumbnailUrl,
       channelTitle: r.channelTitle,
@@ -282,7 +292,7 @@ export async function getTrendSummary(
     }));
 
     const buckets = new Map<string, number>();
-    for (const r of refs) {
+    for (const r of leaderboardRefs) {
       if (r.dayOfWeek === undefined || r.hourUtc === undefined) continue;
       const key = `${r.dayOfWeek}-${r.hourUtc}`;
       // log-dampen so one outlier viral video doesn't dominate the bucket
@@ -299,7 +309,7 @@ export async function getTrendSummary(
     out.push({
       genre: target.genre,
       displayLabel: target.displayLabel,
-      sampleSize: refs.length,
+      sampleSize: totalSamples,
       topPerformers,
       postingBuckets,
       bestPostingTime: postingBuckets[0]
