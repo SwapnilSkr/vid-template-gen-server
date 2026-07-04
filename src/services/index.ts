@@ -48,3 +48,5 @@ export * from "./s3-reconciliation.service";
 
 // Distribution (publish rendered reels to platforms)
 export * from "./youtube-publish.service";
+export * from "./youtube-search.service";
+export * from "./yt-import.service";
