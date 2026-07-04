@@ -14,8 +14,10 @@ import {
   trendRoutes,
   maintenanceRoutes,
   youtubeRoutes,
+  ytImportRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
+import { ensureYtImportsStorage } from "./services/yt-import.service";
 import { startStoryTopUpScheduler } from "./services/story-scheduler.service";
 import { startWorkers } from "./queue/workers";
 
@@ -31,6 +33,7 @@ async function initialize() {
 
   // Initialize storage directories
   await initializeStorage();
+  await ensureYtImportsStorage();
 }
 
 // Create Elysia app
@@ -103,6 +106,7 @@ const app = new Elysia({
   .use(metaRoutes)
   .use(trendRoutes)
   .use(youtubeRoutes)
+  .use(ytImportRoutes)
   .use(maintenanceRoutes);
 
 // Start server

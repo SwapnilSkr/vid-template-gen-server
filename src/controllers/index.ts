@@ -62,6 +62,21 @@ export {
   triggerHorrorReferenceScoutController,
 } from "./trend.controller";
 
+export {
+  searchYoutubeController,
+  listYtImportsController,
+  getYtImportController,
+  createYtImportController,
+  extractFramesController,
+  captionAtController,
+  deleteYtImportController,
+  streamVideoController,
+  streamAudioController,
+  streamCaptionsController,
+  streamFrameController,
+  streamAudioClipController,
+} from "./yt-import.controller";
+
 // Maintenance controllers
 export { reconcileS3Controller, purgeFailedReelsController } from "./maintenance.controller";
 
