@@ -1,5 +1,6 @@
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { generateText } from "ai";
+import { generateText, Output } from "ai";
+import { z } from "zod";
 import { config } from "../config";
 import { resolveModels } from "../config/models";
 import { TrendInsight, type ITrendInsight } from "../models";
@@ -30,9 +31,19 @@ const DIGEST_CHAR_CAP = 1200; // hard cap so downstream prompts stay bounded
 const MAX_HOOKS = 6;
 const HOOK_CHAR_CAP = 120; // each hook stays short enough to drop straight into a script prompt
 
-interface TrendInsightDraft {
-  digest: string;
-  hooks: string[];
+const trendInsightSchema = z.object({
+  digest: z
+    .string()
+    .describe("4-6 bullet points as a single string; prefix each line with '- '"),
+  hooks: z
+    .array(z.string())
+    .max(MAX_HOOKS)
+    .describe("Reusable hook-line templates with [placeholder] slots"),
+});
+
+/** Flatten YouTube title/channel text so quotes and line breaks don't break the prompt. */
+function sanitizeTrendSampleText(text: string): string {
+  return text.replace(/[\r\n\t]+/g, " ").replace(/"/g, "'").trim();
 }
 
 /** Re-summarize the top trend references for one niche/genre into a bullet
@@ -53,8 +64,9 @@ export async function refreshTrendInsight(
   const sample = refs
     .map((r, i) => {
       const views = r.metrics?.views ?? 0;
-      const channel = r.channelTitle ? ` (${r.channelTitle})` : "";
-      return `${i + 1}. "${r.title ?? "untitled"}" — ${views.toLocaleString()} views${channel}`;
+      const title = sanitizeTrendSampleText(r.title ?? "untitled");
+      const channel = r.channelTitle ? ` (${sanitizeTrendSampleText(r.channelTitle)})` : "";
+      return `${i + 1}. ${title} — ${views.toLocaleString()} views${channel}`;
     })
     .join("\n");
 
@@ -67,20 +79,20 @@ ${sample}
 
 2. Write ${MAX_HOOKS} REUSABLE HOOK-LINE TEMPLATES inspired by (not copied from) these titles — generic, topic-agnostic openers a scriptwriter could adapt to a brand-new story in this niche. Use a "[placeholder]" for the specific subject (e.g. "The [object] in my [place] was never supposed to [action]..."). Do not quote or closely paraphrase any single title verbatim.
 
-Everything you write MUST be in English, regardless of the language any source title happens to be in.
-
-OUTPUT JSON ONLY (no markdown):
-{ "digest": "bullet list as a single string, \\"- \\" prefix each line, max 6 lines", "hooks": ["hook template 1", "hook template 2"] }`;
+Everything you write MUST be in English, regardless of the language any source title happens to be in.`;
 
   try {
     const llm = resolveModels("cheap").llm;
-    const { text } = await generateText({ model: openrouter(llm), prompt });
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON in model response");
-    const parsed = JSON.parse(jsonMatch[0]) as TrendInsightDraft;
+    const { output } = await generateText({
+      model: openrouter(llm),
+      output: Output.object({ schema: trendInsightSchema }),
+      prompt,
+      maxRetries: 2,
+    });
+    if (!output) throw new Error("No structured output from model");
 
-    const digest = (parsed.digest ?? "").trim().slice(0, DIGEST_CHAR_CAP);
-    const hooks = (parsed.hooks ?? [])
+    const digest = (output.digest ?? "").trim().slice(0, DIGEST_CHAR_CAP);
+    const hooks = (output.hooks ?? [])
       .filter((h): h is string => typeof h === "string" && h.trim().length > 0)
       .map((h) => h.trim().slice(0, HOOK_CHAR_CAP))
       .slice(0, MAX_HOOKS);
