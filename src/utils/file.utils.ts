@@ -3,6 +3,26 @@ import { join, extname, resolve } from "node:path";
 import { config } from "../config";
 import { isNodeError } from "../types";
 
+/** FFmpeg / OpenRouter scratch files for one render pass (prefix = reel id or
+ *  `draft_{uuid}`). Call after uploads so orphaned `{id}_final.mp4` etc. do not
+ *  accumulate in storage/processing/. */
+export async function cleanupRenderScratch(renderPrefix: string): Promise<void> {
+  const root = config.processingPath;
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const paths: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const name = entry.name;
+    if (
+      name === `${renderPrefix}.ass` ||
+      name.startsWith(`${renderPrefix}_`)
+    ) {
+      paths.push(join(root, name));
+    }
+  }
+  await cleanupFiles(paths);
+}
+
 /**
  * Ensure a directory exists, creating it if necessary
  */

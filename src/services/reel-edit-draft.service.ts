@@ -11,8 +11,10 @@ import { renderImageKenBurns, applyEditEffects, hasEditEffects, type RenderScene
 import { appendBrandedOutro } from "./reel-outro.service";
 import { generateImage, generateNarration } from "./openrouter-media.service";
 import { cdnUrlFor, uploadAudio, uploadImage, uploadSubtitles, uploadVideo } from "./s3.service";
-import { Reel, type IReel } from "../models";
-import { cleanupDirectory, cleanupFiles, ensureDir } from "../utils";
+import { Reel, type ICaptionStyle, type IReel } from "../models";
+import { mergeCaptionStyle } from "../utils/caption-style.utils";
+import { deleteFromS3 } from "./s3.service";
+import { cleanupDirectory, cleanupFiles, cleanupRenderScratch, ensureDir } from "../utils";
 
 const ACTIVE_STATUSES: IReel["status"][] = [
   "planning",
@@ -70,6 +72,66 @@ async function cleanupExistingDraft(reel: IReel): Promise<void> {
   });
   reel.editDraft = undefined;
   reel.markModified("editDraft");
+}
+
+async function deleteSupersededUrls(urls: (string | undefined)[]): Promise<void> {
+  const unique = [...new Set(urls.filter((url): url is string => Boolean(url)))];
+  await Promise.all(unique.map((url) => deleteFromS3(url).catch(() => {})));
+}
+
+/** Upload staged draft outputs to S3, update the reel doc, and delete replaced
+ *  objects so we do not rely on the 2h reconciliation sweep for every edit. */
+async function commitRenderOutputs(
+  reel: IReel,
+  preview: {
+    outputPath?: string;
+    subtitlesPath?: string;
+    sceneAssets: NonNullable<IReel["editDraft"]>["sceneAssets"];
+  }
+): Promise<void> {
+  const reelKey = reel._id.toString();
+  const superseded: string[] = [];
+
+  for (const item of preview.sceneAssets) {
+    const scene = reel.scenes[item.index];
+    if (!scene) continue;
+    if (item.assetPath) {
+      if (scene.assetUrl) superseded.push(scene.assetUrl);
+      scene.assetUrl = await uploadImage(
+        await readFile(item.assetPath),
+        "compositions",
+        `${reelKey}_${item.index}.png`
+      );
+    }
+    if (item.audioPath) {
+      if (scene.audioUrl) superseded.push(scene.audioUrl);
+      scene.audioUrl = await uploadAudio(
+        await readFile(item.audioPath),
+        `${reelKey}_${item.index}.mp3`
+      );
+    }
+  }
+
+  if (preview.outputPath) {
+    if (reel.outputUrl) superseded.push(reel.outputUrl);
+    reel.outputUrl = await uploadVideo(
+      await readFile(preview.outputPath),
+      "reels",
+      `${reelKey}.mp4`
+    );
+  }
+
+  if (preview.subtitlesPath) {
+    reel.subtitlesUrl = await uploadSubtitles(
+      await readFile(preview.subtitlesPath, "utf-8"),
+      reelKey
+    );
+  }
+
+  reel.status = "completed";
+  reel.progress = 100;
+  reel.markModified("scenes");
+  await deleteSupersededUrls(superseded);
 }
 
 export async function getDraftAssetPath(draftId: string, filename: string): Promise<string> {
@@ -266,6 +328,7 @@ export async function createSceneEditDraft(
   reel.editDraft.subtitlesUrl = localAssetUrl(draftId, basename(preview.subtitlesPath));
   await reel.save();
   await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+  await cleanupRenderScratch(`draft_${draftId}`);
   return reel;
 }
 
@@ -339,6 +402,7 @@ export async function createReelEditDraft(
   reel.editDraft.subtitlesUrl = localAssetUrl(draftId, basename(preview.subtitlesPath));
   await reel.save();
   await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+  await cleanupRenderScratch(`draft_${draftId}`);
   return reel;
 }
 
@@ -346,25 +410,45 @@ export async function saveEditDraft(reelId: string): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
   const draft = reel.editDraft;
-  if (!draft) throw new Error("No pending edit draft to save");
+  if (!draft?.outputPath || !draft.subtitlesPath) {
+    throw new Error("No pending edit draft to save");
+  }
 
-  for (const item of draft.sceneAssets) {
-    const scene = reel.scenes[item.index];
-    if (!scene) continue;
-    if (item.assetPath) {
-      scene.assetUrl = await uploadImage(await readFile(item.assetPath), "compositions", `${reelId}_${item.index}.png`);
-    }
-    if (item.audioPath) {
-      scene.audioUrl = await uploadAudio(await readFile(item.audioPath), `${reelId}_${item.index}.mp3`);
-    }
-  }
-  if (draft.outputPath) reel.outputUrl = await uploadVideo(await readFile(draft.outputPath), "reels", `${reelId}.mp4`);
-  if (draft.subtitlesPath) {
-    reel.subtitlesUrl = await uploadSubtitles(await readFile(draft.subtitlesPath, "utf-8"), reelId);
-  }
-  reel.status = "completed";
-  reel.progress = 100;
+  await commitRenderOutputs(reel, {
+    outputPath: draft.outputPath,
+    subtitlesPath: draft.subtitlesPath,
+    sceneAssets: draft.sceneAssets,
+  });
   await cleanupExistingDraft(reel);
+  await reel.save();
+  return reel;
+}
+
+/** Persist caption style, re-render locally, upload to S3, and delete the
+ *  previous output video — no intermediate editDraft for the client to save. */
+export async function applyCaptionsAndRender(
+  reelId: string,
+  patch: ICaptionStyle
+): Promise<IReel> {
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+  if (!reel.scenes.length) throw new Error("Nothing to render — plan the reel first");
+
+  reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
+  reel.markModified("captionStyle");
+
+  await cleanupExistingDraft(reel);
+  const draftId = randomUUID();
+  const rootDir = join(config.processingPath, "edit-drafts", reelId, draftId);
+  await ensureDir(rootDir);
+
+  const localFiles: string[] = [];
+  const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
+
+  await commitRenderOutputs(reel, preview);
+  await cleanupDirectory(rootDir).catch(() => {});
+  await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+  await cleanupRenderScratch(`draft_${draftId}`);
   await reel.save();
   return reel;
 }

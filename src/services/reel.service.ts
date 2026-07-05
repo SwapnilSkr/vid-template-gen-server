@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion } from "../models";
 import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
-import { ensureDir, cleanupFiles } from "../utils";
+import { ensureDir, cleanupFiles, cleanupRenderScratch } from "../utils";
 import { getErrorMessage } from "../types";
 import { planHorrorSeries, planReel, planRedditStory, structureUserScript } from "./reel-script.service";
 import { getRecipe, pickStyle, type NicheRecipe } from "../config/niche-styles";
@@ -468,6 +468,7 @@ export async function processReel(reelId: string): Promise<void> {
     await produceImageReel(reel, recipe, measuredCosts, localFiles);
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
     await updateStatus(reelId, "failed", 0, getErrorMessage(error));
     throw error;
   }
@@ -511,6 +512,7 @@ export async function processReelProduce(reelId: string): Promise<void> {
     await produceImageReel(reel, recipe, measuredCosts, localFiles);
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
     await updateStatus(reelId, "failed", 0, getErrorMessage(error));
     throw error;
   }
@@ -874,6 +876,7 @@ async function produceImageReel(
     if (config.autoPublishYoutube) await enqueuePublish(reelId, "youtube");
 
     await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
     console.log(`🎉 Reel complete: ${reel._id} (${result.totalDuration.toFixed(1)}s)`);
   }
 }
@@ -995,9 +998,11 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     if (config.autoPublishYoutube) await enqueuePublish(reelId, "youtube");
 
     await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
     console.log(`🎉 Reddit reel complete: ${reel._id} (${result.totalDuration.toFixed(1)}s)`);
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
     await updateStatus(reelId, "failed", 0, getErrorMessage(error));
     throw error;
   }
