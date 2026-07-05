@@ -2,6 +2,7 @@ import { Worker, type Job } from "bullmq";
 import { redisConnection } from "./connection";
 import { config } from "../config";
 import { getErrorMessage } from "../types";
+import { Reel } from "../models";
 import { processReel, processReelPlan, processReelProduce } from "../services/reel.service";
 import {
   processComposition,
@@ -33,6 +34,13 @@ export function startWorkers(): void {
   if (started) return;
   started = true;
 
+  const workerBaseOptions = {
+    connection: redisConnection,
+    lockDuration: 120_000,
+    stalledInterval: 30_000,
+    maxStalledCount: 5,
+  };
+
   const reelWorker = new Worker<ReelJobData, void, "process">(
     "reel-processing",
     async (job: Job<ReelJobData, void, "process">) => {
@@ -41,7 +49,7 @@ export function startWorkers(): void {
       else if (stage === "produce") await processReelProduce(reelId);
       else await processReel(reelId);
     },
-    { connection: redisConnection, concurrency: config.queueConcurrency }
+    { ...workerBaseOptions, concurrency: config.queueConcurrency }
   );
 
   const compositionWorker = new Worker<CompositionJobData, void, "process">(
@@ -49,7 +57,7 @@ export function startWorkers(): void {
     async (job: Job<CompositionJobData, void, "process">) => {
       await processComposition(job.data.compositionId);
     },
-    { connection: redisConnection, concurrency: config.queueConcurrency }
+    { ...workerBaseOptions, concurrency: config.queueConcurrency }
   );
 
   const compositionRegenerateWorker = new Worker<
@@ -61,7 +69,7 @@ export function startWorkers(): void {
     async (job: Job<RegenerateCompositionJobData, void, "regenerate">) => {
       await regenerateCompositionAsync(job.data.compositionId, job.data.delays);
     },
-    { connection: redisConnection, concurrency: config.queueConcurrency }
+    { ...workerBaseOptions, concurrency: config.queueConcurrency }
   );
 
   const publishWorker = new Worker<PublishJobData, void, "publish">(
@@ -71,7 +79,7 @@ export function startWorkers(): void {
         await publishReelToYouTube(job.data.reelId, job.data.channelId);
       }
     },
-    { connection: redisConnection, concurrency: config.queueConcurrency }
+    { ...workerBaseOptions, concurrency: config.queueConcurrency }
   );
 
   const revoiceWorker = new Worker<RevoiceJobData, void, "revoice">(
@@ -79,7 +87,7 @@ export function startWorkers(): void {
     async (job: Job<RevoiceJobData, void, "revoice">) => {
       await processRevoice(job.data.reelId, job.data.variantIds);
     },
-    { connection: redisConnection, concurrency: config.queueConcurrency }
+    { ...workerBaseOptions, concurrency: config.queueConcurrency }
   );
 
   const ytImportWorker = new Worker<YtImportJobData, void, "process">(
@@ -87,7 +95,7 @@ export function startWorkers(): void {
     async (job: Job<YtImportJobData, void, "process">) => {
       await processYtImport(job.data.importId);
     },
-    { connection: redisConnection, concurrency: 1 }
+    { ...workerBaseOptions, concurrency: 1 }
   );
 
   const ytImportFramesWorker = new Worker<YtImportFramesJobData, void, "extract">(
@@ -95,8 +103,20 @@ export function startWorkers(): void {
     async (job: Job<YtImportFramesJobData, void, "extract">) => {
       await extractFramesForImport(job.data.importId);
     },
-    { connection: redisConnection, concurrency: 1 }
+    { ...workerBaseOptions, concurrency: 1 }
   );
+
+  reelWorker.on("failed", async (job, error) => {
+    const reelId = job?.data.reelId;
+    if (!reelId) return;
+    await Reel.findByIdAndUpdate(reelId, {
+      status: "failed",
+      progress: 0,
+      error: getErrorMessage(error),
+    }).catch((updateError: unknown) => {
+      console.error(`Could not mark reel ${reelId} failed:`, getErrorMessage(updateError));
+    });
+  });
 
   for (const [name, worker] of [
     ["reel", reelWorker],
