@@ -27,6 +27,10 @@ export {
   type IStoryBible,
   type IHorrorReferencePayload,
   type ReelMotionMode,
+  type ICaptionStyle,
+  type IAudioPost,
+  type IEditEffects,
+  type ReelPipelineMode,
 } from "./reel.model";
 export { Story, type IStory, type StorySource } from "./story.model";
 export {

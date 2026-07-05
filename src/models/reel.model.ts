@@ -20,6 +20,7 @@ export type ReelStrategy =
 export type ReelStatus =
   | "pending"
   | "planning" // LLM writing script + scene graph
+  | "plan_review" // paused after cheap plan; awaiting human review/approval
   | "generating_assets" // image generation
   | "generating_audio" // TTS narration
   | "aligning" // caption timing from actual audio durations
@@ -27,6 +28,11 @@ export type ReelStatus =
   | "uploading"
   | "completed"
   | "failed";
+
+/** Whether the pipeline pauses for human review after planning.
+ *  - review: stop at `plan_review` after the cheap plan; produce on approval.
+ *  - auto:   plan chains straight into production (high-volume, e.g. Reddit). */
+export type ReelPipelineMode = "auto" | "review";
 
 /** Motion config for animating a still.
  *  - ken_burns: classic pan/zoom (fake motion)
@@ -62,6 +68,47 @@ export interface ICaptionCue {
   t: number; // start (s, global timeline)
   end: number; // end (s, global timeline)
   text: string;
+}
+
+/** Editable caption look — threaded into `buildPortraitKaraoke`'s ASS style.
+ *  Every field is optional; unset falls back to the renderer's built-in default
+ *  (Arial 64, white idle / amber active, MarginV 320, 4-word chunks) so an
+ *  untouched reel renders exactly as before. Manually edited by the user
+ *  (non-AI) in the Studio's live caption editor. */
+export interface ICaptionStyle {
+  fontName?: string;
+  fontSize?: number;
+  primaryColor?: string; // idle word, #RRGGBB
+  activeColor?: string; // spoken word highlight, #RRGGBB (== primary → no highlight)
+  outlineColor?: string; // #RRGGBB
+  outlineWidth?: number;
+  shadow?: number;
+  alignment?: number; // ASS numpad 1-9 (2 = bottom-center)
+  marginV?: number; // vertical margin from the alignment edge (px @ 1080×1920)
+  marginL?: number;
+  marginR?: number;
+  chunkSize?: number; // words shown together (1 = one word at a time)
+  bold?: boolean;
+  uppercase?: boolean; // render caption text ALL CAPS
+  animation?: "none" | "pop";
+}
+
+/** Voice post-processing controls (applied at render — no TTS re-spend). */
+export interface IAudioPost {
+  voiceProfile?: "horror" | "none"; // narration FX profile (generateNarration profile)
+  bedVolume?: number; // 0-1 mix level for the horror audio bed (horrorAudioKey)
+}
+
+/** Co-creatable cinematic editing effects applied as a final full-video pass
+ *  (applyEditEffects in reel-render.service.ts) — render-only, so toggling any
+ *  of these just needs a free re-render, no asset regeneration. All optional;
+ *  an unset/empty object leaves the reel exactly as the base render. */
+export interface IEditEffects {
+  rain?: boolean; // procedural animated rain overlay (white alpha streaks)
+  rainIntensity?: number; // 0-1 opacity of the rain (default ~0.5)
+  grain?: number; // 0-1.5 extra film grain (0 = none)
+  vignette?: number; // 0-1 extra vignette darkening (0 = none)
+  letterbox?: boolean; // cinematic black bars top + bottom
 }
 
 /** Explicit voice pick made at creation time — overrides the tier default
@@ -176,7 +223,13 @@ export interface IReel extends Document {
   strategy: ReelStrategy;
   style: string; // visual style suffix (sepia, cinematic, ...)
   artStyleId?: string; // reference-art style (config/art-styles.ts) if chosen
+  presetId?: string; // style preset (config/style-presets.ts) that seeded this reel
   motionMode?: ReelMotionMode; // per-reel motion policy
+  captionStyle?: ICaptionStyle; // editable caption look (Studio)
+  audioPost?: IAudioPost; // voice post-processing / bed mix
+  editEffects?: IEditEffects; // cinematic edit FX (rain/grain/vignette/letterbox), render-only
+  pipelineMode?: ReelPipelineMode; // gate after planning ("review") or run through ("auto")
+  providedScript?: string; // user-pasted story, structured into scenes at plan time
   tier: "cheap" | "value" | "premium";
   storySource?: "llm" | "hybrid" | "verbatim";
   genre?: string;
@@ -187,6 +240,7 @@ export interface IReel extends Document {
   scenes: IScene[];
   redditStory?: IRedditStoryPayload;
   horrorReference?: IHorrorReferencePayload;
+  horrorReferenceId?: string; // user-picked reference (feeds the planner before horrorReference resolves)
   seriesId?: string;
   partNumber?: number;
   partCount?: number;
@@ -208,6 +262,7 @@ export interface IReel extends Document {
   progress: number;
   outputUrl?: string;
   subtitlesUrl?: string;
+  outroAudioUrl?: string; // cached outro narration — reused on render-only re-runs
   review?: IReelReviewPackage;
   costUsd?: number;
   costBreakdown?: ICostBreakdown;
@@ -255,6 +310,46 @@ const captionCueSchema = new Schema<ICaptionCue>(
     t: { type: Number, required: true },
     end: { type: Number, required: true },
     text: { type: String, required: true },
+  },
+  { _id: false }
+);
+
+const captionStyleSchema = new Schema<ICaptionStyle>(
+  {
+    fontName: String,
+    fontSize: Number,
+    primaryColor: String,
+    activeColor: String,
+    outlineColor: String,
+    outlineWidth: Number,
+    shadow: Number,
+    alignment: Number,
+    marginV: Number,
+    marginL: Number,
+    marginR: Number,
+    chunkSize: Number,
+    bold: Boolean,
+    uppercase: Boolean,
+    animation: { type: String, enum: ["none", "pop"] },
+  },
+  { _id: false }
+);
+
+const audioPostSchema = new Schema<IAudioPost>(
+  {
+    voiceProfile: { type: String, enum: ["horror", "none"] },
+    bedVolume: { type: Number, min: 0, max: 1 },
+  },
+  { _id: false }
+);
+
+const editEffectsSchema = new Schema<IEditEffects>(
+  {
+    rain: Boolean,
+    rainIntensity: { type: Number, min: 0, max: 1 },
+    grain: { type: Number, min: 0, max: 1.5 },
+    vignette: { type: Number, min: 0, max: 1 },
+    letterbox: Boolean,
   },
   { _id: false }
 );
@@ -408,10 +503,16 @@ const reelSchema = new Schema<IReel>(
     },
     style: { type: String, default: "cinematic" },
     artStyleId: String,
+    presetId: String,
     motionMode: {
       type: String,
       enum: ["ken_burns", "parallax", "ai_hybrid", "ai_full"],
     },
+    captionStyle: captionStyleSchema,
+    audioPost: audioPostSchema,
+    editEffects: editEffectsSchema,
+    pipelineMode: { type: String, enum: ["auto", "review"], default: "auto" },
+    providedScript: String,
     tier: { type: String, enum: ["cheap", "value", "premium"], default: "cheap" },
     storySource: { type: String, enum: ["llm", "hybrid", "verbatim"] },
     genre: String,
@@ -421,6 +522,7 @@ const reelSchema = new Schema<IReel>(
     scenes: { type: [sceneSchema], default: [] },
     redditStory: redditStorySchema,
     horrorReference: horrorReferenceSchema,
+    horrorReferenceId: String,
     seriesId: { type: String, index: true },
     partNumber: Number,
     partCount: Number,
@@ -437,6 +539,7 @@ const reelSchema = new Schema<IReel>(
       enum: [
         "pending",
         "planning",
+        "plan_review",
         "generating_assets",
         "generating_audio",
         "aligning",
@@ -450,6 +553,7 @@ const reelSchema = new Schema<IReel>(
     progress: { type: Number, default: 0, min: 0, max: 100 },
     outputUrl: String,
     subtitlesUrl: String,
+    outroAudioUrl: String,
     review: reelReviewSchema,
     costUsd: Number,
     costBreakdown: costBreakdownSchema,
