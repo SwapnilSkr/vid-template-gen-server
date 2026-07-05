@@ -211,6 +211,7 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       seriesId: reel.seriesId,
       partNumber: reel.partNumber,
       partCount: reel.partCount,
+      updatedAt: reel.updatedAt,
       outputUrl: reel.outputUrl,
       subtitlesUrl: reel.subtitlesUrl,
       hook: reel.hook,
