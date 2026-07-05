@@ -95,7 +95,7 @@ export interface ICaptionStyle {
 
 /** Voice post-processing controls (applied at render — no TTS re-spend). */
 export interface IAudioPost {
-  voiceProfile?: "horror" | "none"; // narration FX profile (generateNarration profile)
+  voiceProfile?: "none" | "horror" | "whisper" | "phone" | "tape" | "distant"; // narration FX profile
   bedVolume?: number; // 0-1 mix level for the horror audio bed (horrorAudioKey)
 }
 
@@ -109,6 +109,10 @@ export interface IEditEffects {
   grain?: number; // 0-1.5 extra film grain (0 = none)
   vignette?: number; // 0-1 extra vignette darkening (0 = none)
   letterbox?: boolean; // cinematic black bars top + bottom
+  desaturate?: number; // 0-1 cold desaturation pass
+  flicker?: number; // 0-1 unstable light flicker
+  chromatic?: number; // 0-1 red/blue channel shift
+  scanlines?: number; // 0-1 analog scanline overlay
 }
 
 /** Explicit voice pick made at creation time — overrides the tier default
@@ -337,7 +341,7 @@ const captionStyleSchema = new Schema<ICaptionStyle>(
 
 const audioPostSchema = new Schema<IAudioPost>(
   {
-    voiceProfile: { type: String, enum: ["horror", "none"] },
+    voiceProfile: { type: String, enum: ["none", "horror", "whisper", "phone", "tape", "distant"] },
     bedVolume: { type: Number, min: 0, max: 1 },
   },
   { _id: false }
@@ -350,6 +354,10 @@ const editEffectsSchema = new Schema<IEditEffects>(
     grain: { type: Number, min: 0, max: 1.5 },
     vignette: { type: Number, min: 0, max: 1 },
     letterbox: Boolean,
+    desaturate: { type: Number, min: 0, max: 1 },
+    flicker: { type: Number, min: 0, max: 1 },
+    chromatic: { type: Number, min: 0, max: 1 },
+    scanlines: { type: Number, min: 0, max: 1 },
   },
   { _id: false }
 );

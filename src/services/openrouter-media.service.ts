@@ -33,6 +33,7 @@ export interface MediaUsageCost {
 }
 
 export type MediaUsageCallback = (usage: MediaUsageCost) => void;
+export type NarrationProfile = "horror" | "reddit" | "whisper" | "phone" | "tape" | "distant";
 
 interface ImageModelCapability {
   supported_parameters?: Record<string, { type: string; values?: string[] }>;
@@ -318,7 +319,7 @@ export async function generateNarration(
     voice?: string;
     format?: "mp3" | "pcm";
     outputDir?: string;
-    profile?: "horror" | "reddit";
+    profile?: NarrationProfile;
     onUsage?: MediaUsageCallback;
   } = {}
 ): Promise<{ audioPath: string; duration: number }> {
@@ -353,7 +354,7 @@ async function generateNarrationWithChoice(
   text: string,
   targetDir: string,
   choice: TtsChoice,
-  profile?: "horror" | "reddit",
+  profile?: NarrationProfile,
   onUsage?: MediaUsageCallback
 ): Promise<{ audioPath: string; duration: number }> {
   const { model, voice, format } = choice; // some models (Gemini) only emit pcm
@@ -372,7 +373,7 @@ async function generateNarrationWithChoice(
           input: text,
           voice,
           response_format: format,
-          ...(profile === "horror" ? { speed: 0.9 } : {}),
+          ...(isHorrorNarrationProfile(profile) ? { speed: profile === "whisper" || profile === "distant" ? 0.86 : 0.9 } : {}),
           ...(profile === "horror" && model === "microsoft/mai-voice-2"
             ? {
                 provider: {
@@ -417,8 +418,8 @@ async function generateNarrationWithChoice(
     const trimmedPath = join(targetDir, generateFilename("narration_trimmed", "mp3"));
     await trimSilence(mp3Src, trimmedPath);
     const audioPath = join(targetDir, generateFilename("narration", "mp3"));
-    if (profile === "horror") {
-      await applyHorrorVoiceTreatment(trimmedPath, audioPath);
+    if (isHorrorNarrationProfile(profile)) {
+      await applyHorrorVoiceTreatment(trimmedPath, audioPath, profile);
       await unlink(trimmedPath).catch(() => {});
     } else if (profile === "reddit") {
       await applyRedditVoiceTreatment(trimmedPath, audioPath);
@@ -505,19 +506,80 @@ function trimSilence(input: string, output: string): Promise<string> {
  * end, add a small room echo, and normalize so captions/render timing still
  * behave predictably.
  */
-function applyHorrorVoiceTreatment(input: string, output: string): Promise<string> {
-  const filters = [
-    "aresample=48000",
-    "asetrate=44160",
-    "aresample=48000",
-    "atempo=1.087",
-    "highpass=f=65",
-    "lowpass=f=3300",
-    "tremolo=f=4.8:d=0.035",
-    "aecho=0.72:0.45:55|115:0.12|0.07",
-    "acompressor=threshold=-22dB:ratio=2.2:attack=8:release=140",
-    "loudnorm=I=-18:LRA=8:TP=-1.5",
-  ].join(",");
+function isHorrorNarrationProfile(profile?: NarrationProfile): profile is Exclude<NarrationProfile, "reddit"> {
+  return profile === "horror" || profile === "whisper" || profile === "phone" || profile === "tape" || profile === "distant";
+}
+
+function horrorVoiceFilters(profile: Exclude<NarrationProfile, "reddit">): string {
+  const profiles: Record<Exclude<NarrationProfile, "reddit">, string[]> = {
+    horror: [
+      "aresample=48000",
+      "asetrate=44160",
+      "aresample=48000",
+      "atempo=1.087",
+      "highpass=f=65",
+      "lowpass=f=3300",
+      "tremolo=f=4.8:d=0.035",
+      "aecho=0.72:0.45:55|115:0.12|0.07",
+      "acompressor=threshold=-22dB:ratio=2.2:attack=8:release=140",
+      "loudnorm=I=-18:LRA=8:TP=-1.5",
+    ],
+    whisper: [
+      "aresample=48000",
+      "asetrate=43680",
+      "aresample=48000",
+      "atempo=1.099",
+      "highpass=f=120",
+      "lowpass=f=2400",
+      "equalizer=f=6200:t=q:w=1.4:g=3.8",
+      "tremolo=f=6.2:d=0.05",
+      "aecho=0.58:0.38:42|88:0.10|0.05",
+      "acompressor=threshold=-25dB:ratio=2.8:attack=10:release=190",
+      "loudnorm=I=-19:LRA=7:TP=-1.8",
+    ],
+    phone: [
+      "aresample=48000",
+      "highpass=f=320",
+      "lowpass=f=2900",
+      "equalizer=f=1200:t=q:w=1.0:g=3.5",
+      "acrusher=bits=10:mix=0.22",
+      "acompressor=threshold=-20dB:ratio=3.4:attack=4:release=90",
+      "loudnorm=I=-17:LRA=6:TP=-1.5",
+    ],
+    tape: [
+      "aresample=48000",
+      "asetrate=44600",
+      "aresample=48000",
+      "atempo=1.076",
+      "highpass=f=85",
+      "lowpass=f=3600",
+      "tremolo=f=5.5:d=0.025",
+      "acrusher=bits=13:mix=0.12",
+      "aecho=0.62:0.35:70|140:0.08|0.045",
+      "acompressor=threshold=-23dB:ratio=2.4:attack=8:release=150",
+      "loudnorm=I=-18:LRA=8:TP=-1.6",
+    ],
+    distant: [
+      "aresample=48000",
+      "asetrate=43200",
+      "aresample=48000",
+      "atempo=1.111",
+      "highpass=f=55",
+      "lowpass=f=2100",
+      "aecho=0.82:0.62:120|240|390:0.18|0.10|0.055",
+      "acompressor=threshold=-26dB:ratio=2.1:attack=16:release=240",
+      "loudnorm=I=-20:LRA=9:TP=-1.8",
+    ],
+  };
+  return profiles[profile].join(",");
+}
+
+function applyHorrorVoiceTreatment(
+  input: string,
+  output: string,
+  profile: Exclude<NarrationProfile, "reddit">
+): Promise<string> {
+  const filters = horrorVoiceFilters(profile);
 
   return new Promise((resolve, reject) => {
     ffmpeg(input)
@@ -525,7 +587,7 @@ function applyHorrorVoiceTreatment(input: string, output: string): Promise<strin
       .outputOptions(["-c:a", "libmp3lame", "-q:a", "4"])
       .output(output)
       .on("end", () => resolve(output))
-      .on("error", (err) => reject(new Error(`Horror voice treatment failed: ${err.message}`)))
+      .on("error", (err) => reject(new Error(`Horror voice treatment (${profile}) failed: ${err.message}`)))
       .run();
   });
 }

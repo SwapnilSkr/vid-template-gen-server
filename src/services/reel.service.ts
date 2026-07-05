@@ -443,6 +443,12 @@ function narrationForTts(text: string, niche: string): string {
   return paced;
 }
 
+function narrationProfileFor(reel: IReel): "horror" | "whisper" | "phone" | "tape" | "distant" | undefined {
+  if (!isHorrorNiche(reel.niche)) return undefined;
+  const profile = reel.audioPost?.voiceProfile ?? "horror";
+  return profile === "none" ? undefined : profile;
+}
+
 function isHorrorNiche(niche: string): boolean {
   return niche.startsWith("horror");
 }
@@ -682,7 +688,7 @@ async function produceImageReel(
         model: tts.model,
         voice: tts.voice,
         format: tts.format,
-        profile: isHorrorNiche(reel.niche) ? "horror" : undefined,
+        profile: narrationProfileFor(reel),
         onUsage: (usage) => {
           measuredCosts.push({
             label: `Narration ${i + 1}`,

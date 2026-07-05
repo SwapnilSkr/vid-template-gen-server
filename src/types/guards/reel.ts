@@ -12,6 +12,10 @@ export const EditEffectsBody = t.Object({
   grain: t.Optional(t.Number({ minimum: 0, maximum: 1.5 })),
   vignette: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
   letterbox: t.Optional(t.Boolean()),
+  desaturate: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
+  flicker: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
+  chromatic: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
+  scanlines: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
 });
 
 export const CreateReelBody = t.Object({
@@ -139,7 +143,16 @@ export const UpdateReelSettingsBody = t.Object({
   ),
   audioPost: t.Optional(
     t.Object({
-      voiceProfile: t.Optional(t.Union([t.Literal("horror"), t.Literal("none")])),
+      voiceProfile: t.Optional(
+        t.Union([
+          t.Literal("none"),
+          t.Literal("horror"),
+          t.Literal("whisper"),
+          t.Literal("phone"),
+          t.Literal("tape"),
+          t.Literal("distant"),
+        ])
+      ),
       bedVolume: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
     })
   ),

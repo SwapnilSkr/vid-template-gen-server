@@ -167,6 +167,7 @@ export async function updateReelSettings(
   assertEditable(reel);
   const prevArt = reel.artStyleId;
   const prevModel = reel.imageModelOverride;
+  const prevVoiceProfile = reel.audioPost?.voiceProfile;
 
   if (patch.artStyleId !== undefined) reel.artStyleId = patch.artStyleId;
   if (patch.imageModel !== undefined) reel.imageModelOverride = patch.imageModel;
@@ -193,7 +194,9 @@ export async function updateReelSettings(
   const clearsImages =
     (patch.artStyleId !== undefined && patch.artStyleId !== prevArt) ||
     (patch.imageModel !== undefined && patch.imageModel !== prevModel);
-  const clearsAudio = patch.voice !== undefined;
+  const clearsAudio =
+    patch.voice !== undefined ||
+    (patch.audioPost?.voiceProfile !== undefined && patch.audioPost.voiceProfile !== prevVoiceProfile);
   const unset: Record<string, ""> = {};
   if (clearsImages) unset["scenes.$[].assetUrl"] = "";
   if (clearsAudio) unset["scenes.$[].audioUrl"] = "";
