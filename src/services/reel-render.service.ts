@@ -7,6 +7,7 @@ import { ensureDir } from "../utils";
 import { getAudioDuration } from "./openrouter-media.service";
 import { cdnUrlFor, listKeys } from "./s3.service";
 import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
+import { captionStylePlain } from "../utils/caption-style.utils";
 import { FONTS_DIR, HAS_FONTS_DIR } from "../config/fonts";
 import type { ISceneMotion, ICaptionStyle, IEditEffects } from "../models";
 
@@ -145,7 +146,7 @@ async function renderImageKenBurnsInner(
   await writeFile(assPath, assContent, "utf-8");
 
   const captionedPath = join(config.processingPath, `${reelId}_captioned.mp4`);
-  await burnSubtitles(joinedPath, assPath, captionedPath);
+  await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
   tmp.push(captionedPath);
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
@@ -326,10 +327,12 @@ export function assembleCrossfade(
       aChain = aPrev;
     }
 
-    // gentle edges only (no per-scene black dips); always emit real labels
+    // Fade to black at the very end only. The intro fade-IN is applied later, in
+    // burnSubtitles, so it fades the captions in with the image rather than
+    // leaving them lit over a black opening frame. Always emit real labels.
     const fadeOutStart = Math.max(total - EDGE_FADE, 0).toFixed(2);
     filters.push(
-      `[${vChain}]fade=t=in:st=0:d=${EDGE_FADE},fade=t=out:st=${fadeOutStart}:d=${EDGE_FADE}[vout]`
+      `[${vChain}]fade=t=out:st=${fadeOutStart}:d=${EDGE_FADE}[vout]`
     );
     filters.push(`[${aChain}]anull[aout]`);
 
@@ -349,13 +352,25 @@ export function assembleCrossfade(
   });
 }
 
-export function burnSubtitles(video: string, assPath: string, out: string): Promise<string> {
+export function burnSubtitles(
+  video: string,
+  assPath: string,
+  out: string,
+  fadeIn = 0
+): Promise<string> {
   const escapedAss = assPath.replace(/'/g, "\\'");
   const fontsdir = HAS_FONTS_DIR ? `:fontsdir='${FONTS_DIR.replace(/'/g, "\\'")}'` : "";
+  // Fade the composited frame (image + burned captions) in together. The intro
+  // fade lives HERE, after the burn — never before it — so captions can't flash
+  // at full opacity over a still-black frame at t=0 ("captions before the image").
+  const vf =
+    fadeIn > 0
+      ? `ass='${escapedAss}'${fontsdir},fade=t=in:st=0:d=${fadeIn}`
+      : `ass='${escapedAss}'${fontsdir}`;
   return new Promise((resolve, reject) => {
     ffmpeg(video)
       .outputOptions([
-        "-vf", `ass='${escapedAss}'${fontsdir}`,
+        "-vf", vf,
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "21",
@@ -712,7 +727,7 @@ function wordWeight(w: string): number {
   return Math.max(letters, 1);
 }
 
-/** #RRGGBB → ASS &HAABBGGRR (opaque). Invalid input falls back to white. */
+/** #RRGGBB → ASS style colour (&HAABBGGRR, opaque). */
 function hexToAssColor(hex?: string): string {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex ?? "");
   if (!m) return "&H00FFFFFF";
@@ -722,16 +737,43 @@ function hexToAssColor(hex?: string): string {
   return `&H00${bb}${gg}${rr}`.toUpperCase();
 }
 
+/** #RRGGBB → ASS inline override colour (`&HBBGGRR&` — libass requires the
+ *  trailing ampersand; see reel-gameplay bouncing captions). */
+function hexToAssInlineColor(hex?: string): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex ?? "");
+  if (!m) return "&HFFFFFF&";
+  const rr = m[1].slice(0, 2);
+  const gg = m[1].slice(2, 4);
+  const bb = m[1].slice(4, 6);
+  return `&H${bb}${gg}${rr}&`.toUpperCase();
+}
+
 export function buildPortraitKaraoke(
   scenes: { text: string; startTime: number; speech: number }[],
   captionStyle?: ICaptionStyle
 ): string {
   // Merge the requested style over the renderer's built-in default so any
-  // unset field renders exactly as before.
-  const s = { ...DEFAULT_CAPTION_STYLE, ...(captionStyle ?? {}) };
+  // unset field renders exactly as before. Vertical placement always uses
+  // bottom-center + MarginV (px from bottom) — matches Studio drag preview.
+  //
+  // captionStyle arrives as a Mongoose subdocument (reel.captionStyle); a raw
+  // spread of it copies NONE of the schema fields, so the whole custom look
+  // (font, colours, chunk size, caps) would silently fall back to the default.
+  // Flatten to a plain object first so the user's chosen style actually burns.
+  const style = captionStylePlain(captionStyle);
+  const s = {
+    ...DEFAULT_CAPTION_STYLE,
+    ...style,
+    alignment: 2,
+    marginV: Math.round(
+      Math.min(Math.max(style.marginV ?? DEFAULT_CAPTION_STYLE.marginV, 0), 1900)
+    ),
+  };
   const IDLE = hexToAssColor(s.primaryColor);
   const ACTIVE = hexToAssColor(s.activeColor);
   const OUTLINE = hexToAssColor(s.outlineColor);
+  const IDLE_INLINE = hexToAssInlineColor(s.primaryColor);
+  const ACTIVE_INLINE = hexToAssInlineColor(s.activeColor);
   const CHUNK = Math.max(1, Math.round(s.chunkSize));
   const bold = s.bold ? -1 : 0;
 
@@ -780,7 +822,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       const text = chunk
         .map((w, k) => {
           const isActive = k === activeInChunk;
-          return `{\\1c${isActive ? ACTIVE : IDLE}}${isActive ? pop : ""}${w}`;
+          // One word on screen at a time → always use primary (text) colour.
+          const useHighlight = CHUNK > 1 && isActive;
+          return `{\\1c${useHighlight ? ACTIVE_INLINE : IDLE_INLINE}}${useHighlight ? pop : ""}${w}`;
         })
         .join(" ");
       lines.push(

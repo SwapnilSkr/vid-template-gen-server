@@ -1,4 +1,5 @@
 import { Reel, type IReel, type ICaptionStyle, type IAudioPost, type IEditEffects, type ISceneMotion, type ReelMotionMode } from "../models";
+import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce } from "../queue/queues";
 
 // ============================================
@@ -210,7 +211,7 @@ export async function updateReelSettings(
 export async function updateCaptions(reelId: string, patch: ICaptionStyle): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
-  reel.captionStyle = { ...(reel.captionStyle ?? {}), ...patch };
+  reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
   reel.markModified("captionStyle");
   await reel.save();
   return reel;

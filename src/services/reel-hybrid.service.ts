@@ -145,7 +145,7 @@ async function renderHybridSceneInner(
   await writeFile(assPath, assContent, "utf-8");
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
-  await burnSubtitles(subtitleInputPath, assPath, finalPath);
+  await burnSubtitles(subtitleInputPath, assPath, finalPath, EDGE_FADE);
 
   return {
     videoPath: finalPath,
@@ -248,9 +248,11 @@ function assembleHybrid(
       }
     }
 
+    // Fade-out only; the intro fade-in is applied in burnSubtitles so it fades
+    // the captions in with the image, not over a black opening frame.
     const fadeOutStart = Math.max(total - EDGE_FADE, 0).toFixed(2);
     filters.push(
-      `[${vChain}]fade=t=in:st=0:d=${EDGE_FADE},fade=t=out:st=${fadeOutStart}:d=${EDGE_FADE}[vout]`
+      `[${vChain}]fade=t=out:st=${fadeOutStart}:d=${EDGE_FADE}[vout]`
     );
     filters.push(`[${aChain}]anull[aout]`);
 

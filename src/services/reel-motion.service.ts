@@ -14,6 +14,7 @@ import {
   FPS,
   TAIL,
   XFADE,
+  EDGE_FADE,
   assembleCrossfade,
   applyHorrorFinalMix,
   buildPortraitKaraoke,
@@ -133,7 +134,7 @@ async function renderMotionReelInner(
   await writeFile(assPath, assContent, "utf-8");
 
   const captionedPath = join(config.processingPath, `${reelId}_captioned.mp4`);
-  await burnSubtitles(joinedPath, assPath, captionedPath);
+  await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
   tmp.push(captionedPath);
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
