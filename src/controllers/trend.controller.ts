@@ -117,11 +117,15 @@ export async function triggerHorrorReferenceScoutController({
   set,
 }: TriggerHorrorReferenceScoutContext) {
   try {
-    const result = await scoutHorrorReferences(body.limit ?? 20);
+    const result = await scoutHorrorReferences({
+      limit: body.limit ?? 20,
+      refreshExisting: body.refreshExisting,
+      includeUsed: body.includeUsed,
+    });
     return {
       success: true,
       data: result,
-      message: `Horror reference scout complete: ${result.upserted} saved, ${result.skipped} skipped`,
+      message: `Horror reference scout complete: ${result.upserted} saved, ${result.skipped} skipped, ${result.skippedExisting} already stored, ${result.skippedUsed} already used`,
     };
   } catch (error: unknown) {
     set.status = 400;

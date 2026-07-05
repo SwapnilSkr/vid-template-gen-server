@@ -20,6 +20,8 @@ export interface IHorrorReference extends Document {
   textUrl?: string;
   excerpt: string;
   promptBrief: string;
+  sourceTextHash?: string;
+  sourceTextChars?: number;
   qualityScore: number;
   usedInReelIds: Types.ObjectId[];
   lastScrapedAt: Date;
@@ -58,6 +60,8 @@ const horrorReferenceSchema = new Schema<IHorrorReference>(
     textUrl: String,
     excerpt: { type: String, required: true },
     promptBrief: { type: String, required: true },
+    sourceTextHash: { type: String, trim: true, index: true },
+    sourceTextChars: { type: Number, min: 0 },
     qualityScore: { type: Number, default: 0, index: true },
     usedInReelIds: [{ type: Schema.Types.ObjectId, ref: "Reel" }],
     lastScrapedAt: { type: Date, default: () => new Date(), index: true },

@@ -34,6 +34,8 @@ export type TListHorrorReferencesQuery = typeof ListHorrorReferencesQuery.static
 
 export const TriggerHorrorReferenceScoutBody = t.Object({
   limit: t.Optional(t.Number()),
+  refreshExisting: t.Optional(t.Boolean()),
+  includeUsed: t.Optional(t.Boolean()),
 });
 
 export type TTriggerHorrorReferenceScoutBody =

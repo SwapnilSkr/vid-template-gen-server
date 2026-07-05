@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Types } from "mongoose";
 import {
   HorrorReference,
@@ -26,7 +27,15 @@ export interface HorrorReferenceScoutResult {
   scanned: number;
   upserted: number;
   skipped: number;
+  skippedExisting: number;
+  skippedUsed: number;
   errors: { sourceUrl: string; error: string }[];
+}
+
+export interface HorrorReferenceScoutOptions {
+  limit?: number;
+  refreshExisting?: boolean;
+  includeUsed?: boolean;
 }
 
 export interface ListHorrorReferencesInput {
@@ -47,6 +56,13 @@ export interface HorrorReferencePromptSeed {
 
 const GUTENDEX_HORROR_URL =
   "https://gutendex.com/books/?topic=horror&languages=en&mime_type=text%2Fplain";
+const GUTENDEX_REFERENCE_URLS = [
+  GUTENDEX_HORROR_URL,
+  "https://gutendex.com/books/?topic=ghost&languages=en&mime_type=text%2Fplain",
+  "https://gutendex.com/books/?topic=supernatural&languages=en&mime_type=text%2Fplain",
+  "https://gutendex.com/books/?topic=gothic&languages=en&mime_type=text%2Fplain",
+  "https://gutendex.com/books/?topic=occult&languages=en&mime_type=text%2Fplain",
+];
 
 function cleanText(text: string): string {
   return text
@@ -124,6 +140,10 @@ function promptBrief(book: GutendexBook, excerpt: string): string {
     .join("\n");
 }
 
+function textHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url, {
     headers: { Accept: "application/json", "User-Agent": "vid-template-gen horror-reference-scout" },
@@ -140,18 +160,47 @@ async function fetchText(url: string): Promise<string> {
   return res.text();
 }
 
-export async function scoutHorrorReferences(limit = 20): Promise<HorrorReferenceScoutResult> {
-  const result: HorrorReferenceScoutResult = { scanned: 0, upserted: 0, skipped: 0, errors: [] };
-  let next: string | null | undefined = GUTENDEX_HORROR_URL;
+export async function scoutHorrorReferences(
+  input: number | HorrorReferenceScoutOptions = 20
+): Promise<HorrorReferenceScoutResult> {
+  const options = typeof input === "number" ? { limit: input } : input;
+  const limit = options.limit ?? 20;
+  const result: HorrorReferenceScoutResult = {
+    scanned: 0,
+    upserted: 0,
+    skipped: 0,
+    skippedExisting: 0,
+    skippedUsed: 0,
+    errors: [],
+  };
+  const usedUrls = options.includeUsed ? new Set<string>() : await usedReferenceUrls();
+  const seenExternalIds = new Set<string>();
 
-  while (next && result.scanned < limit) {
+  for (const startUrl of GUTENDEX_REFERENCE_URLS) {
+    let next: string | null | undefined = startUrl;
+    while (next && result.scanned < limit) {
     const page: GutendexResponse = await fetchJson<GutendexResponse>(next);
     next = page.next;
     for (const book of page.results ?? []) {
       if (result.scanned >= limit) break;
-      result.scanned++;
       const sourceUrl = `https://www.gutenberg.org/ebooks/${book.id}`;
+      const externalId = `gutenberg:${book.id}`;
       try {
+        if (seenExternalIds.has(externalId)) {
+          result.skippedExisting++;
+          continue;
+        }
+        seenExternalIds.add(externalId);
+        if (usedUrls.has(sourceUrl)) {
+          result.skippedUsed++;
+          continue;
+        }
+        const exists = await HorrorReference.exists({ externalId });
+        if (exists && !options.refreshExisting) {
+          result.skippedExisting++;
+          continue;
+        }
+        result.scanned++;
         const url = textUrl(book);
         if (!url || !book.languages?.includes("en")) {
           result.skipped++;
@@ -165,7 +214,7 @@ export async function scoutHorrorReferences(limit = 20): Promise<HorrorReference
         const update = {
           source: "project_gutenberg" as const,
           sourceUrl,
-          externalId: `gutenberg:${book.id}`,
+          externalId,
           title: book.title,
           author: book.authors?.[0]?.name,
           language: book.languages?.[0],
@@ -177,6 +226,8 @@ export async function scoutHorrorReferences(limit = 20): Promise<HorrorReference
           textUrl: url,
           excerpt,
           promptBrief: promptBrief(book, excerpt),
+          sourceTextHash: textHash(excerpt),
+          sourceTextChars: excerpt.length,
           qualityScore: scoreReference(book, excerpt),
           lastScrapedAt: new Date(),
         };
@@ -191,6 +242,7 @@ export async function scoutHorrorReferences(limit = 20): Promise<HorrorReference
       }
     }
   }
+  }
 
   return result;
 }
@@ -201,6 +253,8 @@ export async function listHorrorReferences(
   const filter: Record<string, unknown> = {};
   if (input.status) filter.status = input.status;
   if (input.genre) filter.genreTags = input.genre;
+  const used = await usedReferenceUrls();
+  if (used.size) filter.sourceUrl = { $nin: [...used] };
   return HorrorReference.find(filter)
     .sort({ qualityScore: -1, downloads: -1, updatedAt: -1 })
     .limit(Math.min(input.limit ?? 50, 100));
