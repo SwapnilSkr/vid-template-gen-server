@@ -14,6 +14,7 @@ import { uploadImage } from "./s3.service";
 import { listTrendReferences } from "./trend-reference.service";
 import { getTrendDigest } from "./trend-insight.service";
 import { getRecipe } from "../config/niche-styles";
+import { fontFilePathByFamily } from "../config/fonts";
 
 export interface UpdateReelReviewInput {
   title?: string;
@@ -561,4 +562,108 @@ export async function useReelFrameAsThumbnail(
   } finally {
     await unlink(framePath).catch(() => {});
   }
+}
+
+export interface CustomThumbnailInput {
+  atSeconds: number;
+  text: string;
+  fontFamily?: string;
+  fontSize?: number;
+  color?: string;
+  outlineColor?: string;
+  outlineWidth?: number;
+  position?: "top" | "middle" | "bottom";
+  uppercase?: boolean;
+}
+
+/** #RRGGBB → ffmpeg drawtext color (0xRRGGBB). Falls back to white. */
+function hexToDrawColor(hex?: string, fallback = "0xFFFFFF"): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex ?? "");
+  return m ? `0x${m[1].toUpperCase()}` : fallback;
+}
+
+/** Escape a path for use inside an ffmpeg filtergraph option value. */
+function escapeFilterPath(p: string): string {
+  return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+}
+
+/** Manual thumbnail: a chosen video frame + custom overlay caption text in a
+ *  bundled font. A human alternative to the AI thumbnail — the user picks the
+ *  frame, the words, the font, size, color, and vertical position. */
+export async function useReelFrameWithText(
+  reelId: string,
+  input: CustomThumbnailInput
+): Promise<IReelReviewPackage> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
+
+  const current = reel.review ?? (await buildReelReviewPackage(reel));
+  await ensureDir(config.processingPath);
+  const framePath = join(config.processingPath, generateFilename("thumb_custom", "png"));
+  const textPath = join(config.processingPath, generateFilename("thumb_text", "txt"));
+
+  const text = input.uppercase ? input.text.toUpperCase() : input.text;
+  await writeFile(textPath, text, "utf-8");
+
+  const fontFile = fontFilePathByFamily(input.fontFamily);
+  const fontSize = Math.min(Math.max(input.fontSize ?? 96, 20), 400);
+  const color = hexToDrawColor(input.color, "0xFFFFFF");
+  const outlineColor = hexToDrawColor(input.outlineColor, "0x000000");
+  const outlineWidth = Math.min(Math.max(input.outlineWidth ?? 8, 0), 30);
+  const yExpr =
+    input.position === "top"
+      ? `${Math.round(THUMB_H * 0.08)}`
+      : input.position === "middle"
+        ? "(h-text_h)/2"
+        : `h-text_h-${Math.round(THUMB_H * 0.1)}`;
+
+  const drawtext = [
+    "drawtext=",
+    fontFile ? `fontfile='${escapeFilterPath(fontFile)}':` : "",
+    `textfile='${escapeFilterPath(textPath)}':`,
+    `fontsize=${fontSize}:`,
+    `fontcolor=${color}:`,
+    `borderw=${outlineWidth}:bordercolor=${outlineColor}:`,
+    "shadowcolor=0x000000@0.6:shadowx=2:shadowy=2:",
+    `x=(w-text_w)/2:y=${yExpr}`,
+  ].join("");
+
+  try {
+    await extractFrameWithText(reel.outputUrl, input.atSeconds, framePath, drawtext);
+    const thumbnailUrl = await uploadImage(
+      await readFile(framePath),
+      "reels",
+      `${reel._id}_thumbnail.png`
+    );
+    reel.review = { ...current, thumbnailUrl, updatedAt: new Date() };
+    await reel.save();
+    return reel.review;
+  } finally {
+    await unlink(framePath).catch(() => {});
+    await unlink(textPath).catch(() => {});
+  }
+}
+
+/** Same base composition as extractVideoFrame, with a drawtext overlay appended. */
+function extractFrameWithText(
+  videoUrl: string,
+  atSeconds: number,
+  output: string,
+  drawtext: string
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(videoUrl)
+      .seekInput(Math.max(atSeconds, 0))
+      .outputOptions([
+        "-vframes",
+        "1",
+        "-vf",
+        `split=2[bg][fg];[bg]scale=${THUMB_W}:${THUMB_H}:force_original_aspect_ratio=increase,crop=${THUMB_W}:${THUMB_H},gblur=sigma=28,eq=brightness=-0.08:saturation=0.85[back];[fg]scale=-2:${THUMB_H}:force_original_aspect_ratio=decrease[front];[back][front]overlay=(W-w)/2:(H-h)/2,${drawtext}`,
+      ])
+      .output(output)
+      .on("end", () => resolve(output))
+      .on("error", (err) => reject(new Error(`Custom thumbnail render failed: ${err.message}`)))
+      .run();
+  });
 }

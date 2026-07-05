@@ -21,7 +21,7 @@ import {
   type SceneTiming,
   type RenderResult,
 } from "./reel-render.service";
-import type { ISceneMotion } from "../models";
+import type { ISceneMotion, ICaptionStyle } from "../models";
 
 // ============================================
 // Motion engine — animates each scene's still into REAL movement instead of a
@@ -56,6 +56,7 @@ export interface MotionRenderOptions {
   horrorEffects?: boolean;
   comicEffects?: boolean;
   horrorAudioKey?: string;
+  captionStyle?: ICaptionStyle;
   /** per-scene image-to-video generation cost (fed into the cost ledger) */
   onMotionUsage?: (index: number, usage: Parameters<MediaUsageCallback>[0]) => void;
 }
@@ -125,7 +126,8 @@ async function renderMotionReelInner(
   tmp.push(joinedPath);
 
   const assContent = buildPortraitKaraoke(
-    timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech }))
+    timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech })),
+    options.captionStyle
   );
   const assPath = join(config.processingPath, `${reelId}.ass`);
   await writeFile(assPath, assContent, "utf-8");

@@ -1,11 +1,14 @@
 import ffmpeg from "fluent-ffmpeg";
+import { spawn } from "node:child_process";
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
 import { ensureDir } from "../utils";
 import { getAudioDuration } from "./openrouter-media.service";
 import { cdnUrlFor, listKeys } from "./s3.service";
-import type { ISceneMotion } from "../models";
+import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
+import { FONTS_DIR, HAS_FONTS_DIR } from "../config/fonts";
+import type { ISceneMotion, ICaptionStyle, IEditEffects } from "../models";
 
 export const W = 1080;
 export const H = 1920;
@@ -47,6 +50,7 @@ export interface RenderOptions {
   horrorEffects?: boolean;
   comicEffects?: boolean;
   horrorAudioKey?: string;
+  captionStyle?: ICaptionStyle;
 }
 
 /**
@@ -134,7 +138,8 @@ async function renderImageKenBurnsInner(
 
   // 4. Weighted karaoke captions from ACTUAL timings → ASS → burn.
   const assContent = buildPortraitKaraoke(
-    timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech }))
+    timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech })),
+    options.captionStyle
   );
   const assPath = join(config.processingPath, `${reelId}.ass`);
   await writeFile(assPath, assContent, "utf-8");
@@ -345,10 +350,12 @@ export function assembleCrossfade(
 }
 
 export function burnSubtitles(video: string, assPath: string, out: string): Promise<string> {
+  const escapedAss = assPath.replace(/'/g, "\\'");
+  const fontsdir = HAS_FONTS_DIR ? `:fontsdir='${FONTS_DIR.replace(/'/g, "\\'")}'` : "";
   return new Promise((resolve, reject) => {
     ffmpeg(video)
       .outputOptions([
-        "-vf", `ass='${assPath.replace(/'/g, "\\'")}'`,
+        "-vf", `ass='${escapedAss}'${fontsdir}`,
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "21",
@@ -373,6 +380,108 @@ function copyVideo(input: string, output: string): Promise<string> {
       .on("error", (err) => reject(new Error(`Final copy failed: ${err.message}`)))
       .run();
   });
+}
+
+// ============================================
+// Co-creatable cinematic edit effects — a single final full-video pass applied
+// over the fully-assembled reel body (before the branded outro). Render-only:
+// toggling these only needs a free re-render, no asset regeneration.
+//
+// Rain is composited as a WHITE ALPHA OVERLAY (not a screen blend): screen-
+// blending the chroma planes tints the whole frame purple, so we build a rain
+// alpha-mask from temporal noise (threshold → vertical blur = streaks) and
+// overlay white through it, leaving the base color untouched. Validated against
+// the reference art before wiring.
+// ============================================
+
+/** True when at least one edit effect is enabled (else the pass is a no-op copy). */
+export function hasEditEffects(fx?: IEditEffects): boolean {
+  if (!fx) return false;
+  return Boolean(fx.rain) || Boolean(fx.letterbox) || (fx.grain ?? 0) > 0 || (fx.vignette ?? 0) > 0;
+}
+
+export function applyEditEffects(input: string, output: string, fx?: IEditEffects): Promise<string> {
+  if (!hasEditEffects(fx)) return copyVideo(input, output);
+  const effects = fx!;
+
+  const rain = Boolean(effects.rain);
+  // rainIntensity 0-1 → streak opacity 0.2-0.9 (0 still shows faint drizzle).
+  const rainOp = clamp01(effects.rainIntensity ?? 0.5) * 0.7 + 0.2;
+  const grain = Math.min(Math.max(effects.grain ?? 0, 0), 1.5);
+  const vig = clamp01(effects.vignette ?? 0);
+  const vigDivisor = (5.5 - vig * 2.5).toFixed(2); // strength 1 → PI/3.0, 0.5 → PI/4.25
+  const bar = Math.round(H * 0.11); // cinematic bar height per edge
+
+  // Post-composite chain (applied after any rain overlay): grain → vignette → bars.
+  const post: string[] = [];
+  if (grain > 0) post.push(`noise=alls=${Math.round(grain * 14)}:allf=t`);
+  if (vig > 0) post.push(`vignette=PI/${vigDivisor}`);
+  if (effects.letterbox) {
+    post.push(`drawbox=x=0:y=0:w=iw:h=${bar}:color=black:t=fill`);
+    post.push(`drawbox=x=0:y=ih-${bar}:w=iw:h=${bar}:color=black:t=fill`);
+  }
+
+  // Spawn ffmpeg directly rather than through fluent-ffmpeg: the rain sources
+  // are lavfi *devices*, which fluent-ffmpeg's capability check rejects
+  // ("Input format lavfi is not available"). Raw argv also means commas inside
+  // filter expressions need no escaping. Mirrors reel-hybrid.service's spawn.
+  const args: string[] = ["-y", "-i", input];
+  const filters: string[] = [];
+  let vlabel = "0:v";
+
+  if (rain) {
+    // Two lavfi sources: black (temporal-noise carrier) + white (streak color).
+    args.push("-f", "lavfi", "-i", `color=c=black:s=${W}x${H}:r=${FPS}`);
+    args.push("-f", "lavfi", "-i", `color=c=white:s=${W}x${H}:r=${FPS}`);
+    filters.push(
+      `[1:v]noise=alls=70:allf=t,format=gray,lutyuv=y='if(gt(val,208),val,0)',gblur=sigma=0.4:sigmaV=8,eq=contrast=2.2:brightness=-0.02,lutyuv=y='val*${rainOp.toFixed(2)}'[rmap]`,
+      `[2:v][rmap]alphamerge[rain]`,
+      `[0:v][rain]overlay=format=auto[vrain]`
+    );
+    vlabel = "vrain";
+  }
+
+  filters.push(`[${vlabel}]${[...post, "format=yuv420p"].join(",")}[vout]`);
+  args.push(
+    "-filter_complex", filters.join(";"),
+    "-map", "[vout]",
+    "-map", "0:a?", // carry the reel's audio through untouched
+    "-c:a", "copy",
+    "-c:v", "libx264",
+    "-preset", "medium",
+    "-crf", "20",
+    "-pix_fmt", "yuv420p",
+    "-movflags", "+faststart",
+    "-shortest", // bound the infinite lavfi rain sources to the video length
+    output
+  );
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(config.ffmpegPath || "ffmpeg", args);
+    let stderr = "";
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+    child.on("error", (err) => reject(new Error(`Edit-effects pass failed: ${err.message}`)));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Edit-effects pass failed (${code}): ${stderr.slice(-600)}`));
+        return;
+      }
+      const on = [
+        rain ? "rain" : null,
+        grain > 0 ? "grain" : null,
+        vig > 0 ? "vignette" : null,
+        effects.letterbox ? "letterbox" : null,
+      ].filter(Boolean);
+      console.log(`🎬 Edit effects applied: ${on.join(", ")}`);
+      resolve(output);
+    });
+  });
+}
+
+function clamp01(n: number): number {
+  return Math.min(Math.max(n, 0), 1);
 }
 
 function hashString(value: string): number {
@@ -575,9 +684,29 @@ function wordWeight(w: string): number {
   return Math.max(letters, 1);
 }
 
+/** #RRGGBB → ASS &HAABBGGRR (opaque). Invalid input falls back to white. */
+function hexToAssColor(hex?: string): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex ?? "");
+  if (!m) return "&H00FFFFFF";
+  const rr = m[1].slice(0, 2);
+  const gg = m[1].slice(2, 4);
+  const bb = m[1].slice(4, 6);
+  return `&H00${bb}${gg}${rr}`.toUpperCase();
+}
+
 export function buildPortraitKaraoke(
-  scenes: { text: string; startTime: number; speech: number }[]
+  scenes: { text: string; startTime: number; speech: number }[],
+  captionStyle?: ICaptionStyle
 ): string {
+  // Merge the requested style over the renderer's built-in default so any
+  // unset field renders exactly as before.
+  const s = { ...DEFAULT_CAPTION_STYLE, ...(captionStyle ?? {}) };
+  const IDLE = hexToAssColor(s.primaryColor);
+  const ACTIVE = hexToAssColor(s.activeColor);
+  const OUTLINE = hexToAssColor(s.outlineColor);
+  const CHUNK = Math.max(1, Math.round(s.chunkSize));
+  const bold = s.bold ? -1 : 0;
+
   const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${W}
@@ -586,23 +715,21 @@ WrapStyle: 2
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,Arial,64,&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,90,90,320,1
+Style: Cap,${s.fontName},${s.fontSize},${IDLE},${ACTIVE},${OUTLINE},&H80000000,${bold},0,0,0,100,100,0,0,1,${s.outlineWidth},${s.shadow},${s.alignment},${s.marginL},${s.marginR},${s.marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-  const ACTIVE = "&H0000D7FF"; // amber highlight
-  const IDLE = "&H00FFFFFF"; // white
-  const CHUNK = 4; // words shown together (legible on portrait)
   const lines: string[] = [];
 
   for (const scene of scenes) {
-    const words = scene.text.trim().split(/\s+/).filter(Boolean);
-    if (!words.length) continue;
+    const rawWords = scene.text.trim().split(/\s+/).filter(Boolean);
+    if (!rawWords.length) continue;
+    const words = s.uppercase ? rawWords.map((w) => w.toUpperCase()) : rawWords;
 
     // weighted per-word timing across the spoken window
-    const weights = words.map(wordWeight);
+    const weights = rawWords.map(wordWeight);
     const totalW = weights.reduce((a, b) => a + b, 0);
     const starts: number[] = [];
     const ends: number[] = [];
@@ -615,13 +742,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       ends.push(en);
     }
 
-    // display in chunks; highlight the active word as it is spoken
+    // display in chunks; highlight the active word as it is spoken. When
+    // active == idle color (e.g. the Lurker preset), there's no highlight.
+    const pop = s.animation === "pop" ? "{\\fscx112\\fscy112\\t(0,120,\\fscx100\\fscy100)}" : "";
     for (let i = 0; i < words.length; i++) {
       const chunkStart = Math.floor(i / CHUNK) * CHUNK;
       const chunk = words.slice(chunkStart, chunkStart + CHUNK);
       const activeInChunk = i - chunkStart;
       const text = chunk
-        .map((w, k) => `{\\1c${k === activeInChunk ? ACTIVE : IDLE}}${w}`)
+        .map((w, k) => {
+          const isActive = k === activeInChunk;
+          return `{\\1c${isActive ? ACTIVE : IDLE}}${isActive ? pop : ""}${w}`;
+        })
         .join(" ");
       lines.push(
         `Dialogue: 0,${assTime(starts[i])},${assTime(ends[i])},Cap,,0,0,0,,${text}`
