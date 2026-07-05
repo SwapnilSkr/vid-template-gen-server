@@ -8,6 +8,8 @@ import {
   listHorrorAudioController,
   listArtStylesController,
   getReelDefaultsController,
+  listStylePresetsController,
+  listFontsController,
 } from "../controllers";
 
 // ============================================
@@ -19,6 +21,8 @@ export const metaRoutes = new Elysia({ prefix: "/api" })
   .get("/gameplay", listGameplayController)
   .get("/horror-audio", listHorrorAudioController)
   .get("/art-styles", listArtStylesController)
+  .get("/style-presets", listStylePresetsController)
+  .get("/fonts", listFontsController)
   .get("/image-models", listImageModelsController)
   .get("/reel-defaults", getReelDefaultsController, { query: ReelDefaultsQuery })
   .get("/tts-voices", listTtsVoicesController)

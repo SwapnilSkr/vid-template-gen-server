@@ -218,7 +218,17 @@ async function usedReferenceUrls(): Promise<Set<string>> {
   );
 }
 
-export async function pickHorrorReferenceSeed(genre?: string): Promise<HorrorReferencePromptSeed | undefined> {
+export async function pickHorrorReferenceSeed(
+  genre?: string,
+  referenceId?: string
+): Promise<HorrorReferencePromptSeed | undefined> {
+  // Explicit pick from the Studio/create form — use it directly, bypassing the
+  // "unused" rotation (the user deliberately chose this reference).
+  if (referenceId && Types.ObjectId.isValid(referenceId)) {
+    const picked = await HorrorReference.findById(referenceId);
+    if (picked) return toReferenceSeed(picked);
+  }
+
   const used = await usedReferenceUrls();
   const filter: Record<string, unknown> = {
     status: { $in: ["candidate", "approved"] },
@@ -231,6 +241,10 @@ export async function pickHorrorReferenceSeed(genre?: string): Promise<HorrorRef
     .limit(25);
   const ref = refs.find((candidate) => !used.has(candidate.sourceUrl));
   if (!ref) return undefined;
+  return toReferenceSeed(ref);
+}
+
+function toReferenceSeed(ref: IHorrorReference): HorrorReferencePromptSeed {
   return {
     id: ref._id.toString(),
     title: ref.title,

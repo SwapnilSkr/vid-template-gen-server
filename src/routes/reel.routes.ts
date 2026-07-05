@@ -1,16 +1,28 @@
 import { Elysia } from "elysia";
 import {
   IdParams,
+  SeriesParams,
   CreateReelBody,
   UpdateReelReviewBody,
   RevoiceReelBody,
   VariantParams,
   ThumbnailFrameBody,
+  CustomThumbnailBody,
   PublishReelBody,
+  SceneIndexParams,
+  UpdateSceneBody,
+  RegenerateSceneBody,
+  AddSceneBody,
+  ReorderScenesBody,
+  UpdateReelSettingsBody,
+  UpdateCaptionsBody,
+  RegenerateReelBody,
+  ReplanReelBody,
 } from "../types/guards";
 import {
   createReelController,
   listReelsController,
+  listReelSeriesController,
   getReelStatusController,
   downloadReelController,
   deleteReelController,
@@ -21,7 +33,18 @@ import {
   revoiceReelController,
   promoteVoiceVariantController,
   useReelFrameAsThumbnailController,
+  customFrameThumbnailController,
   listYouTubeChannelsController,
+  updateSceneController,
+  regenerateSceneController,
+  addSceneController,
+  removeSceneController,
+  reorderScenesController,
+  updateReelSettingsController,
+  updateCaptionsController,
+  regenerateReelController,
+  approvePlanController,
+  replanReelController,
 } from "../controllers";
 
 // ============================================
@@ -39,6 +62,11 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
 
   // List configured YouTube publish targets. Refresh tokens are never returned.
   .get("/youtube/channels", listYouTubeChannelsController)
+
+  // List every reel in a multipart series
+  .get("/series/:seriesId", listReelSeriesController, {
+    params: SeriesParams,
+  })
 
   // Get reel status/progress
   .get("/:id/status", getReelStatusController, {
@@ -71,6 +99,12 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
     body: ThumbnailFrameBody,
   })
 
+  // Compose a thumbnail from a frame + custom overlay caption text (manual)
+  .post("/:id/review/thumbnail/custom", customFrameThumbnailController, {
+    params: IdParams,
+    body: CustomThumbnailBody,
+  })
+
   // Request re-narrated voice variants (different TTS model/voice, same story + gameplay clip)
   .post("/:id/revoice", revoiceReelController, {
     params: IdParams,
@@ -91,4 +125,53 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .post("/:id/publish", publishReelController, {
     params: IdParams,
     body: PublishReelBody,
+  })
+
+  // ---- Studio editing (co-creation) ----
+  // Approve a reviewed plan → start producing
+  .post("/:id/approve-plan", approvePlanController, { params: IdParams })
+
+  // Discard the plan and re-plan (new story / reference / pasted script)
+  .post("/:id/replan", replanReelController, { params: IdParams, body: ReplanReelBody })
+
+  // Reorder scenes (2-segment path — declared before the :index routes)
+  .post("/:id/scenes/reorder", reorderScenesController, {
+    params: IdParams,
+    body: ReorderScenesBody,
+  })
+
+  // Regenerate a single scene's image and/or audio
+  .post("/:id/scenes/:index/regenerate", regenerateSceneController, {
+    params: SceneIndexParams,
+    body: RegenerateSceneBody,
+  })
+
+  // Edit one scene (narration / visual prompt / motion)
+  .patch("/:id/scenes/:index", updateSceneController, {
+    params: SceneIndexParams,
+    body: UpdateSceneBody,
+  })
+
+  // Remove a scene
+  .delete("/:id/scenes/:index", removeSceneController, { params: SceneIndexParams })
+
+  // Add a scene
+  .post("/:id/scenes", addSceneController, { params: IdParams, body: AddSceneBody })
+
+  // Reel-level creative settings (art/motion/image model/voice/audio post)
+  .put("/:id/settings", updateReelSettingsController, {
+    params: IdParams,
+    body: UpdateReelSettingsBody,
+  })
+
+  // Caption look (manual, non-AI)
+  .put("/:id/captions", updateCaptionsController, {
+    params: IdParams,
+    body: UpdateCaptionsBody,
+  })
+
+  // Queue a produce run — render-only (reuse assets) or full asset regen
+  .post("/:id/regenerate", regenerateReelController, {
+    params: IdParams,
+    body: RegenerateReelBody,
   });

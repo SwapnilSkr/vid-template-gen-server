@@ -3,9 +3,11 @@ import {
   createReel,
   getReel,
   listReels,
+  listReelsBySeries,
   deleteReel,
   ensureReelReviewPackage,
   regenerateReelThumbnail,
+  useReelFrameWithText,
   updateReelReview,
   requestRevoice,
   promoteVoiceVariant,
@@ -18,9 +20,21 @@ import {
   listHorrorAudioLibrary,
   listArtStyles,
   listAllYouTubePublishChannels,
+  updateScene,
+  regenerateScene,
+  addScene,
+  removeScene,
+  reorderScenes,
+  updateReelSettings,
+  updateCaptions,
+  regenerateReel,
+  approvePlan,
+  replanReel,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { TTS_VOICE_CATALOG } from "../config/models";
+import { listStylePresets } from "../config/style-presets";
+import { listFonts } from "../config/fonts";
 import type {
   TIdParams,
   TCreateReelBody,
@@ -31,6 +45,17 @@ import type {
   TThumbnailFrameBody,
   TVoiceSampleQuery,
   TReelDefaultsQuery,
+  TSceneIndexParams,
+  TUpdateSceneBody,
+  TRegenerateSceneBody,
+  TAddSceneBody,
+  TReorderScenesBody,
+  TUpdateReelSettingsBody,
+  TUpdateCaptionsBody,
+  TRegenerateReelBody,
+  TReplanReelBody,
+  TCustomThumbnailBody,
+  TSeriesParams,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
 
@@ -53,6 +78,10 @@ interface UpdateReelReviewContext extends Context {
 
 interface ListReelsContext extends Context {
   query: { limit?: string };
+}
+
+interface ListSeriesContext extends Context {
+  params: TSeriesParams;
 }
 
 interface RevoiceReelContext extends Context {
@@ -103,6 +132,11 @@ export async function createReelController({ body, set }: CreateReelContext) {
       imageModel: body.imageModel,
       artStyleId: body.artStyleId,
       motionMode: body.motionMode,
+      editEffects: body.editEffects,
+      presetId: body.presetId,
+      pipelineMode: body.pipelineMode,
+      providedScript: body.providedScript,
+      horrorReferenceId: body.horrorReferenceId,
       ttsModel: body.ttsModel,
       ttsVoice: body.ttsVoice,
       ttsFormat: body.ttsFormat,
@@ -140,6 +174,12 @@ export async function listReelsController({ query }: ListReelsContext) {
   return { success: true, data: reels };
 }
 
+/** List every reel in a series, ordered by part number. */
+export async function listReelSeriesController({ params }: ListSeriesContext) {
+  const reels = await listReelsBySeries(params.seriesId);
+  return { success: true, data: reels };
+}
+
 /** Get reel status/progress. */
 export async function getReelStatusController({ params, set }: GetReelContext) {
   const reel = await getReel(params.id);
@@ -160,7 +200,13 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       source: reel.storySource,
       genre: reel.genre,
       artStyleId: reel.artStyleId,
+      presetId: reel.presetId,
       motionMode: reel.motionMode,
+      captionStyle: reel.captionStyle,
+      audioPost: reel.audioPost,
+      pipelineMode: reel.pipelineMode,
+      providedScript: reel.providedScript,
+      horrorReferenceId: reel.horrorReferenceId,
       storyBible: reel.storyBible,
       seriesId: reel.seriesId,
       partNumber: reel.partNumber,
@@ -426,6 +472,132 @@ export async function getVoiceSampleController({ query, set }: VoiceSampleContex
   try {
     const url = await getVoiceSample(option.model, option.voice, option.format);
     return { success: true, data: { url } };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+// ============================================
+// Studio editing (co-creation) controllers
+// ============================================
+
+interface SceneEditContext extends Context {
+  params: TSceneIndexParams;
+  body: TUpdateSceneBody;
+}
+interface SceneRegenContext extends Context {
+  params: TSceneIndexParams;
+  body: TRegenerateSceneBody;
+}
+interface SceneIndexContext extends Context {
+  params: TSceneIndexParams;
+}
+interface AddSceneContext extends Context {
+  params: TIdParams;
+  body: TAddSceneBody;
+}
+interface ReorderScenesContext extends Context {
+  params: TIdParams;
+  body: TReorderScenesBody;
+}
+interface SettingsContext extends Context {
+  params: TIdParams;
+  body: TUpdateReelSettingsBody;
+}
+interface CaptionsContext extends Context {
+  params: TIdParams;
+  body: TUpdateCaptionsBody;
+}
+interface RegenerateReelContext extends Context {
+  params: TIdParams;
+  body: TRegenerateReelBody;
+}
+interface ReplanContext extends Context {
+  params: TIdParams;
+  body: TReplanReelBody;
+}
+
+/** Shared 400 wrapper for the edit endpoints (all just mutate + return reel). */
+async function runEdit(set: Context["set"], action: () => Promise<unknown>) {
+  try {
+    return { success: true, data: await action() };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Edit one scene's narration / visual prompt / motion. */
+export async function updateSceneController({ params, body, set }: SceneEditContext) {
+  return runEdit(set, () => updateScene(params.id, parseInt(params.index, 10), body));
+}
+
+/** Regenerate a single scene's image and/or audio (surgical, reuses the rest). */
+export async function regenerateSceneController({ params, body, set }: SceneRegenContext) {
+  return runEdit(set, () => regenerateScene(params.id, parseInt(params.index, 10), body.regenerate));
+}
+
+/** Insert a new scene (optionally at a position). */
+export async function addSceneController({ params, body, set }: AddSceneContext) {
+  return runEdit(set, () => addScene(params.id, body.narration, body.visualPrompt, body.atIndex));
+}
+
+/** Remove a scene by index. */
+export async function removeSceneController({ params, set }: SceneIndexContext) {
+  return runEdit(set, () => removeScene(params.id, parseInt(params.index, 10)));
+}
+
+/** Reorder scenes by a permutation of current indices. */
+export async function reorderScenesController({ params, body, set }: ReorderScenesContext) {
+  return runEdit(set, () => reorderScenes(params.id, body.order));
+}
+
+/** Update reel-level creative settings (art/motion/image model/voice/audio). */
+export async function updateReelSettingsController({ params, body, set }: SettingsContext) {
+  return runEdit(set, () => updateReelSettings(params.id, body));
+}
+
+/** Update the caption look (manual, non-AI). */
+export async function updateCaptionsController({ params, body, set }: CaptionsContext) {
+  return runEdit(set, () => updateCaptions(params.id, body));
+}
+
+/** Queue a produce run — render-only (reuse assets) or full asset regeneration. */
+export async function regenerateReelController({ params, body, set }: RegenerateReelContext) {
+  return runEdit(set, () => regenerateReel(params.id, body.mode));
+}
+
+/** Approve a reviewed plan → start producing. */
+export async function approvePlanController({ params, set }: GetReelContext) {
+  return runEdit(set, () => approvePlan(params.id));
+}
+
+/** Discard the plan and re-plan (new story / reference / pasted script). */
+export async function replanReelController({ params, body, set }: ReplanContext) {
+  return runEdit(set, () => replanReel(params.id, body));
+}
+
+/** List the style-preset bundles (optionally filtered by niche). */
+export async function listStylePresetsController({ query }: { query: { niche?: string } }) {
+  return { success: true, data: listStylePresets(query.niche) };
+}
+
+/** List the bundled caption/thumbnail fonts. */
+export async function listFontsController() {
+  return { success: true, data: listFonts() };
+}
+
+interface CustomThumbnailContext extends Context {
+  params: TIdParams;
+  body: TCustomThumbnailBody;
+}
+
+/** Compose a thumbnail from a video frame + custom overlay text (manual variant). */
+export async function customFrameThumbnailController({ params, body, set }: CustomThumbnailContext) {
+  try {
+    const review = await useReelFrameWithText(params.id, body);
+    return { success: true, data: review };
   } catch (error: unknown) {
     set.status = 400;
     return { success: false, error: getErrorMessage(error) };

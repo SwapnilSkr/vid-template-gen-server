@@ -33,6 +33,7 @@ export {
 export {
   createReelController,
   listReelsController,
+  listReelSeriesController,
   getReelStatusController,
   downloadReelController,
   deleteReelController,
@@ -51,6 +52,19 @@ export {
   useReelFrameAsThumbnailController,
   getVoiceSampleController,
   listYouTubeChannelsController,
+  updateSceneController,
+  regenerateSceneController,
+  addSceneController,
+  removeSceneController,
+  reorderScenesController,
+  updateReelSettingsController,
+  updateCaptionsController,
+  regenerateReelController,
+  approvePlanController,
+  replanReelController,
+  listStylePresetsController,
+  listFontsController,
+  customFrameThumbnailController,
 } from "./reel.controller";
 
 // Trend controllers
