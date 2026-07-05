@@ -2,7 +2,7 @@ import { Worker, type Job } from "bullmq";
 import { redisConnection } from "./connection";
 import { config } from "../config";
 import { getErrorMessage } from "../types";
-import { processReel } from "../services/reel.service";
+import { processReel, processReelPlan, processReelProduce } from "../services/reel.service";
 import {
   processComposition,
   regenerateCompositionAsync,
@@ -36,7 +36,10 @@ export function startWorkers(): void {
   const reelWorker = new Worker<ReelJobData, void, "process">(
     "reel-processing",
     async (job: Job<ReelJobData, void, "process">) => {
-      await processReel(job.data.reelId);
+      const { reelId, stage } = job.data;
+      if (stage === "plan") await processReelPlan(reelId);
+      else if (stage === "produce") await processReelProduce(reelId);
+      else await processReel(reelId);
     },
     { connection: redisConnection, concurrency: config.queueConcurrency }
   );

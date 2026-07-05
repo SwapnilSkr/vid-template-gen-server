@@ -6,9 +6,10 @@ import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
 import { ensureDir, cleanupFiles } from "../utils";
 import { getErrorMessage } from "../types";
-import { planReel, planRedditStory } from "./reel-script.service";
+import { planHorrorSeries, planReel, planRedditStory, structureUserScript } from "./reel-script.service";
 import { getRecipe, pickStyle, type NicheRecipe } from "../config/niche-styles";
 import { pickArtStyle } from "../config/art-styles";
+import { getStylePreset, defaultPresetFor } from "../config/style-presets";
 import { resolveArtStyleRefKeys } from "./art-style.service";
 import { renderMotionReel, type MotionScene } from "./reel-motion.service";
 import { appendBouncingCaptionCues, renderGameplayReel, pickGameplay } from "./reel-gameplay.service";
@@ -21,7 +22,7 @@ import {
   type StoryPartDraft,
 } from "./story.service";
 import { generateImage, generateNarration } from "./openrouter-media.service";
-import { renderImageKenBurns, type RenderScene } from "./reel-render.service";
+import { renderImageKenBurns, applyEditEffects, hasEditEffects, type RenderScene } from "./reel-render.service";
 import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
 import { appendBrandedOutro } from "./reel-outro.service";
 import { getScoutTargets } from "./trend-scout.service";
@@ -37,7 +38,12 @@ import {
   deleteFromS3,
   cdnUrlFor,
 } from "./s3.service";
-import { enqueueReel, enqueuePublish, removeReelJob } from "../queue/queues";
+import {
+  enqueueReel,
+  enqueueReelPlan,
+  enqueuePublish,
+  removeReelJob,
+} from "../queue/queues";
 
 interface CreateReelOptions {
   niche: string;
@@ -53,6 +59,11 @@ interface CreateReelOptions {
   imageModel?: string;
   artStyleId?: string;
   motionMode?: ReelMotionMode;
+  editEffects?: IReel["editEffects"];
+  presetId?: string;
+  pipelineMode?: IReel["pipelineMode"];
+  providedScript?: string;
+  horrorReferenceId?: string;
   ttsModel?: string;
   ttsVoice?: string;
   ttsFormat?: "mp3" | "pcm";
@@ -76,6 +87,16 @@ function motionTypeFor(mode: ReelMotionMode, i: number, total: number): ISceneMo
 
 function isHorror(niche: string): boolean {
   return niche.startsWith("horror");
+}
+
+function isFullSourceStory(text?: string): boolean {
+  return (text?.trim().split(/\s+/).filter(Boolean).length ?? 0) >= 80;
+}
+
+function resolveSeriesPartCount(parts: Exclude<CreateReelOptions["parts"], undefined>): number {
+  if (parts === "off") return 1;
+  if (parts === "auto") return 3;
+  return Math.min(4, Math.max(2, Math.round(parts)));
 }
 
 /** Resolve the motion mode for a reel: explicit → else parallax for horror, Ken Burns otherwise. */
@@ -110,6 +131,16 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     throw new Error("Invalid horror audio key");
   }
 
+  if (isHorror(niche) && parts !== "off") {
+    return createHorrorReelSeries({
+      ...options,
+      niche,
+      topic,
+      tier,
+      parts,
+    });
+  }
+
   if (recipe.strategy === "gameplay_overlay" && (parts !== "off" || options.source === "verbatim")) {
     return createGameplayReelSeries({
       niche,
@@ -139,11 +170,17 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
   // here: it has its own untouched auto-topic flow via generateStory.
   const genre = options.genre ?? (recipe.strategy !== "gameplay_overlay" ? pickRandomGenre(niche) : undefined);
 
-  // Reference-art style + motion policy (horror/image niches). A style is
-  // rotated from the niche's pool when the caller didn't pin one; motion
-  // defaults to the free parallax "living still" (AI motion is opt-in).
-  const artStyleId = options.artStyleId ?? (isHorror(niche) ? pickArtStyle(niche)?.id : undefined);
-  const motionMode = options.motionMode ?? (isHorror(niche) ? "parallax" : undefined);
+  // Style preset (the "Lurker"-style bundle) seeds art/motion/voice/captions.
+  // Explicit options always win; the preset fills what the caller left unset.
+  const preset = getStylePreset(options.presetId) ?? defaultPresetFor(niche);
+  const artStyleId =
+    options.artStyleId ?? preset?.artStyleId ?? (isHorror(niche) ? pickArtStyle(niche)?.id : undefined);
+  const motionMode =
+    options.motionMode ?? preset?.motionMode ?? (isHorror(niche) ? "parallax" : undefined);
+  const voiceOverride = toVoiceOverride(options) ?? preset?.voice;
+  // Horror is human-in-the-loop by default (gate after the cheap plan);
+  // other niches run straight through unless the caller asks for review.
+  const pipelineMode = options.pipelineMode ?? (isHorror(niche) ? "review" : "auto");
 
   const reel = new Reel({
     niche,
@@ -153,20 +190,28 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     genre,
     strategy: recipe.strategy,
     artStyleId,
+    presetId: preset?.id,
     motionMode,
+    captionStyle: preset?.captionStyle,
+    audioPost: preset?.audioPost,
+    editEffects: options.editEffects,
+    pipelineMode,
+    providedScript: options.providedScript,
+    horrorReferenceId: options.horrorReferenceId,
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     outroChannelId: options.outroChannelId,
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
-    voiceOverride: toVoiceOverride(options),
+    voiceOverride,
     status: "pending",
     progress: 0,
   });
   await reel.save();
-  console.log(`🎬 Created reel: ${reel._id} (${niche})`);
+  console.log(`🎬 Created reel: ${reel._id} (${niche}) [${pipelineMode}]`);
 
-  await enqueueReel(reel._id.toString());
+  if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
+  else await enqueueReel(reel._id.toString());
 
   return { reel, reels: [reel] };
 }
@@ -257,6 +302,80 @@ async function createGameplayReelSeries(
   return { reel: reels[0], reels, seriesId };
 }
 
+async function createHorrorReelSeries(
+  options: CreateReelOptions & { parts: Exclude<CreateReelOptions["parts"], undefined> }
+): Promise<CreateReelResult> {
+  const { niche, topic, tier = "cheap", parts } = options;
+  const partCount = resolveSeriesPartCount(parts);
+  const recipe = getRecipe(niche);
+  const genre = options.genre ?? pickRandomGenre(niche);
+  const preset = getStylePreset(options.presetId) ?? defaultPresetFor(niche);
+  const artStyleId =
+    options.artStyleId ?? preset?.artStyleId ?? (isHorror(niche) ? pickArtStyle(niche)?.id : undefined);
+  const motionMode =
+    options.motionMode ?? preset?.motionMode ?? (isHorror(niche) ? "parallax" : undefined);
+  const voiceOverride = toVoiceOverride(options) ?? preset?.voice;
+  const pipelineMode = options.pipelineMode ?? "review";
+  const planned = await planHorrorSeries(
+    niche,
+    options.providedScript?.trim() || topic,
+    tier as Tier,
+    genre,
+    partCount,
+    undefined,
+    options.horrorReferenceId
+  );
+  const seriesId = randomUUID();
+  const reels: IReel[] = [];
+
+  for (const part of planned.parts) {
+    const partSeed = [
+      part.brief,
+      `Opening state: ${part.openingState}`,
+      `Ending state: ${part.endingState}`,
+      part.cliffhanger ? `Cliffhanger: ${part.cliffhanger}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const reel = new Reel({
+      niche,
+      topic: partSeed || topic,
+      tier,
+      genre,
+      strategy: recipe.strategy,
+      artStyleId,
+      presetId: preset?.id,
+      motionMode,
+      captionStyle: preset?.captionStyle,
+      audioPost: preset?.audioPost,
+      editEffects: options.editEffects,
+      pipelineMode,
+      storyBible: planned.storyBible,
+      horrorReference: planned.horrorReference,
+      horrorReferenceId: options.horrorReferenceId,
+      horrorAudioKey: options.horrorAudioKey,
+      outroChannelId: options.outroChannelId,
+      thumbnailMode: options.thumbnailMode ?? "frame",
+      imageModelOverride: options.imageModel,
+      voiceOverride,
+      status: "pending",
+      progress: 0,
+      title: part.title,
+      hook: part.hook,
+      seriesId,
+      partNumber: part.partNumber,
+      partCount: part.partCount,
+    });
+    await reel.save();
+    reels.push(reel);
+    if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
+    else await enqueueReel(reel._id.toString());
+  }
+
+  console.log(`🎬 Created horror series ${seriesId}: ${reels.map((r) => r._id).join(", ")}`);
+  return { reel: reels[0], reels, seriesId };
+}
+
 function toRedditStoryPayload(part: StoryPartDraft): NonNullable<IReel["redditStory"]> {
   return {
     title: part.title,
@@ -328,78 +447,166 @@ function isHorrorNiche(niche: string): boolean {
   return niche.startsWith("horror");
 }
 
-/** Full pipeline: plan → images → narration → render → upload. Invoked by the reel-processing worker. */
+/** Full auto pipeline: plan → images → narration → render → upload. Used for
+ *  `pipelineMode: "auto"` reels (plan and produce in one job run). */
 export async function processReel(reelId: string): Promise<void> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
+  const recipe = getRecipe(reel.niche);
+  if (recipe.strategy === "gameplay_overlay") return processGameplayReel(reel, recipe);
 
   const localFiles: string[] = [];
-  const recipe = getRecipe(reel.niche);
+  const measuredCosts: MeasuredCostInput[] = [];
+  try {
+    await planImageReel(reel, recipe, measuredCosts);
+    await produceImageReel(reel, recipe, measuredCosts, localFiles);
+  } catch (error: unknown) {
+    await cleanupFiles(localFiles);
+    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
+    throw error;
+  }
+}
 
-  // Reddit / AITA runs a different strategy (gameplay + narration, no images).
-  if (recipe.strategy === "gameplay_overlay") {
-    return processGameplayReel(reel, recipe);
+/** Plan stage only: write the script + scene graph cheaply, then STOP at
+ *  `plan_review` so a human can edit before any image/audio/render spend.
+ *  Enqueued for `pipelineMode: "review"` reels. */
+export async function processReelPlan(reelId: string): Promise<void> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const recipe = getRecipe(reel.niche);
+  // Gameplay/Reddit has no cheap plan gate — produce straight through.
+  if (recipe.strategy === "gameplay_overlay") return processGameplayReel(reel, recipe);
+
+  const measuredCosts: MeasuredCostInput[] = [];
+  try {
+    await planImageReel(reel, recipe, measuredCosts);
+    reel.status = "plan_review";
+    reel.progress = 15;
+    await reel.save();
+    console.log(`⏸️  Reel ${reelId} planned — awaiting review`);
+  } catch (error: unknown) {
+    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
+    throw error;
+  }
+}
+
+/** Produce stage: images → narration → render → upload, reusing any assets the
+ *  reel already has. Enqueued when a reviewed plan is approved, or to re-render
+ *  after edits (surgical regen = clear the changed scene's asset first). */
+export async function processReelProduce(reelId: string): Promise<void> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const recipe = getRecipe(reel.niche);
+  if (recipe.strategy === "gameplay_overlay") return processGameplayReel(reel, recipe);
+
+  const localFiles: string[] = [];
+  const measuredCosts: MeasuredCostInput[] = [];
+  try {
+    await produceImageReel(reel, recipe, measuredCosts, localFiles);
+  } catch (error: unknown) {
+    await cleanupFiles(localFiles);
+    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
+    throw error;
+  }
+}
+
+/** Plan stage body — LLM script/scene-graph (or structure a user-provided
+ *  story), resolve the voice, and save the scene graph. Reuses an existing plan
+ *  when scenes are already present (edited/approved plans re-run cheaply). */
+async function planImageReel(
+  reel: IReel,
+  recipe: NicheRecipe,
+  measuredCosts: MeasuredCostInput[]
+): Promise<void> {
+  const reelId = reel._id.toString();
+  const isHybrid = recipe.strategy === "hybrid_scene";
+  const models = resolveModels(reel.tier as Tier);
+  const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
+  const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
+  const style = artRef
+    ? { id: artRef.style.id, promptSuffix: artRef.style.promptSuffix }
+    : pickStyle(recipe);
+  const motionMode = resolveMotionMode(reel);
+
+  await ensureDir(config.processingPath);
+  await updateStatus(reelId, "planning", 5);
+  reel.narrationVoice = tts;
+
+  const canReusePlan = reel.scenes.length > 0 && Boolean(reel.title && reel.hook);
+  if (canReusePlan) {
+    console.log(`♻️  Reusing existing plan for reel ${reelId}`);
+    await reel.save();
+    return;
   }
 
+  const onUsage = (usage: { label: string; model: string; costUsd: number }) =>
+    measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+
+  // Long pasted drafts are structured closely; short horror notes act as creative direction.
+  const providedInstruction = reel.providedScript?.trim();
+  const instructionTopic =
+    isHorrorNiche(reel.niche) && providedInstruction && !isFullSourceStory(providedInstruction)
+      ? providedInstruction
+      : reel.topic;
+  const shouldStructureProvidedScript =
+    Boolean(providedInstruction) &&
+    (!isHorrorNiche(reel.niche) || isFullSourceStory(providedInstruction));
+  const plan = shouldStructureProvidedScript
+    ? await structureUserScript(reel.niche, providedInstruction!, reel.tier as Tier, reel.genre, onUsage)
+    : await planReel(reel.niche, instructionTopic, reel.tier as Tier, reel.genre, onUsage, reel.horrorReferenceId, {
+        storyBible: reel.storyBible,
+        partNumber: reel.partNumber,
+        partCount: reel.partCount,
+      });
+
+  reel.title = plan.title;
+  reel.hook = plan.hook;
+  reel.style = style.promptSuffix;
+  if (plan.storyBible) reel.storyBible = plan.storyBible;
+  if (plan.horrorReference) reel.horrorReference = plan.horrorReference;
+  reel.scenes = plan.scenes.map((s, i) => ({
+    index: i,
+    narration: s.narration,
+    visualPrompt: s.visualPrompt,
+    motion: {
+      type: motionTypeFor(motionMode, i, plan.scenes.length),
+      direction: i % 2 === 0 ? "in" : "out",
+    },
+    startTime: 0,
+    duration: 0,
+    // heroPolicy "one_climax" (horror/mythology/movie_recap today): the final
+    // scene is always the hero reveal.
+    isHero: isHybrid && i === plan.scenes.length - 1,
+  }));
+  await reel.save();
+  console.log(`📝 Planned ${reel.scenes.length} scenes for reel ${reelId} (${style.id})`);
+}
+
+/** Produce stage body — images, narration, render, upload, cost. Reuses any
+ *  scene assets already present (surgical/partial regeneration). Assumes the
+ *  scene graph is planned. Caller owns the try/catch + cleanup. */
+async function produceImageReel(
+  reel: IReel,
+  recipe: NicheRecipe,
+  measuredCosts: MeasuredCostInput[],
+  localFiles: string[]
+): Promise<void> {
+  const reelId = reel._id.toString();
   const isHybrid = recipe.strategy === "hybrid_scene";
   const models = resolveModels(reel.tier as Tier); // tts/video from reel tier
   const imageModel = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image; // niche-appropriate stills
   // precedence: tier default < niche voice override < explicit pick at creation
   const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
-  // Reference-art style (if one is set) wins over the niche prompt-suffix pool,
-  // and supplies the reference images fed to the image model as style anchors.
+  // Reference-art style (if one is set) supplies the reference images fed to the
+  // image model as style anchors.
   const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
   const referenceImageUrls = artRef?.keys.length ? artRef.keys.map(cdnUrlFor) : undefined;
-  const style = artRef
-    ? { id: artRef.style.id, promptSuffix: artRef.style.promptSuffix }
-    : pickStyle(recipe); // rotate one style from the niche pool
-  const motionMode = resolveMotionMode(reel);
-  const measuredCosts: MeasuredCostInput[] = [];
 
-  try {
-    await ensureDir(config.processingPath);
-
-    // 1. Plan (LLM script + scene graph)
-    await updateStatus(reelId, "planning", 5);
-    const canReusePlan = reel.scenes.length > 0 && Boolean(reel.title && reel.hook);
+  {
     reel.narrationVoice = tts;
-    if (canReusePlan) {
-      console.log(`♻️  Reusing existing plan/assets for reel ${reelId}`);
-    } else {
-      const plan = await planReel(reel.niche, reel.topic, reel.tier as Tier, reel.genre, (usage) => {
-        measuredCosts.push({
-          label: usage.label,
-          model: usage.model,
-          costUsd: usage.costUsd,
-          source: "actual",
-        });
-      });
-      reel.title = plan.title;
-      reel.hook = plan.hook;
-      reel.style = style.promptSuffix;
-      if (plan.storyBible) reel.storyBible = plan.storyBible;
-      if (plan.horrorReference) reel.horrorReference = plan.horrorReference;
-      reel.scenes = plan.scenes.map((s, i) => ({
-        index: i,
-        narration: s.narration,
-        visualPrompt: s.visualPrompt,
-        motion: {
-          type: motionTypeFor(motionMode, i, plan.scenes.length),
-          direction: i % 2 === 0 ? "in" : "out",
-        },
-        startTime: 0,
-        duration: 0,
-        // heroPolicy "one_climax" (horror/mythology/movie_recap today): the
-        // final scene is always the hero reveal — matches the "escalate dread,
-        // end on a twist" script structure. "trend_gated" heroPolicy isn't used
-        // by any hybrid_scene niche yet; revisit this if that changes.
-        isHero: isHybrid && i === plan.scenes.length - 1,
-      }));
-      await reel.save();
-    }
     console.log(
-      `🎨 Style: ${canReusePlan ? "reused" : style.id}${artRef ? ` (art-ref×${referenceImageUrls?.length ?? 0})` : ""} | ` +
-        `motion=${motionMode} | image=${imageModel} | voice=${tts.model}/${tts.voice}` +
+      `🎨 Producing reel ${reelId}${artRef ? ` (art-ref×${referenceImageUrls?.length ?? 0})` : ""} | ` +
+        `image=${imageModel} | voice=${tts.model}/${tts.voice}` +
         (isHybrid ? ` | hero=${models.video}` : "")
     );
 
@@ -523,6 +730,7 @@ export async function processReel(reelId: string): Promise<void> {
             horrorEffects: isHorrorNiche(reel.niche),
             comicEffects: reel.niche === "horror_comic",
             horrorAudioKey: reel.horrorAudioKey,
+            captionStyle: reel.captionStyle,
             onMotionUsage: (index, usage) => {
               measuredCosts.push({
                 label: `Motion ${index + 1}`,
@@ -586,8 +794,19 @@ export async function processReel(reelId: string): Promise<void> {
             horrorEffects: isHorrorNiche(reel.niche),
             comicEffects: reel.niche === "horror_comic",
             horrorAudioKey: reel.horrorAudioKey,
+            captionStyle: reel.captionStyle,
           }
         );
+    // Co-creatable cinematic edit FX (rain/grain/vignette/letterbox) — a final
+    // pass over the reel BODY, before the branded outro so the outro stays clean.
+    // Render-only: a caption/preset re-render re-applies these for free.
+    if (hasEditEffects(reel.editEffects)) {
+      const fxPath = join(config.processingPath, `${reelId}_fx.mp4`);
+      await applyEditEffects(result.videoPath, fxPath, reel.editEffects);
+      localFiles.push(fxPath);
+      result.videoPath = fxPath;
+    }
+
     const outroResult = await appendBrandedOutro(result.videoPath, reel, tts, (usage) => {
       measuredCosts.push({
         label: "Outro narration",
@@ -617,14 +836,20 @@ export async function processReel(reelId: string): Promise<void> {
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
-    reel.review = await buildReelReviewPackage(reel, (usage) => {
-      measuredCosts.push({
-        label: "Thumbnail image",
-        model: resolveModels("cheap").image,
-        costUsd: usage.costUsd,
-        source: usage.costUsd !== undefined ? "actual" : "estimated",
+    // Build the review package (incl. the AI thumbnail) only on the FIRST
+    // completion — a re-render (caption/preset edit) keeps the existing,
+    // possibly user-edited, review so we never re-spend on a thumbnail. The
+    // Studio's "Generate AI Thumbnail" button regenerates it on demand.
+    if (!reel.review) {
+      reel.review = await buildReelReviewPackage(reel, (usage) => {
+        measuredCosts.push({
+          label: "Thumbnail image",
+          model: resolveModels("cheap").image,
+          costUsd: usage.costUsd,
+          source: usage.costUsd !== undefined ? "actual" : "estimated",
+        });
       });
-    });
+    }
     const heroScene = isHybrid ? result.scenes.find((_, i) => reel.scenes[i]?.isHero) : undefined;
     const costBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
@@ -644,10 +869,6 @@ export async function processReel(reelId: string): Promise<void> {
 
     await cleanupFiles(localFiles);
     console.log(`🎉 Reel complete: ${reel._id} (${result.totalDuration.toFixed(1)}s)`);
-  } catch (error: unknown) {
-    await cleanupFiles(localFiles);
-    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
-    throw error;
   }
 }
 
@@ -782,6 +1003,10 @@ export async function getReel(id: string): Promise<IReel | null> {
 
 export async function listReels(limit = 50): Promise<IReel[]> {
   return Reel.find().sort({ createdAt: -1 }).limit(limit);
+}
+
+export async function listReelsBySeries(seriesId: string): Promise<IReel[]> {
+  return Reel.find({ seriesId }).sort({ partNumber: 1, createdAt: 1 });
 }
 
 /** Delete a reel's Mongo record, every S3 asset it produced (scene stills/audio,

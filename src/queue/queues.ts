@@ -23,6 +23,9 @@ const defaultJobOptions = {
 
 export interface ReelJobData {
   reelId: string;
+  /** undefined = full auto (plan+produce). "plan" stops at plan_review for
+   *  human review; "produce" runs assets→render→upload on an approved/edited plan. */
+  stage?: "plan" | "produce";
 }
 
 export interface CompositionJobData {
@@ -93,12 +96,29 @@ export async function enqueueReel(reelId: string): Promise<void> {
   await reelQueue.add("process", { reelId }, { jobId: reelId });
 }
 
-/** Remove a reel's job from the queue regardless of state (queued, stalled,
- *  failed, or completed) — used when deleting a reel so no orphaned job
- *  lingers or gets redelivered to a worker later. */
+/** Plan-only stage — cheap script/scene-graph, stops at plan_review. */
+export async function enqueueReelPlan(reelId: string): Promise<void> {
+  await reelQueue.add("process", { reelId, stage: "plan" }, { jobId: `${reelId}-plan` });
+}
+
+/** Produce stage — assets→render→upload on an approved/edited plan. Unique
+ *  jobId per run so repeated re-renders (edits) aren't deduped away. */
+export async function enqueueReelProduce(reelId: string): Promise<void> {
+  await reelQueue.add(
+    "process",
+    { reelId, stage: "produce" },
+    { jobId: `${reelId}-produce-${Date.now()}` }
+  );
+}
+
+/** Remove a reel's queued jobs regardless of state (queued, stalled, failed,
+ *  completed) — used when deleting a reel so no orphaned job lingers or gets
+ *  redelivered to a worker later. Covers the full-auto and plan job ids. */
 export async function removeReelJob(reelId: string): Promise<void> {
-  const job = await reelQueue.getJob(reelId);
-  await job?.remove();
+  for (const id of [reelId, `${reelId}-plan`]) {
+    const job = await reelQueue.getJob(id);
+    await job?.remove().catch(() => {});
+  }
 }
 
 export async function enqueuePublish(
