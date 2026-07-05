@@ -1,4 +1,4 @@
-import { cdnUrlFor } from "./s3.service";
+import { cdnUrlFor, getJson } from "./s3.service";
 import { ART_STYLES, artStylesForNiche, getArtStyle, type ArtStyle } from "../config/art-styles";
 
 // ============================================
@@ -36,21 +36,20 @@ interface ArtStyleManifest {
 }
 
 async function fetchManifest(): Promise<Map<string, { referenceKeys: string[]; attribution: ArtStyleAttribution[] }>> {
-  try {
-    const res = await fetch(cdnUrlFor("art-styles/manifest.json"));
-    if (!res.ok) return new Map();
-    const manifest = (await res.json()) as ArtStyleManifest;
-    return new Map(
-      (manifest.styles ?? [])
-        .filter((s) => s.id)
-        .map((s) => [
-          s.id!,
-          { referenceKeys: s.referenceKeys ?? [], attribution: s.attribution ?? [] },
-        ])
-    );
-  } catch {
-    return new Map();
-  }
+  // Read straight from S3 (not the CDN): CloudFront caches manifest.json and
+  // ignores query-busters, so a fetch via cdnUrlFor serves a stale manifest for
+  // a long time after `ingest-art-styles.ts` re-uploads it (a newly generated
+  // reference wouldn't appear). Mirrors listImageModels reading model-health.json.
+  const manifest = await getJson<ArtStyleManifest>("art-styles/manifest.json");
+  if (!manifest) return new Map();
+  return new Map(
+    (manifest.styles ?? [])
+      .filter((s) => s.id)
+      .map((s) => [
+        s.id!,
+        { referenceKeys: s.referenceKeys ?? [], attribution: s.attribution ?? [] },
+      ])
+  );
 }
 
 function toOption(style: ArtStyle, manifest: Map<string, { referenceKeys: string[]; attribution: ArtStyleAttribution[] }>): ArtStyleOption {

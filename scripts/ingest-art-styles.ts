@@ -22,6 +22,12 @@ import { ART_STYLES } from "../src/config/art-styles";
 // a strong, iconic exemplar scene (kept slightly ominous so it anchors mood too);
 // the style's promptSuffix is appended by generateImage.
 const GENERATE: Record<string, string> = {
+  // Preview is a CHARACTER hero shot (the signature "storytime comic" framing:
+  // expressive protagonist front-and-center, onlookers behind) so the card
+  // shows the style handles characters — not just empty scenes. Conditioned on
+  // a real reel frame (see CONDITION_FRAMES) for matching palette/line/shading.
+  classic_horror_comic:
+    "a lone frightened teenager with large expressive eyes standing front and center in a dark rainy alley at night, hands clenched, a few blurred onlookers watching from the shadows behind, dramatic streetlight glow",
   cartoon_3d_story:
     "a frightened wide-eyed man in a jacket standing on an empty city street at dusk, worried people behind him, dramatic storytelling framing",
   pixar_3d:
@@ -125,6 +131,35 @@ async function ingestStyle(id: string, sources: RefSource[]): Promise<ManifestSt
   return { id, referenceKeys, attribution };
 }
 
+// Real reel frames used to condition a style's generated preview so the render
+// (palette/line/shading) matches the reference. The prompt steers content, the
+// frame steers style. frame_000000 is caption-free (the first caption cue
+// starts at 0.080s). Paths are relative to server/.
+const CONDITION_FRAMES: Record<string, string[]> = {
+  classic_horror_comic: [
+    "storage/yt-imports/UmNFQ7gT_4E_the-lurker-story-usa-scarystory-truescarystory-a/frames/frame_000000.jpg",
+  ],
+};
+
+/** Upload local reel frames to S3 and return their CDN URLs for conditioning. */
+async function uploadConditionFrames(id: string): Promise<string[]> {
+  const paths = CONDITION_FRAMES[id];
+  if (!paths?.length) return [];
+  const urls: string[] = [];
+  for (let i = 0; i < paths.length; i += 1) {
+    try {
+      const buf = await readFile(paths[i]);
+      const filename = `${id}/_src-frame-${i + 1}.jpg`;
+      await uploadToS3(buf, "art-styles", filename, "image/jpeg");
+      urls.push(cdnUrlFor(`art-styles/${filename}`));
+      console.log(`  ↳ ${id} conditioning frame ${i + 1} ← ${paths[i]}`);
+    } catch (error) {
+      console.warn(`  ✗ ${id} conditioning frame ${i + 1} failed (${paths[i]}): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return urls;
+}
+
 /** Generate a style's reference frame with our own image model and upload it. */
 async function generateStyleRef(id: string, scenePrompt: string): Promise<ManifestStyle | undefined> {
   const style = ART_STYLES[id];
@@ -134,11 +169,18 @@ async function generateStyleRef(id: string, scenePrompt: string): Promise<Manife
   }
   const model = process.env.ART_REF_IMAGE_MODEL || "google/gemini-3.1-flash-image"; // value tier — crisp canonical anchor
   try {
-    const localPath = await generateImage(scenePrompt, style.promptSuffix, { model });
+    const referenceImageUrls = await uploadConditionFrames(id);
+    const localPath = await generateImage(scenePrompt, style.promptSuffix, {
+      model,
+      referenceImageUrls: referenceImageUrls.length ? referenceImageUrls : undefined,
+    });
     const buf = await readFile(localPath);
-    const filename = `${id}/ref-1.png`;
+    // Unique filename per generation so REGENERATING a preview yields a NEW CDN
+    // URL — CloudFront caches by path and ignores query-busters, so reusing
+    // ref-1.png would serve the stale old image indefinitely after a re-gen.
+    const filename = `${id}/ref-${Date.now()}.png`;
     await uploadToS3(buf, "art-styles", filename, "image/png");
-    console.log(`  ✓ ${id} ref-1 ← generated (${model})`);
+    console.log(`  ✓ ${id} ref ← generated (${model}) → ${filename}`);
     return {
       id,
       referenceKeys: [`art-styles/${filename}`],

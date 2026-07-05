@@ -37,6 +37,27 @@ export interface ArtStyle {
 // these defaults. Two refs per style is the sweet spot (style anchor + variety)
 // and stays under every provider's input_references cap.
 export const ART_STYLES: Record<string, ArtStyle> = {
+  // Reverse-engineered from the "the-lurker-story" reference reel
+  // (server/storage/yt-imports/…). This is the house look for horror reels.
+  // NOTE: promptSuffix describes ONLY the rendering style (medium/line/shading/
+  // palette/lighting/atmosphere/composition + HOW figures render when present)
+  // — it stays subject-agnostic (never forces a creature/character to appear);
+  // the story/planner supplies the actual subject.
+  classic_horror_comic: {
+    id: "classic_horror_comic",
+    displayName: "Classic Horror Comic",
+    niches: ["horror", "horror_comic"],
+    promptSuffix:
+      "2D hand-illustrated horror motion-comic still, full color painterly graphic-novel rendering, bold confident dark outlines with selective heavy inking and cross-hatching in close-ups, soft painterly cel-plus-texture shading with visible brush strokes and paper grain, expressive characters with clean bold linework and large emotive eyes when figures appear, heavily desaturated cool cinematic night palette of slate gray blue-teal and muted olive green, deep navy-to-black low-key shadows and strong vignette, blood red as the only saturated accent color, rain streaks drifting fog and floating grain, dramatic cinematic low-angle framing, eerie foreboding American-suburb creepypasta atmosphere, vertical 9:16",
+    // Reference/thumbnail is GENERATED (conditioned on the real reel) via
+    // `scripts/ingest-art-styles.ts --generate classic_horror_comic`, which
+    // writes the key into art-styles/manifest.json. Empty here so the picker
+    // shows the prompt-only placeholder (not a broken image) until then.
+    referenceKeys: [],
+    description:
+      "The Lurker look — full-color painterly horror motion-comic, desaturated cool night, heavy vignette, blood-red-only accent.",
+    motionHint: "parallax",
+  },
   ink_horror_comic: {
     id: "ink_horror_comic",
     displayName: "Ink Horror Comic",
