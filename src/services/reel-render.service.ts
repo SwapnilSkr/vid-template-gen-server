@@ -397,7 +397,16 @@ function copyVideo(input: string, output: string): Promise<string> {
 /** True when at least one edit effect is enabled (else the pass is a no-op copy). */
 export function hasEditEffects(fx?: IEditEffects): boolean {
   if (!fx) return false;
-  return Boolean(fx.rain) || Boolean(fx.letterbox) || (fx.grain ?? 0) > 0 || (fx.vignette ?? 0) > 0;
+  return (
+    Boolean(fx.rain) ||
+    Boolean(fx.letterbox) ||
+    (fx.grain ?? 0) > 0 ||
+    (fx.vignette ?? 0) > 0 ||
+    (fx.desaturate ?? 0) > 0 ||
+    (fx.flicker ?? 0) > 0 ||
+    (fx.chromatic ?? 0) > 0 ||
+    (fx.scanlines ?? 0) > 0
+  );
 }
 
 export function applyEditEffects(input: string, output: string, fx?: IEditEffects): Promise<string> {
@@ -409,13 +418,28 @@ export function applyEditEffects(input: string, output: string, fx?: IEditEffect
   const rainOp = clamp01(effects.rainIntensity ?? 0.5) * 0.7 + 0.2;
   const grain = Math.min(Math.max(effects.grain ?? 0, 0), 1.5);
   const vig = clamp01(effects.vignette ?? 0);
+  const desaturate = clamp01(effects.desaturate ?? 0);
+  const flicker = clamp01(effects.flicker ?? 0);
+  const chromatic = clamp01(effects.chromatic ?? 0);
+  const scanlines = clamp01(effects.scanlines ?? 0);
   const vigDivisor = (5.5 - vig * 2.5).toFixed(2); // strength 1 → PI/3.0, 0.5 → PI/4.25
   const bar = Math.round(H * 0.11); // cinematic bar height per edge
 
-  // Post-composite chain (applied after any rain overlay): grain → vignette → bars.
+  // Post-composite chain (applied after any rain overlay): cold grade → instability → analog texture → bars.
   const post: string[] = [];
+  if (desaturate > 0) post.push(`hue=s=${(1 - desaturate * 0.78).toFixed(2)}`);
+  if (flicker > 0) {
+    const a = (flicker * 0.045).toFixed(3);
+    const b = (flicker * 0.025).toFixed(3);
+    post.push(`eq=brightness='${a}*sin(2*PI*t*7)+${b}*sin(2*PI*t*13)'`);
+  }
+  if (chromatic > 0) {
+    const shift = Math.max(1, Math.round(chromatic * 8));
+    post.push(`rgbashift=rh=${shift}:bh=-${shift}`);
+  }
   if (grain > 0) post.push(`noise=alls=${Math.round(grain * 14)}:allf=t`);
   if (vig > 0) post.push(`vignette=PI/${vigDivisor}`);
+  if (scanlines > 0) post.push(`drawgrid=w=iw:h=4:t=1:c=black@${(scanlines * 0.28).toFixed(2)}`);
   if (effects.letterbox) {
     post.push(`drawbox=x=0:y=0:w=iw:h=${bar}:color=black:t=fill`);
     post.push(`drawbox=x=0:y=ih-${bar}:w=iw:h=${bar}:color=black:t=fill`);
@@ -472,6 +496,10 @@ export function applyEditEffects(input: string, output: string, fx?: IEditEffect
         rain ? "rain" : null,
         grain > 0 ? "grain" : null,
         vig > 0 ? "vignette" : null,
+        desaturate > 0 ? "desaturate" : null,
+        flicker > 0 ? "flicker" : null,
+        chromatic > 0 ? "chromatic" : null,
+        scanlines > 0 ? "scanlines" : null,
         effects.letterbox ? "letterbox" : null,
       ].filter(Boolean);
       console.log(`🎬 Edit effects applied: ${on.join(", ")}`);
