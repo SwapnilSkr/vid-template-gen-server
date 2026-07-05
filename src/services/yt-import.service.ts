@@ -79,6 +79,34 @@ function assetPaths(assetId: string) {
   };
 }
 
+export function frameFileName(frameIndex: number): string {
+  return `frame_${String(frameIndex).padStart(6, "0")}.jpg`;
+}
+
+/** Resolve S3 prefix even when not stored on older docs (API strips it from responses). */
+export function s3PrefixFor(doc: Pick<IYtImport, "assetId" | "s3Prefix">): string {
+  return doc.s3Prefix ?? `${S3_ROOT}/${doc.assetId}/`;
+}
+
+/** Resolve local asset directory for listing/deletion. */
+export function localDirFor(doc: Pick<IYtImport, "assetId" | "localDir">): string {
+  return doc.localDir ?? join(YT_IMPORTS_DIR, doc.assetId);
+}
+
+export interface YtImportFrameDelivery {
+  mode: "api" | "cdn";
+  /** CDN base through `frames/` — append frame_000001.jpg. Only set for S3. */
+  cdnFramesPrefix?: string;
+}
+
+export interface YtImportDetailPayload {
+  frameIndices: number[];
+  frameIndicesTotal: number;
+  frameDelivery: YtImportFrameDelivery;
+  framesExtracted: boolean;
+  frameCount: number;
+}
+
 function runCommand(bin: string, args: string[]): Promise<void> {
   return new Promise((resolvePromise, reject) => {
     const proc = spawn(bin, args);
@@ -223,8 +251,15 @@ async function clearExistingFrames(doc: IYtImport): Promise<void> {
   if (doc.storage === "local" && doc.localDir) {
     await rm(join(doc.localDir, paths.framesDir), { recursive: true, force: true }).catch(() => {});
   }
+  if (doc.storage === "local" && !doc.localDir) {
+    await rm(join(localDirFor(doc), paths.framesDir), { recursive: true, force: true }).catch(() => {});
+  }
   if (doc.storage === "s3" && doc.s3Prefix) {
     const keys = await listKeys(`${doc.s3Prefix}${paths.framesDir}/`);
+    await Promise.all(keys.map((key) => deleteKey(key)));
+  }
+  if (doc.storage === "s3" && !doc.s3Prefix) {
+    const keys = await listKeys(`${s3PrefixFor(doc)}${paths.framesDir}/`);
     await Promise.all(keys.map((key) => deleteKey(key)));
   }
 }
@@ -409,29 +444,39 @@ export async function extractFramesForImport(
   let tempDir: string | undefined;
 
   if (doc.storage === "local") {
-    videoPath = join(doc.localDir!, paths.videoFile);
-    framesDir = join(doc.localDir!, paths.framesDir);
+    videoPath = join(localDirFor(doc), paths.videoFile);
+    framesDir = join(localDirFor(doc), paths.framesDir);
   } else {
     tempDir = join(config.processingPath, `yt_frames_${doc.assetId}`);
     await ensureDir(tempDir);
     videoPath = join(tempDir, paths.videoFile);
     framesDir = join(tempDir, paths.framesDir);
 
-    const videoKey = `${paths.s3Prefix}${paths.videoFile}`;
+    const videoKey = `${s3PrefixFor(doc)}${paths.videoFile}`;
     const res = await fetch(cdnUrlFor(videoKey));
     if (!res.ok) throw new Error("Failed to fetch video from S3 for frame extraction");
     await Bun.write(videoPath, await res.arrayBuffer());
   }
 
-  const { frameCount, fps } = await extractFramesInRange(videoPath, framesDir, range, (pct) => {
-    void updateImport(importId, { progress: 75 + Math.round(pct * 0.24) });
-  });
+  const { frameCount: extractedCount, fps } = await extractFramesInRange(
+    videoPath,
+    framesDir,
+    range,
+    (pct) => {
+      void updateImport(importId, { progress: 75 + Math.round(pct * 0.24) });
+    }
+  );
+
+  let finalFrameCount = extractedCount;
 
   if (doc.storage === "s3") {
     const frameFiles = (await readdir(framesDir)).filter((f) => f.endsWith(".jpg")).sort();
+    if (frameFiles.length === 0) {
+      throw new Error("Frame extraction produced no files");
+    }
     let uploaded = 0;
     for (const file of frameFiles) {
-      const key = `${paths.s3Prefix}${paths.framesDir}/${file}`;
+      const key = `${s3PrefixFor(doc)}${paths.framesDir}/${file}`;
       await uploadFileAtKey(join(framesDir, file), key, "image/jpeg");
       uploaded++;
       if (uploaded % 50 === 0) {
@@ -440,13 +485,25 @@ export async function extractFramesForImport(
         });
       }
     }
-    if (tempDir) await rm(tempDir, { recursive: true, force: true });
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+
+    const verifyKeys = await listKeys(`${s3PrefixFor(doc)}${paths.framesDir}/`);
+    if (verifyKeys.length === 0) {
+      throw new Error("S3 frame upload verification failed — no objects found");
+    }
+    finalFrameCount = verifyKeys.length;
+  } else {
+    const localFrames = (await readdir(framesDir)).filter((f) => f.endsWith(".jpg"));
+    if (localFrames.length === 0) {
+      throw new Error("Frame extraction produced no files");
+    }
+    finalFrameCount = localFrames.length;
   }
 
   await updateImport(importId, {
     status: "completed",
     progress: 100,
-    frameCount,
+    frameCount: finalFrameCount,
     fps,
     framesExtracted: true,
   });
@@ -473,36 +530,40 @@ export async function getLocalAssetPath(
   kind: "video" | "audio" | "captions" | "frame",
   frameIndex?: number
 ): Promise<string | null> {
-  if (doc.storage !== "local" || !doc.localDir) return null;
+  if (doc.storage !== "local") return null;
   const paths = assetPaths(doc.assetId);
+  const base = localDirFor(doc);
   switch (kind) {
     case "video":
-      return join(doc.localDir, paths.videoFile);
+      return join(base, paths.videoFile);
     case "audio":
-      return join(doc.localDir, paths.audioFile);
+      return join(base, paths.audioFile);
     case "captions":
-      return join(doc.localDir, paths.captionsFile);
+      return join(base, paths.captionsFile);
     case "frame": {
       if (frameIndex == null) return null;
-      const file = `frame_${String(frameIndex).padStart(6, "0")}.jpg`;
-      return join(doc.localDir, paths.framesDir, file);
+      return join(base, paths.framesDir, frameFileName(frameIndex));
     }
   }
 }
 
 export function frameUrlFor(doc: IYtImport, frameIndex: number): string {
+  const id = String(doc._id);
+  return frameUrlForImport(doc, id, frameIndex);
+}
+
+function frameUrlForImport(doc: IYtImport, importId: string, frameIndex: number): string {
   if (doc.storage === "local") {
-    return `/api/yt-imports/${doc._id}/frames/${frameIndex}`;
+    return `/api/yt-imports/${importId}/frames/${frameIndex}`;
   }
   const paths = assetPaths(doc.assetId);
-  const file = `frame_${String(frameIndex).padStart(6, "0")}.jpg`;
-  return cdnUrlFor(`${paths.s3Prefix}${paths.framesDir}/${file}`);
+  return cdnUrlFor(`${s3PrefixFor(doc)}${paths.framesDir}/${frameFileName(frameIndex)}`);
 }
 
 export async function listFrameIndices(doc: IYtImport): Promise<number[]> {
   const paths = assetPaths(doc.assetId);
-  if (doc.storage === "local" && doc.localDir) {
-    const dir = join(doc.localDir, paths.framesDir);
+  if (doc.storage === "local") {
+    const dir = join(localDirFor(doc), paths.framesDir);
     try {
       const files = await readdir(dir);
       return files
@@ -514,8 +575,9 @@ export async function listFrameIndices(doc: IYtImport): Promise<number[]> {
       return [];
     }
   }
-  if (doc.storage === "s3" && doc.s3Prefix) {
-    const keys = await listKeys(`${doc.s3Prefix}${paths.framesDir}/`);
+  if (doc.storage === "s3") {
+    const prefix = `${s3PrefixFor(doc)}${paths.framesDir}/`;
+    const keys = await listKeys(prefix);
     return keys
       .map((k) => {
         const name = k.split("/").pop() ?? "";
@@ -526,6 +588,52 @@ export async function listFrameIndices(doc: IYtImport): Promise<number[]> {
       .sort((a, b) => a - b);
   }
   return [];
+}
+
+export function frameDeliveryFor(doc: IYtImport): YtImportFrameDelivery {
+  if (doc.storage === "s3") {
+    const prefix = s3PrefixFor(doc);
+    return {
+      mode: "cdn",
+      cdnFramesPrefix: cdnUrlFor(`${prefix}${assetPaths(doc.assetId).framesDir}/`),
+    };
+  }
+  return { mode: "api" };
+}
+
+/** Probe storage (local or S3), reconcile Mongo flags, return frame listing for API. */
+export async function resolveImportFrameAssets(
+  doc: IYtImport,
+  importId: string
+): Promise<YtImportDetailPayload> {
+  const shouldProbe =
+    doc.videoUrl != null &&
+    (doc.framesExtracted ||
+      doc.frameCount > 0 ||
+      doc.extractFrames ||
+      doc.status === "extracting_frames");
+
+  let indices: number[] = [];
+  if (shouldProbe) {
+    indices = await listFrameIndices(doc);
+  }
+
+  if (indices.length > 0 && (!doc.framesExtracted || doc.frameCount !== indices.length)) {
+    await YtImport.findByIdAndUpdate(importId, {
+      framesExtracted: true,
+      frameCount: indices.length,
+    });
+    doc.framesExtracted = true;
+    doc.frameCount = indices.length;
+  }
+
+  return {
+    frameIndices: indices.slice(0, 500),
+    frameIndicesTotal: indices.length,
+    frameDelivery: frameDeliveryFor(doc),
+    framesExtracted: doc.framesExtracted || indices.length > 0,
+    frameCount: indices.length > 0 ? indices.length : doc.frameCount,
+  };
 }
 
 export async function extractAudioClip(
@@ -540,8 +648,8 @@ export async function extractAudioClip(
   let sourceVideo: string;
   let cleanupSource: string[] = [];
 
-  if (doc.storage === "local" && doc.localDir) {
-    sourceVideo = join(doc.localDir, paths.videoFile);
+  if (doc.storage === "local") {
+    sourceVideo = join(localDirFor(doc), paths.videoFile);
   } else {
     const tempVideo = join(config.processingPath, `clip_src_${doc.assetId}.mp4`);
     const res = await fetch(doc.videoUrl!);

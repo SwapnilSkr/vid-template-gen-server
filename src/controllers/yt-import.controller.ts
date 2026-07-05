@@ -18,9 +18,11 @@ import {
   extractAudioClip,
   getLocalAssetPath,
   getYtImport,
-  listFrameIndices,
   listYtImports,
   normalizeFrameRange,
+  resolveImportFrameAssets,
+  frameFileName,
+  s3PrefixFor,
 } from "../services/yt-import.service";
 import { YtImport } from "../models";
 import { enqueueYtImport, enqueueYtImportFrames } from "../queue/queues";
@@ -95,13 +97,12 @@ export async function getYtImportController({ params, set }: IdContext) {
     set.status = 404;
     return { success: false, error: "Import not found" };
   }
-  const frames = doc.framesExtracted ? await listFrameIndices(doc) : [];
+  const frames = await resolveImportFrameAssets(doc, params.id);
   return {
     success: true,
     data: {
       ...serializeImport(doc),
-      frameIndices: frames.slice(0, 500),
-      frameIndicesTotal: frames.length,
+      ...frames,
     },
   };
 }
@@ -272,13 +273,10 @@ export async function streamFrameController({ params, set }: FrameContext) {
     return { success: false, error: "Invalid frame index" };
   }
   if (doc.storage === "s3") {
-    if (!doc.s3Prefix) {
-      set.status = 404;
-      return { success: false, error: "Frame not found" };
-    }
-    const file = `frame_${String(frameIndex).padStart(6, "0")}.jpg`;
-    const { cdnUrlFor } = await import("../services/s3.service");
-    set.redirect = cdnUrlFor(`${doc.s3Prefix}frames/${file}`);
+    const { cdnUrlFor: cdn } = await import("../services/s3.service");
+    set.redirect = cdn(
+      `${s3PrefixFor(doc)}frames/${frameFileName(frameIndex)}`
+    );
     return;
   }
   return streamLocalAsset(doc, "frame", set, frameIndex);
