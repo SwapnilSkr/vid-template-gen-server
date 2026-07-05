@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { reconcileS3Controller, purgeFailedReelsController } from "../controllers";
+import { cleanupLocalProcessingController, reconcileS3Controller, purgeFailedReelsController } from "../controllers";
 
 // ============================================
 // Cleanup/reconciliation routes — on-demand triggers for the same logic the
@@ -10,5 +10,11 @@ import { reconcileS3Controller, purgeFailedReelsController } from "../controller
 export const maintenanceRoutes = new Elysia({ prefix: "/api/maintenance" })
   .get("/s3-reconcile", reconcileS3Controller, {
     query: t.Object({ apply: t.Optional(t.String()) }),
+  })
+  .get("/local-processing-cleanup", cleanupLocalProcessingController, {
+    query: t.Object({
+      apply: t.Optional(t.String()),
+      olderThanHours: t.Optional(t.String()),
+    }),
   })
   .post("/reels/purge-failed", purgeFailedReelsController);

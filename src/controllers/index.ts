@@ -62,6 +62,9 @@ export {
   regenerateReelController,
   approvePlanController,
   replanReelController,
+  saveReelEditDraftController,
+  discardReelEditDraftController,
+  getReelDraftAssetController,
   listStylePresetsController,
   listFontsController,
   customFrameThumbnailController,
@@ -92,7 +95,11 @@ export {
 } from "./yt-import.controller";
 
 // Maintenance controllers
-export { reconcileS3Controller, purgeFailedReelsController } from "./maintenance.controller";
+export {
+  reconcileS3Controller,
+  cleanupLocalProcessingController,
+  purgeFailedReelsController,
+} from "./maintenance.controller";
 
 // Voice controllers
 export { listVoicesController } from "./voice.controller";

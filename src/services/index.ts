@@ -46,6 +46,7 @@ export * from "./voice-sample.service";
 export * from "./model-catalog.service";
 export * from "./horror-audio.service";
 export * from "./s3-reconciliation.service";
+export * from "./local-cleanup.service";
 
 // Distribution (publish rendered reels to platforms)
 export * from "./youtube-publish.service";

@@ -1,5 +1,5 @@
-import { mkdir, stat, unlink, readdir } from "node:fs/promises";
-import { join, extname } from "node:path";
+import { mkdir, stat, unlink, readdir, rm } from "node:fs/promises";
+import { join, extname, resolve } from "node:path";
 import { config } from "../config";
 import { isNodeError } from "../types";
 
@@ -53,6 +53,16 @@ export async function cleanupFiles(filePaths: string[]): Promise<void> {
     .filter((path) => path && !path.startsWith("http")) // Skip URLs and empty paths
     .map((path) => deleteFile(path));
   await Promise.all(deletePromises);
+}
+
+/** Delete a directory tree if it lives under the configured storage root. */
+export async function cleanupDirectory(dirPath: string): Promise<void> {
+  const storageRoot = resolve(config.storagePath);
+  const target = resolve(dirPath);
+  if (!target.startsWith(storageRoot)) {
+    throw new Error(`Refusing to delete outside storage: ${dirPath}`);
+  }
+  await rm(target, { recursive: true, force: true });
 }
 
 /**

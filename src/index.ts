@@ -18,6 +18,7 @@ import {
 } from "./routes";
 import { initializeStorage } from "./utils";
 import { ensureYtImportsStorage } from "./services/yt-import.service";
+import { cleanupLocalProcessingOnStartup } from "./services/local-cleanup.service";
 import { startStoryTopUpScheduler } from "./services/story-scheduler.service";
 import { startWorkers } from "./queue/workers";
 
@@ -34,6 +35,7 @@ async function initialize() {
   // Initialize storage directories
   await initializeStorage();
   await ensureYtImportsStorage();
+  await cleanupLocalProcessingOnStartup();
 }
 
 // Create Elysia app
