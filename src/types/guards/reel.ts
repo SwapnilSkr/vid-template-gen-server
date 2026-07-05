@@ -184,6 +184,12 @@ export const RegenerateReelBody = t.Object({
 });
 export type TRegenerateReelBody = typeof RegenerateReelBody.static;
 
+export const DraftAssetParams = t.Object({
+  draftId: t.String(),
+  filename: t.String(),
+});
+export type TDraftAssetParams = typeof DraftAssetParams.static;
+
 export const ReplanReelBody = t.Object({
   topic: t.Optional(t.String()),
   providedScript: t.Optional(t.String()),

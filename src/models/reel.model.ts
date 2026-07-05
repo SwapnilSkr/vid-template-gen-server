@@ -140,6 +140,27 @@ export interface IVoiceVariant {
   createdAt: Date;
 }
 
+export interface ISceneDraftAsset {
+  index: number;
+  assetUrl?: string;
+  audioUrl?: string;
+  assetPath?: string;
+  audioPath?: string;
+}
+
+export interface IReelEditDraft {
+  id: string;
+  kind: "scene_regen" | "render_only";
+  status: "ready";
+  sceneAssets: ISceneDraftAsset[];
+  outputUrl?: string;
+  outputPath?: string;
+  subtitlesUrl?: string;
+  subtitlesPath?: string;
+  rootDir: string;
+  createdAt: Date;
+}
+
 /** YouTube publish state — separate from the render pipeline `status` so a
  *  publish retry never re-triggers rendering/asset generation. */
 export interface IYouTubePublish {
@@ -261,6 +282,7 @@ export interface IReel extends Document {
   voiceOverride?: IVoiceOverride;
   narrationVoice?: IVoiceOverride;
   voiceVariants: IVoiceVariant[];
+  editDraft?: IReelEditDraft;
 
   status: ReelStatus;
   progress: number;
@@ -420,6 +442,33 @@ const voiceVariantSchema = new Schema<IVoiceVariant>(
   { _id: false }
 );
 
+const sceneDraftAssetSchema = new Schema<ISceneDraftAsset>(
+  {
+    index: { type: Number, required: true },
+    assetUrl: String,
+    audioUrl: String,
+    assetPath: String,
+    audioPath: String,
+  },
+  { _id: false }
+);
+
+const reelEditDraftSchema = new Schema<IReelEditDraft>(
+  {
+    id: { type: String, required: true },
+    kind: { type: String, enum: ["scene_regen", "render_only"], required: true },
+    status: { type: String, enum: ["ready"], default: "ready" },
+    sceneAssets: { type: [sceneDraftAssetSchema], default: [] },
+    outputUrl: String,
+    outputPath: String,
+    subtitlesUrl: String,
+    subtitlesPath: String,
+    rootDir: { type: String, required: true },
+    createdAt: { type: Date, default: () => new Date() },
+  },
+  { _id: false }
+);
+
 const youtubePublishSchema = new Schema<IYouTubePublish>(
   {
     status: {
@@ -542,6 +591,7 @@ const reelSchema = new Schema<IReel>(
     voiceOverride: voiceOverrideSchema,
     narrationVoice: voiceOverrideSchema,
     voiceVariants: { type: [voiceVariantSchema], default: [] },
+    editDraft: reelEditDraftSchema,
     status: {
       type: String,
       enum: [

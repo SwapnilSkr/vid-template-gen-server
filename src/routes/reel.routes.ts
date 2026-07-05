@@ -18,6 +18,7 @@ import {
   UpdateCaptionsBody,
   RegenerateReelBody,
   ReplanReelBody,
+  DraftAssetParams,
 } from "../types/guards";
 import {
   createReelController,
@@ -45,6 +46,9 @@ import {
   regenerateReelController,
   approvePlanController,
   replanReelController,
+  saveReelEditDraftController,
+  discardReelEditDraftController,
+  getReelDraftAssetController,
 } from "../controllers";
 
 // ============================================
@@ -66,6 +70,12 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   // List every reel in a multipart series
   .get("/series/:seriesId", listReelSeriesController, {
     params: SeriesParams,
+  })
+
+  // Local staged edit assets. These are not S3 objects and are removed when
+  // the user saves/discards the pending draft or local cleanup sweeps them.
+  .get("/drafts/:draftId/assets/:filename", getReelDraftAssetController, {
+    params: DraftAssetParams,
   })
 
   // Get reel status/progress
@@ -174,4 +184,8 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .post("/:id/regenerate", regenerateReelController, {
     params: IdParams,
     body: RegenerateReelBody,
-  });
+  })
+
+  // Commit or discard the currently staged local editor draft.
+  .post("/:id/edit-draft/save", saveReelEditDraftController, { params: IdParams })
+  .post("/:id/edit-draft/discard", discardReelEditDraftController, { params: IdParams });

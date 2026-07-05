@@ -56,8 +56,16 @@ import type {
   TReplanReelBody,
   TCustomThumbnailBody,
   TSeriesParams,
+  TDraftAssetParams,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
+import {
+  createReelEditDraft,
+  createSceneEditDraft,
+  discardEditDraft,
+  getDraftAssetPath,
+  saveEditDraft,
+} from "../services/reel-edit-draft.service";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -231,6 +239,7 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       voiceOverride: reel.voiceOverride,
       narrationVoice: reel.narrationVoice,
       voiceVariants: reel.voiceVariants,
+      editDraft: reel.editDraft,
     },
   };
 }
@@ -518,6 +527,9 @@ interface ReplanContext extends Context {
   params: TIdParams;
   body: TReplanReelBody;
 }
+interface DraftAssetContext extends Context {
+  params: TDraftAssetParams;
+}
 
 /** Shared 400 wrapper for the edit endpoints (all just mutate + return reel). */
 async function runEdit(set: Context["set"], action: () => Promise<unknown>) {
@@ -536,7 +548,7 @@ export async function updateSceneController({ params, body, set }: SceneEditCont
 
 /** Regenerate a single scene's image and/or audio (surgical, reuses the rest). */
 export async function regenerateSceneController({ params, body, set }: SceneRegenContext) {
-  return runEdit(set, () => regenerateScene(params.id, parseInt(params.index, 10), body.regenerate));
+  return runEdit(set, () => createSceneEditDraft(params.id, parseInt(params.index, 10), body.regenerate));
 }
 
 /** Insert a new scene (optionally at a position). */
@@ -566,7 +578,7 @@ export async function updateCaptionsController({ params, body, set }: CaptionsCo
 
 /** Queue a produce run — render-only (reuse assets) or full asset regeneration. */
 export async function regenerateReelController({ params, body, set }: RegenerateReelContext) {
-  return runEdit(set, () => regenerateReel(params.id, body.mode));
+  return runEdit(set, () => createReelEditDraft(params.id, body.mode));
 }
 
 /** Approve a reviewed plan → start producing. */
@@ -577,6 +589,28 @@ export async function approvePlanController({ params, set }: GetReelContext) {
 /** Discard the plan and re-plan (new story / reference / pasted script). */
 export async function replanReelController({ params, body, set }: ReplanContext) {
   return runEdit(set, () => replanReel(params.id, body));
+}
+
+export async function saveReelEditDraftController({ params, set }: GetReelContext) {
+  return runEdit(set, () => saveEditDraft(params.id));
+}
+
+export async function discardReelEditDraftController({ params, set }: GetReelContext) {
+  return runEdit(set, () => discardEditDraft(params.id));
+}
+
+export async function getReelDraftAssetController({ params, set }: DraftAssetContext) {
+  try {
+    const path = await getDraftAssetPath(params.draftId, params.filename);
+    if (params.filename.endsWith(".mp4")) set.headers["content-type"] = "video/mp4";
+    else if (params.filename.endsWith(".mp3")) set.headers["content-type"] = "audio/mpeg";
+    else if (params.filename.endsWith(".png")) set.headers["content-type"] = "image/png";
+    else if (params.filename.endsWith(".ass")) set.headers["content-type"] = "text/plain";
+    return Bun.file(path);
+  } catch (error: unknown) {
+    set.status = 404;
+    return { success: false, error: getErrorMessage(error) };
+  }
 }
 
 /** List the style-preset bundles (optionally filtered by niche). */
