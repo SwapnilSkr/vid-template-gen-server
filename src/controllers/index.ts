@@ -59,6 +59,7 @@ export {
   reorderScenesController,
   updateReelSettingsController,
   updateCaptionsController,
+  applyCaptionsController,
   regenerateReelController,
   approvePlanController,
   replanReelController,

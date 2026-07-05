@@ -43,6 +43,7 @@ import {
   reorderScenesController,
   updateReelSettingsController,
   updateCaptionsController,
+  applyCaptionsController,
   regenerateReelController,
   approvePlanController,
   replanReelController,
@@ -176,6 +177,12 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
 
   // Caption look (manual, non-AI)
   .put("/:id/captions", updateCaptionsController, {
+    params: IdParams,
+    body: UpdateCaptionsBody,
+  })
+
+  // Re-render with new caption style, upload, and delete superseded output.
+  .post("/:id/captions/apply", applyCaptionsController, {
     params: IdParams,
     body: UpdateCaptionsBody,
   })

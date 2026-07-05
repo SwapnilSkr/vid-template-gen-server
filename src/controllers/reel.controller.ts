@@ -65,6 +65,7 @@ import {
   discardEditDraft,
   getDraftAssetPath,
   saveEditDraft,
+  applyCaptionsAndRender,
 } from "../services/reel-edit-draft.service";
 
 // ============================================
@@ -574,6 +575,11 @@ export async function updateReelSettingsController({ params, body, set }: Settin
 /** Update the caption look (manual, non-AI). */
 export async function updateCaptionsController({ params, body, set }: CaptionsContext) {
   return runEdit(set, () => updateCaptions(params.id, body));
+}
+
+/** Persist caption style, re-render, upload, and delete the superseded output. */
+export async function applyCaptionsController({ params, body, set }: CaptionsContext) {
+  return runEdit(set, () => applyCaptionsAndRender(params.id, body));
 }
 
 /** Queue a produce run — render-only (reuse assets) or full asset regeneration. */
