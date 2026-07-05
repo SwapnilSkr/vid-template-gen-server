@@ -37,6 +37,7 @@ export * from "./reddit-card.service";
 export * from "./gameplay-ingest.service";
 export * from "./story.service";
 export * from "./reel.service";
+export * from "./reel-edit.service";
 export * from "./trend-reference.service";
 export * from "./horror-reference.service";
 export * from "./trend-scout.service";

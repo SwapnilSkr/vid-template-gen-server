@@ -69,6 +69,30 @@ export interface PlannedReel {
   horrorReference?: IHorrorReferencePayload;
 }
 
+export interface HorrorSeriesPartPlan {
+  partNumber: number;
+  partCount: number;
+  title: string;
+  hook: string;
+  brief: string;
+  openingState: string;
+  endingState: string;
+  cliffhanger?: string;
+}
+
+export interface HorrorSeriesPlan {
+  title: string;
+  storyBible: IStoryBible;
+  parts: HorrorSeriesPartPlan[];
+  horrorReference?: IHorrorReferencePayload;
+}
+
+export interface HorrorPlanningContext {
+  storyBible?: IStoryBible;
+  partNumber?: number;
+  partCount?: number;
+}
+
 function planningModelFor(recipe: NicheRecipe, tier: Tier): string {
   return process.env.LLM_MODEL || recipe.scriptModel || resolveModels(tier).llm;
 }
@@ -127,11 +151,13 @@ export async function planReel(
   topic: string,
   tier: Tier = "value",
   genre?: string,
-  onLlmUsage?: LlmUsageCallback
+  onLlmUsage?: LlmUsageCallback,
+  referenceId?: string,
+  context: HorrorPlanningContext = {}
 ): Promise<PlannedReel> {
   const recipe = getRecipe(niche);
   // Horror runs a two-pass planner (story bible → scene script) for depth.
-  if (isHorrorRecipe(recipe)) return planHorrorReel(niche, topic, tier, genre, onLlmUsage);
+  if (isHorrorRecipe(recipe)) return planHorrorReel(niche, topic, tier, genre, onLlmUsage, referenceId, context);
   const llm = planningModelFor(recipe, tier);
   const trendBlock = await buildTrendBlock(niche, genre);
   const horror = isHorrorRecipe(recipe);
@@ -227,13 +253,15 @@ export async function planHorrorReel(
   topic: string,
   tier: Tier = "value",
   genre?: string,
-  onLlmUsage?: LlmUsageCallback
+  onLlmUsage?: LlmUsageCallback,
+  referenceId?: string,
+  context: HorrorPlanningContext = {}
 ): Promise<PlannedReel> {
   const recipe = getRecipe(niche);
   const llm = planningModelFor(recipe, tier);
   const trendBlock = await buildTrendBlock(niche, genre);
   const seed = topic?.trim() && topic.trim().toLowerCase() !== "auto" ? topic.trim() : "";
-  const reference = await pickHorrorReferenceSeed(genre).catch((error: unknown) => {
+  const reference = await pickHorrorReferenceSeed(genre, referenceId).catch((error: unknown) => {
     console.warn(`⚠️ Horror reference seed unavailable: ${getErrorMessage(error)}`);
     return undefined;
   });
@@ -261,19 +289,33 @@ OUTPUT JSON ONLY (no markdown):
 }`;
 
   let bible: IStoryBible;
-  try {
-    const { text, usage } = await generateText({ model: openrouter(llm), prompt: biblePrompt, temperature: 0.9 });
-    reportLlmUsage(onLlmUsage, "Story bible", llm, usage);
-    bible = extractJson<IStoryBible>(text);
-    if (!bible.anchorObject || !bible.impossibleRule || !bible.escalation?.length) {
-      throw new Error("Incomplete story bible");
+  if (context.storyBible) {
+    bible = context.storyBible;
+  } else {
+    try {
+      const { text, usage } = await generateText({ model: openrouter(llm), prompt: biblePrompt, temperature: 0.9 });
+      reportLlmUsage(onLlmUsage, "Story bible", llm, usage);
+      bible = extractJson<IStoryBible>(text);
+      if (!bible.anchorObject || !bible.impossibleRule || !bible.escalation?.length) {
+        throw new Error("Incomplete story bible");
+      }
+    } catch (error: unknown) {
+      throw new Error(`Horror story-bible pass failed: ${getErrorMessage(error)}`);
     }
-  } catch (error: unknown) {
-    throw new Error(`Horror story-bible pass failed: ${getErrorMessage(error)}`);
   }
   console.log(`📖 Story bible: "${bible.premise}" — anchor: ${bible.anchorObject}`);
 
   // ---- Pass 2: Scene script from the bible ----
+  const partInstruction =
+    context.partNumber && context.partCount && context.partCount > 1
+      ? `\nSERIES PART: Write part ${context.partNumber} of ${context.partCount}. This part seed is: ${seed || "continue the series arc"}.
+- Keep the shared story bible consistent across all parts.
+- This part must work as a complete one-minute episode while clearly belonging to a larger story.
+- Do not resolve the full final twist unless this is the final part.
+- If this is not the final part, end on a concrete unresolved consequence that makes the next part necessary.
+`
+      : "";
+
   const scriptPrompt = `You are dramatizing a developed horror story into a ${recipe.sceneCount}-scene vertical reel. Follow the STORY BIBLE exactly — same anchor object, same rule, same escalation order, ending on the final twist.
 
 STORY BIBLE:
@@ -285,6 +327,7 @@ STORY BIBLE:
 - Escalation: ${bible.escalation.map((b, i) => `${i + 1}. ${b}`).join("  ")}
 - Art direction (apply to EVERY visualPrompt): ${bible.artDirection}
 - Final line: ${bible.finalTwist}
+${partInstruction}
 
 HORROR QUALITY BAR:
 - Believable first-person witness account recorded after the fact, not a campfire story.
@@ -325,6 +368,163 @@ Exactly ${recipe.sceneCount} scenes. Scene 1's narration is the HOOK — grab at
     return planned;
   } catch (error: unknown) {
     throw new Error(`Horror scene-script pass failed: ${getErrorMessage(error)}`);
+  }
+}
+
+export async function planHorrorSeries(
+  niche: string,
+  topic: string,
+  tier: Tier = "value",
+  genre?: string,
+  partCount = 2,
+  onLlmUsage?: LlmUsageCallback,
+  referenceId?: string
+): Promise<HorrorSeriesPlan> {
+  const recipe = getRecipe(niche);
+  const llm = planningModelFor(recipe, tier);
+  const trendBlock = await buildTrendBlock(niche, genre);
+  const seed = topic?.trim() && topic.trim().toLowerCase() !== "auto" ? topic.trim() : "";
+  const isSourceStory = countWords(seed) >= 80;
+  const reference = await pickHorrorReferenceSeed(genre, referenceId).catch((error: unknown) => {
+    console.warn(`⚠️ Horror reference seed unavailable: ${getErrorMessage(error)}`);
+    return undefined;
+  });
+  const referenceBlock = reference
+    ? `\nPUBLIC-DOMAIN HORROR REFERENCE FOR INSPIRATION ONLY:\n${reference.promptBrief}\n\nREFERENCE RULES:\n- Borrow only atmosphere, dread mechanics, sensory texture, escalation shape, or twist discipline.
+- Do NOT copy plot events, names, locations, sentences, or distinctive phrasing.\n`
+    : "";
+
+  const prompt = `You are a literary horror showrunner planning a ${partCount}-part vertical-video horror series. Each part will become its own 55-75 second reel with its own scene script later.
+
+NICHE: ${recipe.displayName}
+GENRE: ${genre ?? "unsettling everyday horror"}
+${seed ? (isSourceStory ? `AUTHOR'S SOURCE STORY TO ADAPT INTO A SERIES:\n"""\n${seed}\n"""\n` : `SEED IDEA: ${seed}`) : "Invent an original, specific premise."}${trendBlock}${referenceBlock}
+
+Create one shared story bible and exactly ${partCount} part briefs. The series must be one continuous first-person witness account built around one ordinary object or place breaking one impossible rule.
+
+RULES:
+- If an author's source story is provided, preserve its premise, meaning, major turns, and ending. Split/adapt it into episodes; do not replace it with a new story.
+- Each part needs a clear beginning, escalation, and end-state.
+- Non-final parts must end on an unresolved concrete consequence, not a vague teaser.
+- The final part must land the final twist and consequence from the shared bible.
+- Keep it producible as faceless horror: concrete objects, rooms, reflections, sounds, timestamps, and repeated visual motifs.
+- Avoid gore, monsters, lore dumps, and generic jump-scare phrasing.
+
+OUTPUT JSON ONLY (no markdown):
+{
+  "title": "series title",
+  "storyBible": {
+    "premise": "one-sentence logline",
+    "setting": "specific place + time",
+    "protagonist": "who is telling this, one line",
+    "anchorObject": "the single ordinary object/place that becomes impossible",
+    "impossibleRule": "the one supernatural law this story obeys",
+    "escalation": ["series beat 1", "series beat 2", "... 8-12 beats across all parts"],
+    "soundCues": ["one concrete diegetic sound per major beat"],
+    "artDirection": "recurring visual motifs, palette, lighting, and how the anchor object should always look",
+    "finalTwist": "the final spoken implication/consequence"
+  },
+  "parts": [
+    {
+      "partNumber": 1,
+      "partCount": ${partCount},
+      "title": "episode title",
+      "hook": "on-screen hook text <= 8 words",
+      "brief": "what this part dramatizes, including the exact escalation beats it owns",
+      "openingState": "where this part starts",
+      "endingState": "where this part ends",
+      "cliffhanger": "specific unresolved consequence, blank only for final part"
+    }
+  ]
+}`;
+
+  try {
+    const { text, usage } = await generateText({ model: openrouter(llm), prompt, temperature: 0.86 });
+    reportLlmUsage(onLlmUsage, "Horror series plan", llm, usage);
+    const parsed = extractJson<HorrorSeriesPlan>(text);
+    if (!parsed.storyBible?.anchorObject || !Array.isArray(parsed.parts) || parsed.parts.length !== partCount) {
+      throw new Error("Incomplete horror series plan");
+    }
+    parsed.parts = parsed.parts.map((part, i) => ({
+      ...part,
+      partNumber: i + 1,
+      partCount,
+    }));
+    if (reference) {
+      parsed.horrorReference = {
+        referenceId: new Types.ObjectId(reference.id),
+        title: reference.title,
+        author: reference.author,
+        sourceUrl: reference.sourceUrl,
+        license: reference.license,
+      };
+    }
+    console.log(`📚 Horror series plan: "${parsed.title}" — ${partCount} parts`);
+    return parsed;
+  } catch (error: unknown) {
+    throw new Error(`Horror series planning failed: ${getErrorMessage(error)}`);
+  }
+}
+
+/**
+ * Structure a USER-PROVIDED story into a scene graph without rewriting it.
+ * The narration is kept close to the author's words (only split/lightly trimmed
+ * to fit scene beats); the LLM adds a per-scene visualPrompt + a title/hook and
+ * a light story bible so the Studio's story panel has something to show. Used
+ * by the plan stage when `reel.providedScript` is set (bring-your-own-story).
+ */
+export async function structureUserScript(
+  niche: string,
+  rawStory: string,
+  tier: Tier = "value",
+  genre?: string,
+  onLlmUsage?: LlmUsageCallback
+): Promise<PlannedReel> {
+  const recipe = getRecipe(niche);
+  const llm = planningModelFor(recipe, tier);
+  const story = rawStory.trim();
+  if (!story) throw new Error("Provided script is empty");
+
+  const prompt = `You are a video editor turning an author's finished story into a ${recipe.sceneCount}-scene vertical reel. Genre flavor: ${genre ?? "horror"}.
+
+AUTHOR'S STORY (narration — keep the author's wording; you may split sentences across scenes and lightly trim filler, but DO NOT rewrite, add plot, or change meaning):
+"""
+${story}
+"""
+
+Split the story into ordered scenes. For each scene:
+- "narration": the author's own words for that beat (verbatim or minimally trimmed), 12-34 words, one clear beat.
+- "visualPrompt": ONLY imagery for that beat (subject, setting, mood, lighting). No style words, no text-in-image.
+Preserve the author's order and ending. Use as many scenes as the story needs, up to ${recipe.sceneCount}.
+
+Also return a "title", an on-screen "hook" (<= 8 words) drawn from the opening, and a short "storyBible" capturing what the author wrote (do not invent).
+
+OUTPUT JSON ONLY (no markdown):
+{
+  "title": "catchy title",
+  "hook": "on-screen hook text",
+  "scenes": [ { "narration": "author's words for this beat", "visualPrompt": "image description" } ],
+  "storyBible": {
+    "premise": "one-sentence logline of the author's story",
+    "setting": "where/when",
+    "protagonist": "who tells it",
+    "anchorObject": "the central object/place",
+    "impossibleRule": "the story's core wrongness",
+    "escalation": ["beat 1", "..."],
+    "artDirection": "recurring visual motifs/palette/lighting to keep shots consistent",
+    "finalTwist": "the author's final line"
+  }
+}`;
+
+  try {
+    const { text, usage } = await generateText({ model: openrouter(llm), prompt, temperature: 0.4 });
+    reportLlmUsage(onLlmUsage, "Structure script", llm, usage);
+    const parsed = extractJson<PlannedReel>(text);
+    if (!parsed.scenes?.length) throw new Error("No scenes returned");
+    console.log(`📝 Structured user script "${parsed.title}" — ${parsed.scenes.length} scenes (${recipe.niche})`);
+    return parsed;
+  } catch (error: unknown) {
+    throw new Error(`User-script structuring failed: ${getErrorMessage(error)}`);
   }
 }
 
