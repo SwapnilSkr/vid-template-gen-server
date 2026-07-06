@@ -6,7 +6,7 @@ import { getRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
 import { cleanupFiles } from "../utils";
 import { pickGameplay, renderGameplayReel } from "./reel-gameplay.service";
-import { uploadVideo } from "./s3.service";
+import { deleteFromS3, uploadVideo } from "./s3.service";
 import { enqueueRevoice } from "../queue/queues";
 
 // ============================================
@@ -105,7 +105,10 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
   await unlink(gameplayPath).catch(() => {});
 }
 
-/** Promote a ready voice variant to be the reel's primary output. */
+/** Promote a ready voice variant to be the reel's primary output. The video it
+ *  replaces is deleted from S3 unless it is itself a variant's render (still
+ *  referenced for comparison) — otherwise every promote would orphan one object
+ *  until the manual reconciliation sweep. */
 export async function promoteVoiceVariant(reelId: string, variantId: string): Promise<IReel> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
@@ -116,7 +119,18 @@ export async function promoteVoiceVariant(reelId: string, variantId: string): Pr
     throw new Error(`Voice variant is not ready (status: ${variant.status})`);
   }
 
+  const previousOutputUrl = reel.outputUrl;
   reel.outputUrl = variant.videoUrl;
   await reel.save();
+
+  const stillReferenced =
+    !previousOutputUrl ||
+    previousOutputUrl === variant.videoUrl ||
+    reel.voiceVariants.some((v) => v.videoUrl === previousOutputUrl);
+  if (!stillReferenced && previousOutputUrl) {
+    await deleteFromS3(previousOutputUrl).catch((error) => {
+      console.warn(`Could not delete superseded output for reel ${reelId}: ${getErrorMessage(error)}`);
+    });
+  }
   return reel;
 }

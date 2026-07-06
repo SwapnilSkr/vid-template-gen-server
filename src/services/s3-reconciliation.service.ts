@@ -36,11 +36,12 @@ async function referencedKeys(): Promise<Set<string>> {
 
   const reels = await Reel.find(
     {},
-    { outputUrl: 1, subtitlesUrl: 1, "review.thumbnailUrl": 1, scenes: 1, voiceVariants: 1 }
+    { outputUrl: 1, subtitlesUrl: 1, outroAudioUrl: 1, "review.thumbnailUrl": 1, scenes: 1, voiceVariants: 1 }
   );
   for (const reel of reels) {
     addUrl(reel.outputUrl);
     addUrl(reel.subtitlesUrl);
+    addUrl(reel.outroAudioUrl);
     addUrl(reel.review?.thumbnailUrl);
     for (const scene of reel.scenes) {
       addUrl(scene.assetUrl);
