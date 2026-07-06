@@ -1,6 +1,13 @@
 import { google } from "googleapis";
+import type { MethodOptions } from "googleapis-common";
+import ffmpeg from "fluent-ffmpeg";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { config } from "../config";
 import { OAuthState, Reel, YouTubeChannel } from "../models";
 import { getErrorMessage } from "../types";
@@ -40,6 +47,94 @@ export interface StartYouTubeConnectInput {
   privacyStatus?: "private" | "unlisted" | "public";
   categoryId?: string;
   niches?: string[];
+}
+
+/** Bun's fetch idle timeout (~5 min) aborts large resumable uploads to Google. */
+const fetchWithoutIdleTimeout = ((
+  input: Parameters<typeof fetch>[0],
+  init?: RequestInit
+) => fetch(input, { ...init, timeout: false } as RequestInit & { timeout: false })) as typeof fetch;
+
+const YOUTUBE_API_OPTIONS: MethodOptions = {
+  fetchImplementation: fetchWithoutIdleTimeout,
+  // Safety net only — the Bun idle timer is disabled via fetchImplementation above.
+  timeout: 60 * 60 * 1000,
+};
+
+/** YouTube Data API custom-thumbnail limit (2 MiB). */
+const YOUTUBE_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024;
+
+async function encodeThumbnailJpeg(
+  inputPath: string,
+  outputPath: string,
+  quality: number,
+  maxWidth: number
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg(inputPath)
+      .outputOptions([
+        "-vf",
+        `scale='min(${maxWidth},iw)':-2`,
+        "-q:v",
+        String(quality),
+      ])
+      .output(outputPath)
+      .on("end", () => resolve())
+      .on("error", (err) =>
+        reject(new Error(`YouTube thumbnail compress failed: ${err.message}`))
+      )
+      .run();
+  });
+}
+
+/** YouTube rejects custom thumbnails over 2 MiB. Review thumbnails are stored
+ *  as PNG on S3 and can exceed that — re-encode to JPEG at publish time. */
+async function compressImageForYouTubeThumbnail(
+  image: Buffer,
+  contentType?: string | null
+): Promise<{ buffer: Buffer; mimeType: string }> {
+  if (image.length <= YOUTUBE_THUMBNAIL_MAX_BYTES) {
+    const mimeType = contentType?.split(";")[0]?.trim() || "image/png";
+    return { buffer: image, mimeType };
+  }
+
+  const dir = await mkdtemp(join(tmpdir(), "yt-thumb-"));
+  const inputPath = join(dir, "input.png");
+  const outputPath = join(dir, "output.jpg");
+  try {
+    await writeFile(inputPath, image);
+    const qualities = [4, 6, 8, 10, 14, 18, 24, 31];
+    const widths = [1280, 960, 640];
+    for (const maxWidth of widths) {
+      for (const quality of qualities) {
+        await encodeThumbnailJpeg(inputPath, outputPath, quality, maxWidth);
+        const compressed = await readFile(outputPath);
+        if (compressed.length <= YOUTUBE_THUMBNAIL_MAX_BYTES) {
+          console.log(
+            `🖼️  YouTube thumbnail compressed ${Math.round(image.length / 1024)} KB → ${Math.round(compressed.length / 1024)} KB (q=${quality}, w<=${maxWidth})`
+          );
+          return { buffer: compressed, mimeType: "image/jpeg" };
+        }
+      }
+    }
+    throw new Error(
+      `Could not compress thumbnail below ${YOUTUBE_THUMBNAIL_MAX_BYTES} bytes (source ${image.length} bytes)`
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function downloadVideoToTempFile(url: string): Promise<{ dir: string; path: string }> {
+  const dir = await mkdtemp(join(tmpdir(), "yt-publish-"));
+  const path = join(dir, "video.mp4");
+  const res = await fetchWithoutIdleTimeout(url);
+  if (!res.ok || !res.body) {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw new Error(`Failed to fetch rendered video (${res.status})`);
+  }
+  await pipeline(Readable.fromWeb(res.body as never), createWriteStream(path));
+  return { dir, path };
 }
 
 // ============================================
@@ -361,30 +456,33 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
       channel.clientSecret,
       channel.redirectUri
     );
-    const youtube = google.youtube({ version: "v3", auth });
+    const youtube = google.youtube({ version: "v3", auth, ...YOUTUBE_API_OPTIONS });
 
-    const videoRes = await fetch(reel.outputUrl);
-    if (!videoRes.ok || !videoRes.body) {
-      throw new Error(`Failed to fetch rendered video (${videoRes.status})`);
+    const tempVideo = await downloadVideoToTempFile(reel.outputUrl);
+    let res;
+    try {
+      res = await youtube.videos.insert(
+        {
+          part: ["snippet", "status"],
+          requestBody: {
+            snippet: {
+              title: (review.title ?? reel.title ?? reel.hook ?? "Untitled").slice(0, 100),
+              description: review.description,
+              tags: review.tags,
+              categoryId: channel.categoryId ?? config.youtubeCategoryId,
+            },
+            status: {
+              privacyStatus: channel.privacyStatus ?? config.youtubePrivacyStatus,
+              selfDeclaredMadeForKids: false,
+            },
+          },
+          media: { body: createReadStream(tempVideo.path) },
+        },
+        YOUTUBE_API_OPTIONS
+      );
+    } finally {
+      await rm(tempVideo.dir, { recursive: true, force: true }).catch(() => {});
     }
-    const videoStream = Readable.fromWeb(videoRes.body as never);
-
-    const res = await youtube.videos.insert({
-      part: ["snippet", "status"],
-      requestBody: {
-        snippet: {
-          title: (review.title ?? reel.title ?? reel.hook ?? "Untitled").slice(0, 100),
-          description: review.description,
-          tags: review.tags,
-          categoryId: channel.categoryId ?? config.youtubeCategoryId,
-        },
-        status: {
-          privacyStatus: channel.privacyStatus ?? config.youtubePrivacyStatus,
-          selfDeclaredMadeForKids: false,
-        },
-      },
-      media: { body: videoStream },
-    });
 
     const videoId = res.data.id ?? undefined;
     let thumbnailStatus: "uploaded" | "missing" | "failed" = review.thumbnailUrl
@@ -394,16 +492,20 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
 
     if (videoId && review.thumbnailUrl) {
       try {
-        const thumbnailRes = await fetch(review.thumbnailUrl);
+        const thumbnailRes = await fetchWithoutIdleTimeout(review.thumbnailUrl);
         if (!thumbnailRes.ok) {
           throw new Error(`Failed to fetch thumbnail (${thumbnailRes.status})`);
         }
         const thumbnailBuffer = Buffer.from(await thumbnailRes.arrayBuffer());
+        const { buffer: uploadBuffer, mimeType } = await compressImageForYouTubeThumbnail(
+          thumbnailBuffer,
+          thumbnailRes.headers.get("content-type")
+        );
         await youtube.thumbnails.set({
           videoId,
           media: {
-            mimeType: thumbnailRes.headers.get("content-type") ?? "image/png",
-            body: Readable.from(thumbnailBuffer),
+            mimeType,
+            body: Readable.from(uploadBuffer),
           },
         });
         thumbnailStatus = "uploaded";

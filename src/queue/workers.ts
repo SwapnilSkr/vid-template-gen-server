@@ -79,7 +79,13 @@ export function startWorkers(): void {
         await publishReelToYouTube(job.data.reelId, job.data.channelId);
       }
     },
-    { ...workerBaseOptions, concurrency: config.queueConcurrency }
+    {
+      ...workerBaseOptions,
+      // Large MP4 uploads to YouTube can run 10–30+ min on slow links.
+      lockDuration: 60 * 60 * 1000,
+      lockRenewTime: 60 * 1000,
+      concurrency: config.queueConcurrency,
+    }
   );
 
   const revoiceWorker = new Worker<RevoiceJobData, void, "revoice">(
