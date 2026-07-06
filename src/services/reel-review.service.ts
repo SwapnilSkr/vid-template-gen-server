@@ -10,7 +10,7 @@ import { ensureDir, generateFilename } from "../utils";
 import { generateText } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateImage, type MediaUsageCallback } from "./openrouter-media.service";
-import { uploadImage } from "./s3.service";
+import { deleteFromS3, uploadImage } from "./s3.service";
 import { listTrendReferences } from "./trend-reference.service";
 import { getTrendDigest } from "./trend-insight.service";
 import { getRecipe } from "../config/niche-styles";
@@ -248,6 +248,13 @@ async function buildVisibilityNotes(reel: IReel): Promise<string> {
 
 const THUMB_W = 1280;
 const THUMB_H = 720; // YouTube thumbnail ratio (16:9)
+type ThumbnailAspectRatio = "16:9" | "9:16" | "1:1";
+
+function thumbnailSize(aspectRatio: ThumbnailAspectRatio = "16:9"): { width: number; height: number } {
+  if (aspectRatio === "9:16") return { width: 1080, height: 1920 };
+  if (aspectRatio === "1:1") return { width: 1080, height: 1080 };
+  return { width: THUMB_W, height: THUMB_H };
+}
 
 /** Flat mockup thumbnail (no AI image) — the original design, kept as a
  * fallback when image generation fails or no prompt is available. Branding
@@ -499,32 +506,34 @@ export async function regenerateReelThumbnail(
   const title = (nextReview.title || buildTitle(reel)).slice(0, 100);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
   const thumbnailPrompt = nextReview.thumbnailPrompt || (await buildThumbnailPrompt(reel, title));
+  nextReview.title = title;
+  nextReview.thumbnailPrompt = thumbnailPrompt;
   const thumbnailPath = await renderThumbnailPng(title, subtitle, reel.niche, thumbnailPrompt);
   try {
-    nextReview.thumbnailUrl = await uploadImage(
-      await readFile(thumbnailPath),
-      "reels",
-      `${reel._id}_thumbnail.png`
-    );
+    return await replaceReviewThumbnail(reel, nextReview, thumbnailPath);
   } finally {
     await unlink(thumbnailPath).catch(() => {});
   }
-  nextReview.title = title;
-  nextReview.thumbnailPrompt = thumbnailPrompt;
-
-  reel.review = nextReview;
-  await reel.save();
-  return reel.review;
 }
 
-function extractVideoFrame(videoUrl: string, atSeconds: number, output: string): Promise<string> {
+function thumbnailCompositeFilter({ width, height }: { width: number; height: number }): string {
+  return `split=2[bg][fg];[bg]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},gblur=sigma=28,eq=brightness=-0.08:saturation=0.85[back];[fg]scale=-2:${height}:force_original_aspect_ratio=decrease[front];[back][front]overlay=(W-w)/2:(H-h)/2`;
+}
+
+function extractVideoFrame(
+  videoUrl: string,
+  atSeconds: number,
+  output: string,
+  aspectRatio?: ThumbnailAspectRatio
+): Promise<string> {
+  const size = thumbnailSize(aspectRatio);
   return new Promise((resolve, reject) => {
     ffmpeg(videoUrl)
       .seekInput(Math.max(atSeconds, 0))
       .outputOptions([
         "-vframes", "1",
         "-vf",
-        `split=2[bg][fg];[bg]scale=${THUMB_W}:${THUMB_H}:force_original_aspect_ratio=increase,crop=${THUMB_W}:${THUMB_H},gblur=sigma=28,eq=brightness=-0.08:saturation=0.85[back];[fg]scale=-2:${THUMB_H}:force_original_aspect_ratio=decrease[front];[back][front]overlay=(W-w)/2:(H-h)/2`,
+        thumbnailCompositeFilter(size),
       ])
       .output(output)
       .on("end", () => resolve(output))
@@ -533,12 +542,53 @@ function extractVideoFrame(videoUrl: string, atSeconds: number, output: string):
   });
 }
 
+function composeStillImageThumbnail(
+  imageUrl: string,
+  output: string,
+  aspectRatio?: ThumbnailAspectRatio
+): Promise<string> {
+  const size = thumbnailSize(aspectRatio);
+  return new Promise((resolve, reject) => {
+    ffmpeg(imageUrl)
+      .outputOptions([
+        "-vframes",
+        "1",
+        "-vf",
+        thumbnailCompositeFilter(size),
+      ])
+      .output(output)
+      .on("end", () => resolve(output))
+      .on("error", (err) => reject(new Error(`Still thumbnail render failed: ${err.message}`)))
+      .run();
+  });
+}
+
+/** Upload a composed thumbnail PNG to S3 as the review thumbnail and delete
+ *  the object it replaces (if any) so superseded thumbnails never pile up. */
+export async function replaceReviewThumbnail(
+  reel: IReel,
+  current: IReelReviewPackage,
+  imagePath: string
+): Promise<IReelReviewPackage> {
+  const previousThumbnailUrl = current.thumbnailUrl;
+  const thumbnailUrl = await uploadImage(await readFile(imagePath), "reels", `${reel._id}_thumbnail.png`);
+  reel.review = { ...current, thumbnailUrl, updatedAt: new Date() };
+  await reel.save();
+  if (previousThumbnailUrl && previousThumbnailUrl !== thumbnailUrl) {
+    await deleteFromS3(previousThumbnailUrl).catch((error) => {
+      console.warn(`Could not delete previous thumbnail for reel ${reel._id}: ${getErrorMessage(error)}`);
+    });
+  }
+  return reel.review;
+}
+
 /** Use a specific frame of the rendered video as the thumbnail instead of an
  * AI/flat design — handy when a genuine reaction/moment in the footage beats
  * a generated composite. */
 export async function useReelFrameAsThumbnail(
   reelId: string,
-  atSeconds: number
+  atSeconds: number,
+  aspectRatio?: ThumbnailAspectRatio
 ): Promise<IReelReviewPackage> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
@@ -549,16 +599,55 @@ export async function useReelFrameAsThumbnail(
   const framePath = join(config.processingPath, generateFilename("thumb_frame", "png"));
 
   try {
-    await extractVideoFrame(reel.outputUrl, atSeconds, framePath);
-    const thumbnailUrl = await uploadImage(await readFile(framePath), "reels", `${reel._id}_thumbnail.png`);
+    await extractVideoFrame(reel.outputUrl, atSeconds, framePath, aspectRatio);
+    return await replaceReviewThumbnail(reel, current, framePath);
+  } finally {
+    await unlink(framePath).catch(() => {});
+  }
+}
 
-    reel.review = {
-      ...current,
-      thumbnailUrl,
-      updatedAt: new Date(),
-    };
-    await reel.save();
-    return reel.review;
+/** Use one of the generated scene stills directly as the thumbnail source.
+ * This avoids burned captions/subtitles from the final rendered video. */
+export async function useReelSceneImageAsThumbnail(
+  reelId: string,
+  sceneIndex: number,
+  aspectRatio?: ThumbnailAspectRatio
+): Promise<IReelReviewPackage> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+
+  const scene = reel.scenes?.find((s) => s.index === sceneIndex);
+  const draftScene = reel.editDraft?.sceneAssets.find((s) => s.index === sceneIndex);
+  const imageSource = draftScene?.assetPath ?? draftScene?.assetUrl ?? scene?.assetUrl;
+  if (!imageSource) throw new Error("Scene has no still image asset");
+
+  const current = reel.review ?? (await buildReelReviewPackage(reel));
+  await ensureDir(config.processingPath);
+  const framePath = join(config.processingPath, generateFilename("thumb_scene", "png"));
+
+  try {
+    await composeStillImageThumbnail(imageSource, framePath, aspectRatio);
+    return await replaceReviewThumbnail(reel, current, framePath);
+  } finally {
+    await unlink(framePath).catch(() => {});
+  }
+}
+
+export async function previewReelFrameThumbnail(
+  reelId: string,
+  atSeconds: number,
+  aspectRatio?: ThumbnailAspectRatio
+): Promise<string> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
+
+  await ensureDir(config.processingPath);
+  const framePath = join(config.processingPath, generateFilename("thumb_preview", "png"));
+  try {
+    await extractVideoFrame(reel.outputUrl, atSeconds, framePath, aspectRatio);
+    const buffer = await readFile(framePath);
+    return `data:image/png;base64,${buffer.toString("base64")}`;
   } finally {
     await unlink(framePath).catch(() => {});
   }
@@ -566,7 +655,16 @@ export async function useReelFrameAsThumbnail(
 
 export interface CustomThumbnailInput {
   atSeconds: number;
-  text: string;
+  sourceType?: "frame" | "scene";
+  sceneIndex?: number;
+  text?: string;
+  aspectRatio?: ThumbnailAspectRatio;
+  xPct?: number;
+  yPct?: number;
+  widthPct?: number;
+  align?: "left" | "center" | "right";
+  lineHeight?: number;
+  effect?: "none" | "shadow" | "glow" | "box";
   fontFamily?: string;
   fontSize?: number;
   color?: string;
@@ -574,6 +672,29 @@ export interface CustomThumbnailInput {
   outlineWidth?: number;
   position?: "top" | "middle" | "bottom";
   uppercase?: boolean;
+}
+
+function sceneImageSource(reel: IReel, sceneIndex: number | undefined): string {
+  const index = sceneIndex ?? reel.scenes?.find((s) => s.assetUrl)?.index ?? 0;
+  const scene = reel.scenes?.find((s) => s.index === index);
+  const draftScene = reel.editDraft?.sceneAssets.find((s) => s.index === index);
+  const imageSource = draftScene?.assetPath ?? draftScene?.assetUrl ?? scene?.assetUrl;
+  if (!imageSource) throw new Error("Scene has no still image asset");
+  return imageSource;
+}
+
+async function buildThumbnailSource(
+  reel: IReel,
+  input: CustomThumbnailInput,
+  output: string
+): Promise<string> {
+  if (input.sourceType === "scene") {
+    await composeStillImageThumbnail(sceneImageSource(reel, input.sceneIndex), output, input.aspectRatio);
+    return output;
+  }
+  if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
+  await extractVideoFrame(reel.outputUrl, input.atSeconds, output, input.aspectRatio);
+  return output;
 }
 
 /** #RRGGBB → ffmpeg drawtext color (0xRRGGBB). Falls back to white. */
@@ -587,6 +708,29 @@ function escapeFilterPath(p: string): string {
   return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
+/** Compose a thumbnail PNG at `outputPath` from the chosen source (video frame
+ *  or scene still), flattening the text overlay in when text is present.
+ *  Shared by the one-shot save/preview endpoints and Thumbnail Studio draft
+ *  staging. Every intermediate file is deleted before returning. */
+export async function composeThumbnailImage(
+  reel: IReel,
+  input: CustomThumbnailInput,
+  outputPath: string
+): Promise<string> {
+  await ensureDir(config.processingPath);
+  if (!input.text?.trim()) {
+    return buildThumbnailSource(reel, input, outputPath);
+  }
+  const textPath = join(config.processingPath, generateFilename("thumb_text", "txt"));
+  await writeFile(textPath, wrapThumbnailText(input), "utf-8");
+  try {
+    await composeSourceWithText(reel, input, outputPath, thumbnailDrawtext(input, textPath));
+    return outputPath;
+  } finally {
+    await unlink(textPath).catch(() => {});
+  }
+}
+
 /** Manual thumbnail: a chosen video frame + custom overlay caption text in a
  *  bundled font. A human alternative to the AI thumbnail — the user picks the
  *  frame, the words, the font, size, color, and vertical position. */
@@ -596,53 +740,133 @@ export async function useReelFrameWithText(
 ): Promise<IReelReviewPackage> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
-  if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
-
   const current = reel.review ?? (await buildReelReviewPackage(reel));
   await ensureDir(config.processingPath);
   const framePath = join(config.processingPath, generateFilename("thumb_custom", "png"));
-  const textPath = join(config.processingPath, generateFilename("thumb_text", "txt"));
 
-  const text = input.uppercase ? input.text.toUpperCase() : input.text;
-  await writeFile(textPath, text, "utf-8");
+  try {
+    await composeThumbnailImage(reel, input, framePath);
+    return await replaceReviewThumbnail(reel, current, framePath);
+  } finally {
+    await unlink(framePath).catch(() => {});
+  }
+}
 
+export async function previewReelFrameWithText(
+  reelId: string,
+  input: CustomThumbnailInput
+): Promise<string> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  await ensureDir(config.processingPath);
+  const framePath = join(config.processingPath, generateFilename("thumb_custom_preview", "png"));
+
+  try {
+    await composeThumbnailImage(reel, input, framePath);
+    const buffer = await readFile(framePath);
+    return `data:image/png;base64,${buffer.toString("base64")}`;
+  } finally {
+    await unlink(framePath).catch(() => {});
+  }
+}
+
+function thumbnailDrawtext(input: CustomThumbnailInput, textPath: string): string {
+  const size = thumbnailSize(input.aspectRatio);
   const fontFile = fontFilePathByFamily(input.fontFamily);
   const fontSize = Math.min(Math.max(input.fontSize ?? 96, 20), 400);
   const color = hexToDrawColor(input.color, "0xFFFFFF");
   const outlineColor = hexToDrawColor(input.outlineColor, "0x000000");
-  const outlineWidth = Math.min(Math.max(input.outlineWidth ?? 8, 0), 30);
-  const yExpr =
-    input.position === "top"
-      ? `${Math.round(THUMB_H * 0.08)}`
-      : input.position === "middle"
-        ? "(h-text_h)/2"
-        : `h-text_h-${Math.round(THUMB_H * 0.1)}`;
+  const outlineWidth = Math.min(Math.max(input.outlineWidth ?? 4, 0), 30);
+  const x = Math.round((input.xPct ?? 0.5) * size.width);
+  const y = Math.round((input.yPct ?? 0.78) * size.height);
+  const boxWidth = Math.round((input.widthPct ?? 0.86) * size.width);
+  const left = Math.max(0, Math.min(size.width - 1, x - boxWidth / 2));
+  const align = input.align ?? "center";
+  const xExpr =
+    align === "left"
+      ? `${Math.round(left)}`
+      : align === "right"
+        ? `${Math.round(left + boxWidth)}-text_w`
+        : `${Math.round(left + boxWidth / 2)}-text_w/2`;
+  const yExpr = `${Math.max(0, Math.min(size.height - 1, y))}`;
+  const effect = input.effect ?? "shadow";
+  const lineSpacing = Math.round(fontSize * ((input.lineHeight ?? 1.12) - 1));
 
-  const drawtext = [
+  return [
     "drawtext=",
     fontFile ? `fontfile='${escapeFilterPath(fontFile)}':` : "",
     `textfile='${escapeFilterPath(textPath)}':`,
     `fontsize=${fontSize}:`,
     `fontcolor=${color}:`,
     `borderw=${outlineWidth}:bordercolor=${outlineColor}:`,
-    "shadowcolor=0x000000@0.6:shadowx=2:shadowy=2:",
-    `x=(w-text_w)/2:y=${yExpr}`,
+    effect === "none" ? "" : "shadowcolor=0x000000@0.68:shadowx=3:shadowy=4:",
+    effect === "box" ? "box=1:boxcolor=0x000000@0.48:boxborderw=18:" : "",
+    `line_spacing=${lineSpacing}:`,
+    `x=${xExpr}:y=${yExpr}`,
   ].join("");
+}
 
-  try {
-    await extractFrameWithText(reel.outputUrl, input.atSeconds, framePath, drawtext);
-    const thumbnailUrl = await uploadImage(
-      await readFile(framePath),
-      "reels",
-      `${reel._id}_thumbnail.png`
-    );
-    reel.review = { ...current, thumbnailUrl, updatedAt: new Date() };
-    await reel.save();
-    return reel.review;
-  } finally {
-    await unlink(framePath).catch(() => {});
-    await unlink(textPath).catch(() => {});
-  }
+function wrapThumbnailText(input: CustomThumbnailInput): string {
+  const size = thumbnailSize(input.aspectRatio);
+  const fontSize = Math.min(Math.max(input.fontSize ?? 96, 20), 400);
+  const boxWidth = (input.widthPct ?? 0.86) * size.width;
+  const maxChars = Math.max(4, Math.floor(boxWidth / (fontSize * 0.55)));
+  const text = input.text ?? "";
+  const raw = input.uppercase ? text.toUpperCase() : text;
+  return raw
+    .split("\n")
+    .flatMap((line) => {
+      const words = line.trim().split(/\s+/).filter(Boolean);
+      if (words.length === 0) return [""];
+      const out: string[] = [];
+      let current = "";
+      for (const word of words) {
+        const next = current ? `${current} ${word}` : word;
+        if (next.length > maxChars && current) {
+          out.push(current);
+          current = word;
+        } else {
+          current = next;
+        }
+      }
+      if (current) out.push(current);
+      return out;
+    })
+    .join("\n");
+}
+
+function composeSourceWithText(
+  reel: IReel,
+  input: CustomThumbnailInput,
+  output: string,
+  drawtext: string
+): Promise<string> {
+  return new Promise(async (resolve, reject) => {
+    const sourcePath = join(config.processingPath, generateFilename("thumb_source", "png"));
+    const size = thumbnailSize(input.aspectRatio);
+    try {
+      await buildThumbnailSource(reel, input, sourcePath);
+      let filter = `${drawtext}`;
+      if (input.effect === "glow") {
+        filter = `${drawtext.replace(/borderw=\d+/, "borderw=22").replace(/fontcolor=[^:]+/, "fontcolor=0xFFFFFF@0.25")},${drawtext}`;
+      }
+      ffmpeg(sourcePath)
+        .outputOptions(["-vframes", "1", "-vf", filter, "-s", `${size.width}x${size.height}`])
+        .output(output)
+        .on("end", async () => {
+          await unlink(sourcePath).catch(() => {});
+          resolve(output);
+        })
+        .on("error", async (err) => {
+          await unlink(sourcePath).catch(() => {});
+          reject(new Error(`Custom thumbnail render failed: ${err.message}`));
+        })
+        .run();
+    } catch (error) {
+      await unlink(sourcePath).catch(() => {});
+      reject(error);
+    }
+  });
 }
 
 /** Same base composition as extractVideoFrame, with a drawtext overlay appended. */
@@ -650,8 +874,10 @@ function extractFrameWithText(
   videoUrl: string,
   atSeconds: number,
   output: string,
-  drawtext: string
+  drawtext: string,
+  aspectRatio?: ThumbnailAspectRatio
 ): Promise<string> {
+  const size = thumbnailSize(aspectRatio);
   return new Promise((resolve, reject) => {
     ffmpeg(videoUrl)
       .seekInput(Math.max(atSeconds, 0))
@@ -659,7 +885,7 @@ function extractFrameWithText(
         "-vframes",
         "1",
         "-vf",
-        `split=2[bg][fg];[bg]scale=${THUMB_W}:${THUMB_H}:force_original_aspect_ratio=increase,crop=${THUMB_W}:${THUMB_H},gblur=sigma=28,eq=brightness=-0.08:saturation=0.85[back];[fg]scale=-2:${THUMB_H}:force_original_aspect_ratio=decrease[front];[back][front]overlay=(W-w)/2:(H-h)/2,${drawtext}`,
+        `${thumbnailCompositeFilter(size)},${drawtext}`,
       ])
       .output(output)
       .on("end", () => resolve(output))
