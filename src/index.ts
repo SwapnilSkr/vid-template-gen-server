@@ -20,6 +20,7 @@ import { initializeStorage } from "./utils";
 import { ensureYtImportsStorage } from "./services/yt-import.service";
 import { cleanupLocalProcessingOnStartup } from "./services/local-cleanup.service";
 import { startStoryTopUpScheduler } from "./services/story-scheduler.service";
+import { startHygieneScheduler } from "./services/hygiene-scheduler.service";
 import { startWorkers } from "./queue/workers";
 
 // Initialize application
@@ -117,6 +118,7 @@ initialize()
     app.listen(config.port);
     startWorkers();
     startStoryTopUpScheduler();
+    startHygieneScheduler();
 
     console.log(`
 ╔════════════════════════════════════════════════════════╗
