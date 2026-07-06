@@ -7,7 +7,9 @@ import {
   RevoiceReelBody,
   VariantParams,
   ThumbnailFrameBody,
+  ThumbnailSceneBody,
   CustomThumbnailBody,
+  StageThumbnailDraftBody,
   PublishReelBody,
   SceneIndexParams,
   UpdateSceneBody,
@@ -33,7 +35,10 @@ import {
   regenerateReelThumbnailController,
   revoiceReelController,
   promoteVoiceVariantController,
+  previewReelFrameThumbnailController,
   useReelFrameAsThumbnailController,
+  useReelSceneImageAsThumbnailController,
+  previewCustomFrameThumbnailController,
   customFrameThumbnailController,
   listYouTubeChannelsController,
   updateSceneController,
@@ -50,6 +55,10 @@ import {
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,
+  stageThumbnailDraftController,
+  saveThumbnailDraftController,
+  discardThumbnailDraftController,
+  getThumbnailDraftAssetController,
 } from "../controllers";
 
 // ============================================
@@ -79,6 +88,12 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
     params: DraftAssetParams,
   })
 
+  // Locally staged Thumbnail Studio drafts — same lifecycle discipline: not
+  // S3 objects, removed on save/discard/restage or when the reel is deleted.
+  .get("/thumb-drafts/:draftId/assets/:filename", getThumbnailDraftAssetController, {
+    params: DraftAssetParams,
+  })
+
   // Get reel status/progress
   .get("/:id/status", getReelStatusController, {
     params: IdParams,
@@ -105,15 +120,46 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   })
 
   // Use a specific frame of the rendered video as the thumbnail
+  .post("/:id/review/thumbnail/frame/preview", previewReelFrameThumbnailController, {
+    params: IdParams,
+    body: ThumbnailFrameBody,
+  })
+
   .post("/:id/review/thumbnail/frame", useReelFrameAsThumbnailController, {
     params: IdParams,
     body: ThumbnailFrameBody,
   })
 
+  // Use a generated scene still as the thumbnail source (no burned captions)
+  .post("/:id/review/thumbnail/scene", useReelSceneImageAsThumbnailController, {
+    params: IdParams,
+    body: ThumbnailSceneBody,
+  })
+
   // Compose a thumbnail from a frame + custom overlay caption text (manual)
+  .post("/:id/review/thumbnail/custom/preview", previewCustomFrameThumbnailController, {
+    params: IdParams,
+    body: CustomThumbnailBody,
+  })
+
   .post("/:id/review/thumbnail/custom", customFrameThumbnailController, {
     params: IdParams,
     body: CustomThumbnailBody,
+  })
+
+  // Thumbnail Studio: stage a composed thumbnail locally, then save (upload to
+  // S3 + delete the superseded object) or discard (wipe local files).
+  .post("/:id/thumbnail-draft", stageThumbnailDraftController, {
+    params: IdParams,
+    body: StageThumbnailDraftBody,
+  })
+
+  .post("/:id/thumbnail-draft/save", saveThumbnailDraftController, {
+    params: IdParams,
+  })
+
+  .post("/:id/thumbnail-draft/discard", discardThumbnailDraftController, {
+    params: IdParams,
   })
 
   // Request re-narrated voice variants (different TTS model/voice, same story + gameplay clip)

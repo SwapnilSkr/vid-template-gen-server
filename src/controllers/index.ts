@@ -49,7 +49,9 @@ export {
   listImageModelsController,
   getReelDefaultsController,
   listTtsVoicesController,
+  previewReelFrameThumbnailController,
   useReelFrameAsThumbnailController,
+  useReelSceneImageAsThumbnailController,
   getVoiceSampleController,
   listYouTubeChannelsController,
   updateSceneController,
@@ -68,7 +70,12 @@ export {
   getReelDraftAssetController,
   listStylePresetsController,
   listFontsController,
+  previewCustomFrameThumbnailController,
   customFrameThumbnailController,
+  stageThumbnailDraftController,
+  saveThumbnailDraftController,
+  discardThumbnailDraftController,
+  getThumbnailDraftAssetController,
 } from "./reel.controller";
 
 // Trend controllers

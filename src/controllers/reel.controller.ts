@@ -7,12 +7,15 @@ import {
   deleteReel,
   ensureReelReviewPackage,
   regenerateReelThumbnail,
+  previewReelFrameThumbnail,
+  previewReelFrameWithText,
   useReelFrameWithText,
   updateReelReview,
   requestRevoice,
   promoteVoiceVariant,
   listGameplayLibrary,
   useReelFrameAsThumbnail,
+  useReelSceneImageAsThumbnail,
   getVoiceSample,
   listImageModels,
   listPricedTtsVoices,
@@ -43,6 +46,7 @@ import type {
   TPublishReelBody,
   TVariantParams,
   TThumbnailFrameBody,
+  TThumbnailSceneBody,
   TVoiceSampleQuery,
   TReelDefaultsQuery,
   TSceneIndexParams,
@@ -55,6 +59,7 @@ import type {
   TRegenerateReelBody,
   TReplanReelBody,
   TCustomThumbnailBody,
+  TStageThumbnailDraftBody,
   TSeriesParams,
   TDraftAssetParams,
 } from "../types/guards";
@@ -67,6 +72,12 @@ import {
   saveEditDraft,
   applyCaptionsAndRender,
 } from "../services/reel-edit-draft.service";
+import {
+  discardThumbnailDraft,
+  getThumbnailDraftAssetPath,
+  saveThumbnailDraft,
+  stageThumbnailDraft,
+} from "../services/reel-thumbnail-draft.service";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -137,6 +148,7 @@ export async function createReelController({ body, set }: CreateReelContext) {
       gameplayKey: body.gameplayKey,
       horrorAudioKey: body.horrorAudioKey,
       outroChannelId: body.outroChannelId,
+      outro: body.outro,
       thumbnailMode: body.thumbnailMode,
       imageModel: body.imageModel,
       artStyleId: body.artStyleId,
@@ -235,12 +247,14 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       gameplayKey: reel.gameplayKey,
       horrorAudioKey: reel.horrorAudioKey,
       outroChannelId: reel.outroChannelId,
+      outro: reel.outro,
       thumbnailMode: reel.thumbnailMode,
       imageModelOverride: reel.imageModelOverride,
       voiceOverride: reel.voiceOverride,
       narrationVoice: reel.narrationVoice,
       voiceVariants: reel.voiceVariants,
       editDraft: reel.editDraft,
+      thumbnailDraft: reel.thumbnailDraft,
     },
   };
 }
@@ -420,7 +434,34 @@ export async function promoteVoiceVariantController({ params, set }: PromoteVoic
 /** Use a specific frame of the rendered video as the thumbnail. */
 export async function useReelFrameAsThumbnailController({ params, body, set }: ThumbnailFrameContext) {
   try {
-    const review = await useReelFrameAsThumbnail(params.id, body.atSeconds);
+    const review = await useReelFrameAsThumbnail(params.id, body.atSeconds, body.aspectRatio);
+    return { success: true, data: review };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Render a local, non-persisted thumbnail frame preview. */
+export async function previewReelFrameThumbnailController({ params, body, set }: ThumbnailFrameContext) {
+  try {
+    const imageDataUrl = await previewReelFrameThumbnail(params.id, body.atSeconds, body.aspectRatio);
+    return { success: true, data: { imageDataUrl } };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+interface ThumbnailSceneContext extends Context {
+  params: TIdParams;
+  body: TThumbnailSceneBody;
+}
+
+/** Use a generated scene still as the thumbnail. */
+export async function useReelSceneImageAsThumbnailController({ params, body, set }: ThumbnailSceneContext) {
+  try {
+    const review = await useReelSceneImageAsThumbnail(params.id, body.sceneIndex, body.aspectRatio);
     return { success: true, data: review };
   } catch (error: unknown) {
     set.status = 400;
@@ -641,6 +682,71 @@ export async function customFrameThumbnailController({ params, body, set }: Cust
     return { success: true, data: review };
   } catch (error: unknown) {
     set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Render a local, non-persisted thumbnail text-overlay preview. */
+export async function previewCustomFrameThumbnailController({ params, body, set }: CustomThumbnailContext) {
+  try {
+    const imageDataUrl = await previewReelFrameWithText(params.id, body);
+    return { success: true, data: { imageDataUrl } };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+// ============================================
+// Thumbnail Studio draft controllers
+// ============================================
+
+interface StageThumbnailDraftContext extends Context {
+  params: TIdParams;
+  body: TStageThumbnailDraftBody;
+}
+
+/** Compose and stage a thumbnail locally (no S3 upload). */
+export async function stageThumbnailDraftController({ params, body, set }: StageThumbnailDraftContext) {
+  try {
+    const reel = await stageThumbnailDraft(params.id, body);
+    return { success: true, data: reel };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Upload the staged thumbnail draft to S3 and clean up the local files. */
+export async function saveThumbnailDraftController({ params, set }: GetReelContext) {
+  try {
+    const reel = await saveThumbnailDraft(params.id);
+    return { success: true, data: reel };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Discard the staged thumbnail draft (local files only). */
+export async function discardThumbnailDraftController({ params, set }: GetReelContext) {
+  try {
+    const reel = await discardThumbnailDraft(params.id);
+    return { success: true, data: reel };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Serve a locally staged thumbnail draft image. */
+export async function getThumbnailDraftAssetController({ params, set }: DraftAssetContext) {
+  try {
+    const path = await getThumbnailDraftAssetPath(params.draftId, params.filename);
+    set.headers["content-type"] = "image/png";
+    return Bun.file(path);
+  } catch (error: unknown) {
+    set.status = 404;
     return { success: false, error: getErrorMessage(error) };
   }
 }
