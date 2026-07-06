@@ -65,11 +65,16 @@ async function loadReel(reelId: string): Promise<IReel> {
   return reel;
 }
 
-async function cleanupExistingDraft(reel: IReel): Promise<void> {
+async function cleanupExistingDraft(reel: IReel, opts: { strict?: boolean } = {}): Promise<void> {
   if (!reel.editDraft?.rootDir) return;
-  await cleanupDirectory(reel.editDraft.rootDir).catch((error: unknown) => {
-    console.error(`Could not clean edit draft ${reel.editDraft?.id}:`, error);
-  });
+  const draftId = reel.editDraft.id;
+  const rootDir = reel.editDraft.rootDir;
+  try {
+    await cleanupDirectory(rootDir);
+  } catch (error: unknown) {
+    console.error(`Could not clean edit draft ${draftId}:`, error);
+    if (opts.strict) throw error;
+  }
   reel.editDraft = undefined;
   reel.markModified("editDraft");
 }
@@ -146,7 +151,33 @@ export async function getDraftAssetPath(draftId: string, filename: string): Prom
     if (item.audioPath) allowed.add(basename(item.audioPath));
   }
   if (!allowed.has(filename)) throw new Error("Draft asset not found");
-  return join(root, filename);
+  const path = join(root, filename);
+  // The referenced draft can be superseded (its files wiped) while the client
+  // still polls the old URL. Verify on disk so the caller returns a clean 404
+  // instead of Bun.file throwing ENOENT at stream time (a stack-trace flood).
+  if (!(await Bun.file(path).exists())) throw new Error("Draft asset not available yet");
+  return path;
+}
+
+/** Image-gen params for regenerating a still that a settings change cleared. */
+async function resolveDraftImageGen(
+  reel: IReel
+): Promise<{ model: string; referenceImageUrls?: string[] }> {
+  const recipe = getRecipe(reel.niche);
+  const model = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image;
+  const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
+  const referenceImageUrls = artRef?.keys.length ? artRef.keys.map(cdnUrlFor) : undefined;
+  return { model, referenceImageUrls };
+}
+
+/** Copy a freshly generated asset into the draft dir and drop the temp source. */
+async function stageGeneratedFile(srcPath: string, destPath: string): Promise<string> {
+  try {
+    await writeFile(destPath, await readFile(srcPath));
+  } finally {
+    await cleanupFiles([srcPath]);
+  }
+  return destPath;
 }
 
 async function buildDraftPreview(
@@ -161,6 +192,10 @@ async function buildDraftPreview(
   const imagePaths: string[] = [];
   const audioPaths: string[] = [];
   const sceneAssets: NonNullable<IReel["editDraft"]>["sceneAssets"] = [];
+  // Resolved lazily the first time a cleared still needs regenerating.
+  let imageGen: { model: string; referenceImageUrls?: string[] } | undefined;
+  const reelKey = reel._id.toString();
+  let recovered = false;
 
   for (let i = 0; i < reel.scenes.length; i++) {
     const scene = reel.scenes[i];
@@ -169,18 +204,44 @@ async function buildDraftPreview(
     let audioPath = draftScene?.audioPath;
 
     if (!imagePath) {
-      if (!scene.assetUrl) throw new Error(`Scene ${i + 1} has no image to render`);
-      imagePath = join(rootDir, `scene_${i}_reused.png`);
-      await downloadAsset(scene.assetUrl, imagePath);
+      if (scene.assetUrl) {
+        imagePath = join(rootDir, `scene_${i}_reused.png`);
+        await downloadAsset(scene.assetUrl, imagePath);
+      } else {
+        // Still was cleared (art / image-model change) — regenerate and PERSIST
+        // it to the scene now. The clearing was already committed, so this is a
+        // recovery, not a draft experiment; persisting means later renders reuse
+        // it instead of regenerating the whole reel on every pass.
+        imageGen ??= await resolveDraftImageGen(reel);
+        const raw = await generateImage(scene.visualPrompt, reel.style, imageGen);
+        imagePath = await stageGeneratedFile(raw, join(rootDir, `scene_${i}_image.png`));
+        scene.assetUrl = await uploadImage(await readFile(imagePath), "compositions", `${reelKey}_${i}.png`);
+        recovered = true;
+      }
     }
     if (!audioPath) {
-      if (!scene.audioUrl) throw new Error(`Scene ${i + 1} has no narration to render`);
-      audioPath = join(rootDir, `scene_${i}_reused.mp3`);
-      await downloadAsset(scene.audioUrl, audioPath);
+      if (scene.audioUrl) {
+        audioPath = join(rootDir, `scene_${i}_reused.mp3`);
+        await downloadAsset(scene.audioUrl, audioPath);
+      } else {
+        // Narration was cleared (voice / voice-FX change) — regenerate with the
+        // current voice + treatment and persist it, so later renders reuse it.
+        const raw = await generateNarration(narrationForTts(scene.narration, reel.niche), {
+          model: tts.model,
+          voice: tts.voice,
+          format: tts.format,
+          profile: narrationProfileFor(reel),
+        });
+        audioPath = await stageGeneratedFile(raw.audioPath, join(rootDir, `scene_${i}_audio.mp3`));
+        scene.audioUrl = await uploadAudio(await readFile(audioPath), `${reelKey}_${i}.mp3`);
+        recovered = true;
+      }
     }
     imagePaths[i] = imagePath;
     audioPaths[i] = audioPath;
     localFiles.push(imagePath, audioPath);
+    // Only draft-override assets (scene regen) belong in the draft's sceneAssets;
+    // recovered cleared assets are already committed to the scene above.
     sceneAssets.push({
       index: i,
       assetPath: draftScene?.assetPath,
@@ -188,6 +249,13 @@ async function buildDraftPreview(
       audioPath: draftScene?.audioPath,
       audioUrl: draftScene?.audioPath ? localAssetUrl(draftId, basename(draftScene.audioPath)) : undefined,
     });
+  }
+
+  // Persist recovered stills/narration so a subsequent re-render reuses them
+  // rather than regenerating the whole reel again.
+  if (recovered) {
+    reel.markModified("scenes");
+    await reel.save();
   }
 
   const useMotion = reel.scenes.some((s) => s.motion.type === "parallax" || s.motion.type === "ai_motion");
@@ -271,7 +339,7 @@ export async function createSceneEditDraft(
   assertEditable(reel);
   if (!reel.scenes[index]) throw new Error(`Scene ${index} not found`);
 
-  await cleanupExistingDraft(reel);
+  await cleanupExistingDraft(reel, { strict: true });
   const draftId = randomUUID();
   const rootDir = join(config.processingPath, "edit-drafts", reelId, draftId);
   await ensureDir(rootDir);
@@ -284,52 +352,61 @@ export async function createSceneEditDraft(
     sceneAssets: [],
   };
 
-  const recipe = getRecipe(reel.niche);
-  const models = resolveModels(reel.tier as Tier);
-  const imageModel = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image;
-  const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
-  const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
-  const referenceImageUrls = artRef?.keys.length ? artRef.keys.map(cdnUrlFor) : undefined;
-  const scene = reel.scenes[index];
-  const draftScene: NonNullable<IReel["editDraft"]>["sceneAssets"][number] = { index };
-
-  if (targets.includes("image")) {
-    const imagePath = await generateImage(scene.visualPrompt, reel.style, { model: imageModel, referenceImageUrls });
-    const stagedPath = join(rootDir, `scene_${index}_image.png`);
-    await writeFile(stagedPath, await readFile(imagePath));
-    await cleanupFiles([imagePath]);
-    draftScene.assetPath = stagedPath;
-    draftScene.assetUrl = localAssetUrl(draftId, basename(stagedPath));
-  }
-
-  if (targets.includes("audio")) {
-    const { audioPath } = await generateNarration(narrationForTts(scene.narration, reel.niche), {
-      model: tts.model,
-      voice: tts.voice,
-      format: tts.format,
-      profile: narrationProfileFor(reel),
-    });
-    const stagedPath = join(rootDir, `scene_${index}_audio.mp3`);
-    await writeFile(stagedPath, await readFile(audioPath));
-    await cleanupFiles([audioPath]);
-    draftScene.audioPath = stagedPath;
-    draftScene.audioUrl = localAssetUrl(draftId, basename(stagedPath));
-  }
-
-  reel.editDraft.sceneAssets = [draftScene];
   const localFiles: string[] = [];
-  const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
-  reel.editDraft.sceneAssets = preview.sceneAssets.filter(
-    (item) => item.assetPath || item.audioPath
-  );
-  reel.editDraft.outputPath = preview.outputPath;
-  reel.editDraft.outputUrl = localAssetUrl(draftId, basename(preview.outputPath));
-  reel.editDraft.subtitlesPath = preview.subtitlesPath;
-  reel.editDraft.subtitlesUrl = localAssetUrl(draftId, basename(preview.subtitlesPath));
-  await reel.save();
-  await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
-  await cleanupRenderScratch(`draft_${draftId}`);
-  return reel;
+  try {
+    const recipe = getRecipe(reel.niche);
+    const models = resolveModels(reel.tier as Tier);
+    const imageModel = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image;
+    const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
+    const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
+    const referenceImageUrls = artRef?.keys.length ? artRef.keys.map(cdnUrlFor) : undefined;
+    const scene = reel.scenes[index];
+    const draftScene: NonNullable<IReel["editDraft"]>["sceneAssets"][number] = { index };
+
+    if (targets.includes("image")) {
+      const imagePath = await generateImage(scene.visualPrompt, reel.style, { model: imageModel, referenceImageUrls });
+      localFiles.push(imagePath);
+      const stagedPath = join(rootDir, `scene_${index}_image.png`);
+      await writeFile(stagedPath, await readFile(imagePath));
+      await cleanupFiles([imagePath]);
+      draftScene.assetPath = stagedPath;
+      draftScene.assetUrl = localAssetUrl(draftId, basename(stagedPath));
+    }
+
+    if (targets.includes("audio")) {
+      const { audioPath } = await generateNarration(narrationForTts(scene.narration, reel.niche), {
+        model: tts.model,
+        voice: tts.voice,
+        format: tts.format,
+        profile: narrationProfileFor(reel),
+      });
+      localFiles.push(audioPath);
+      const stagedPath = join(rootDir, `scene_${index}_audio.mp3`);
+      await writeFile(stagedPath, await readFile(audioPath));
+      await cleanupFiles([audioPath]);
+      draftScene.audioPath = stagedPath;
+      draftScene.audioUrl = localAssetUrl(draftId, basename(stagedPath));
+    }
+
+    reel.editDraft.sceneAssets = [draftScene];
+    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
+    reel.editDraft.sceneAssets = preview.sceneAssets.filter(
+      (item) => item.assetPath || item.audioPath
+    );
+    reel.editDraft.outputPath = preview.outputPath;
+    reel.editDraft.outputUrl = localAssetUrl(draftId, basename(preview.outputPath));
+    reel.editDraft.subtitlesPath = preview.subtitlesPath;
+    reel.editDraft.subtitlesUrl = localAssetUrl(draftId, basename(preview.subtitlesPath));
+    await reel.save();
+    await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+    await cleanupRenderScratch(`draft_${draftId}`);
+    return reel;
+  } catch (error) {
+    await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+    await cleanupDirectory(rootDir).catch(() => {});
+    await cleanupRenderScratch(`draft_${draftId}`);
+    throw error;
+  }
 }
 
 export async function createReelEditDraft(
@@ -340,7 +417,7 @@ export async function createReelEditDraft(
   assertEditable(reel);
   if (reel.scenes.length === 0) throw new Error("Nothing to regenerate — plan the reel first");
 
-  await cleanupExistingDraft(reel);
+  await cleanupExistingDraft(reel, { strict: true });
   const draftId = randomUUID();
   const rootDir = join(config.processingPath, "edit-drafts", reelId, draftId);
   await ensureDir(rootDir);
@@ -353,57 +430,66 @@ export async function createReelEditDraft(
     sceneAssets: [],
   };
 
-  if (mode === "assets") {
-    const recipe = getRecipe(reel.niche);
-    const models = resolveModels(reel.tier as Tier);
-    const imageModel = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image;
-    const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
-    const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
-    const referenceImageUrls = artRef?.keys.length ? artRef.keys.map(cdnUrlFor) : undefined;
-
-    for (let i = 0; i < reel.scenes.length; i++) {
-      const scene = reel.scenes[i];
-      const draftScene: NonNullable<IReel["editDraft"]>["sceneAssets"][number] = { index: i };
-      if (!scene.isHero) {
-        const imagePath = await generateImage(scene.visualPrompt, reel.style, {
-          model: imageModel,
-          referenceImageUrls,
-        });
-        const stagedImagePath = join(rootDir, `scene_${i}_image.png`);
-        await writeFile(stagedImagePath, await readFile(imagePath));
-        await cleanupFiles([imagePath]);
-        draftScene.assetPath = stagedImagePath;
-        draftScene.assetUrl = localAssetUrl(draftId, basename(stagedImagePath));
-      }
-
-      const { audioPath } = await generateNarration(narrationForTts(scene.narration, reel.niche), {
-        model: tts.model,
-        voice: tts.voice,
-        format: tts.format,
-        profile: narrationProfileFor(reel),
-      });
-      const stagedAudioPath = join(rootDir, `scene_${i}_audio.mp3`);
-      await writeFile(stagedAudioPath, await readFile(audioPath));
-      await cleanupFiles([audioPath]);
-      draftScene.audioPath = stagedAudioPath;
-      draftScene.audioUrl = localAssetUrl(draftId, basename(stagedAudioPath));
-      reel.editDraft.sceneAssets.push(draftScene);
-    }
-  }
-
   const localFiles: string[] = [];
-  const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
-  reel.editDraft.sceneAssets = preview.sceneAssets.filter(
-    (item) => item.assetPath || item.audioPath
-  );
-  reel.editDraft.outputPath = preview.outputPath;
-  reel.editDraft.outputUrl = localAssetUrl(draftId, basename(preview.outputPath));
-  reel.editDraft.subtitlesPath = preview.subtitlesPath;
-  reel.editDraft.subtitlesUrl = localAssetUrl(draftId, basename(preview.subtitlesPath));
-  await reel.save();
-  await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
-  await cleanupRenderScratch(`draft_${draftId}`);
-  return reel;
+  try {
+    if (mode === "assets") {
+      const recipe = getRecipe(reel.niche);
+      const models = resolveModels(reel.tier as Tier);
+      const imageModel = reel.imageModelOverride || resolveModels(recipe.imageTier as Tier).image;
+      const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
+      const artRef = await resolveArtStyleRefKeys(reel.artStyleId);
+      const referenceImageUrls = artRef?.keys.length ? artRef.keys.map(cdnUrlFor) : undefined;
+
+      for (let i = 0; i < reel.scenes.length; i++) {
+        const scene = reel.scenes[i];
+        const draftScene: NonNullable<IReel["editDraft"]>["sceneAssets"][number] = { index: i };
+        if (!scene.isHero) {
+          const imagePath = await generateImage(scene.visualPrompt, reel.style, {
+            model: imageModel,
+            referenceImageUrls,
+          });
+          localFiles.push(imagePath);
+          const stagedImagePath = join(rootDir, `scene_${i}_image.png`);
+          await writeFile(stagedImagePath, await readFile(imagePath));
+          await cleanupFiles([imagePath]);
+          draftScene.assetPath = stagedImagePath;
+          draftScene.assetUrl = localAssetUrl(draftId, basename(stagedImagePath));
+        }
+
+        const { audioPath } = await generateNarration(narrationForTts(scene.narration, reel.niche), {
+          model: tts.model,
+          voice: tts.voice,
+          format: tts.format,
+          profile: narrationProfileFor(reel),
+        });
+        localFiles.push(audioPath);
+        const stagedAudioPath = join(rootDir, `scene_${i}_audio.mp3`);
+        await writeFile(stagedAudioPath, await readFile(audioPath));
+        await cleanupFiles([audioPath]);
+        draftScene.audioPath = stagedAudioPath;
+        draftScene.audioUrl = localAssetUrl(draftId, basename(stagedAudioPath));
+        reel.editDraft.sceneAssets.push(draftScene);
+      }
+    }
+
+    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
+    reel.editDraft.sceneAssets = preview.sceneAssets.filter(
+      (item) => item.assetPath || item.audioPath
+    );
+    reel.editDraft.outputPath = preview.outputPath;
+    reel.editDraft.outputUrl = localAssetUrl(draftId, basename(preview.outputPath));
+    reel.editDraft.subtitlesPath = preview.subtitlesPath;
+    reel.editDraft.subtitlesUrl = localAssetUrl(draftId, basename(preview.subtitlesPath));
+    await reel.save();
+    await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+    await cleanupRenderScratch(`draft_${draftId}`);
+    return reel;
+  } catch (error) {
+    await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+    await cleanupDirectory(rootDir).catch(() => {});
+    await cleanupRenderScratch(`draft_${draftId}`);
+    throw error;
+  }
 }
 
 export async function saveEditDraft(reelId: string): Promise<IReel> {
@@ -419,7 +505,8 @@ export async function saveEditDraft(reelId: string): Promise<IReel> {
     subtitlesPath: draft.subtitlesPath,
     sceneAssets: draft.sceneAssets,
   });
-  await cleanupExistingDraft(reel);
+  await cleanupExistingDraft(reel, { strict: true });
+  await cleanupRenderScratch(`draft_${draft.id}`);
   await reel.save();
   return reel;
 }
@@ -437,25 +524,29 @@ export async function applyCaptionsAndRender(
   reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
   reel.markModified("captionStyle");
 
-  await cleanupExistingDraft(reel);
+  await cleanupExistingDraft(reel, { strict: true });
   const draftId = randomUUID();
   const rootDir = join(config.processingPath, "edit-drafts", reelId, draftId);
   await ensureDir(rootDir);
 
   const localFiles: string[] = [];
-  const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
-
-  await commitRenderOutputs(reel, preview);
-  await cleanupDirectory(rootDir).catch(() => {});
-  await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
-  await cleanupRenderScratch(`draft_${draftId}`);
-  await reel.save();
-  return reel;
+  try {
+    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
+    await commitRenderOutputs(reel, preview);
+    await reel.save();
+    return reel;
+  } finally {
+    await cleanupDirectory(rootDir).catch(() => {});
+    await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
+    await cleanupRenderScratch(`draft_${draftId}`);
+  }
 }
 
 export async function discardEditDraft(reelId: string): Promise<IReel> {
   const reel = await loadReel(reelId);
-  await cleanupExistingDraft(reel);
+  const draftId = reel.editDraft?.id;
+  await cleanupExistingDraft(reel, { strict: true });
+  if (draftId) await cleanupRenderScratch(`draft_${draftId}`);
   await reel.save();
   return reel;
 }

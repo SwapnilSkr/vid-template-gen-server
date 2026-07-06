@@ -71,7 +71,11 @@ export async function deleteFile(filePath: string): Promise<void> {
 export async function cleanupFiles(filePaths: string[]): Promise<void> {
   const deletePromises = filePaths
     .filter((path) => path && !path.startsWith("http")) // Skip URLs and empty paths
-    .map((path) => deleteFile(path));
+    .map((path) =>
+      deleteFile(path).catch((error: unknown) => {
+        console.warn(`Could not delete local scratch file ${path}:`, error);
+      })
+    );
   await Promise.all(deletePromises);
 }
 
