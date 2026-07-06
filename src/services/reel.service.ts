@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion } from "../models";
 import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
-import { ensureDir, cleanupFiles, cleanupRenderScratch } from "../utils";
+import { ensureDir, cleanupDirectory, cleanupFiles, cleanupRenderScratch } from "../utils";
 import { getErrorMessage } from "../types";
 import { planHorrorSeries, planReel, planRedditStory, structureUserScript } from "./reel-script.service";
 import { getRecipe, pickStyle, type NicheRecipe } from "../config/niche-styles";
@@ -55,6 +55,7 @@ interface CreateReelOptions {
   gameplayKey?: string;
   horrorAudioKey?: string;
   outroChannelId?: string;
+  outro?: IReel["outro"];
   thumbnailMode?: IReel["thumbnailMode"];
   imageModel?: string;
   artStyleId?: string;
@@ -152,6 +153,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
       gameplayKey: options.gameplayKey,
       horrorAudioKey: options.horrorAudioKey,
       outroChannelId: options.outroChannelId,
+      outro: options.outro,
       thumbnailMode: options.thumbnailMode,
       imageModel: options.imageModel,
       ttsModel: options.ttsModel,
@@ -201,6 +203,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     outroChannelId: options.outroChannelId,
+    outro: options.outro,
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
     voiceOverride,
@@ -234,6 +237,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     outroChannelId: options.outroChannelId,
+    outro: options.outro,
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
@@ -276,6 +280,7 @@ async function createGameplayReelSeries(
       gameplayKey: options.gameplayKey,
       horrorAudioKey: options.horrorAudioKey,
       outroChannelId: options.outroChannelId,
+      outro: options.outro,
       thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
       voiceOverride: toVoiceOverride(options),
@@ -355,6 +360,7 @@ async function createHorrorReelSeries(
       horrorReferenceId: options.horrorReferenceId,
       horrorAudioKey: options.horrorAudioKey,
       outroChannelId: options.outroChannelId,
+      outro: options.outro,
       thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
       voiceOverride,
@@ -1039,6 +1045,11 @@ export async function deleteReel(id: string): Promise<boolean> {
   ].filter((url): url is string => Boolean(url));
 
   await Promise.all(assetUrls.map((url) => deleteFromS3(url).catch(() => {})));
+  // Locally staged drafts (edit previews, thumbnail studio) live only on this
+  // server's disk — wipe them too or they outlive the reel forever.
+  for (const rootDir of [reel.editDraft?.rootDir, reel.thumbnailDraft?.rootDir]) {
+    if (rootDir) await cleanupDirectory(rootDir).catch(() => {});
+  }
   await removeReelJob(id).catch(() => {});
   await Reel.findByIdAndDelete(id);
   console.log(`🗑️  Deleted reel ${id} + ${assetUrls.length} S3 asset(s)`);

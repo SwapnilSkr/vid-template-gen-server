@@ -159,6 +159,8 @@ export async function updateReelSettings(
     imageModel?: string;
     horrorAudioKey?: string;
     horrorReferenceId?: string;
+    outroChannelId?: string;
+    outro?: IReel["outro"];
     voice?: { model?: string; voice?: string; format?: "mp3" | "pcm" };
     audioPost?: IAudioPost;
     editEffects?: IEditEffects;
@@ -174,6 +176,11 @@ export async function updateReelSettings(
   if (patch.imageModel !== undefined) reel.imageModelOverride = patch.imageModel;
   if (patch.horrorAudioKey !== undefined) reel.horrorAudioKey = patch.horrorAudioKey;
   if (patch.horrorReferenceId !== undefined) reel.horrorReferenceId = patch.horrorReferenceId;
+  if (patch.outroChannelId !== undefined) reel.outroChannelId = patch.outroChannelId || undefined;
+  if (patch.outro !== undefined) {
+    reel.outro = patch.outro;
+    reel.markModified("outro");
+  }
   if (patch.voice !== undefined) reel.voiceOverride = patch.voice;
   if (patch.audioPost !== undefined) reel.audioPost = patch.audioPost;
   // Edit FX are render-only — no assets to clear, just re-render to apply.

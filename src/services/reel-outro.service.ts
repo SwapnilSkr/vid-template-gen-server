@@ -16,6 +16,11 @@ export interface OutroBrand {
   channelHandle?: string;
   logoUrl?: string;
   kind: "reddit" | "horror";
+  spokenLine?: string;
+  title?: string;
+  subtitle?: string;
+  cta?: string;
+  footer?: string;
 }
 
 export interface OutroTts {
@@ -36,9 +41,14 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
     const channel = explicitChannel ?? (await findChannelForNiche(["reddit", "reddit_stories", "aita"]));
     return {
       kind: "reddit",
-      channelName: channel?.googleChannelTitle ?? channel?.label ?? "Reddit Stories",
-      channelHandle: channel?.googleChannelHandle,
+      channelName: reel.outro?.channelName?.trim() || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
+      channelHandle: reel.outro?.channelHandle?.trim() || channel?.googleChannelHandle,
       logoUrl: channel?.logoUrl,
+      spokenLine: reel.outro?.spokenLine?.trim(),
+      title: reel.outro?.title?.trim(),
+      subtitle: reel.outro?.subtitle?.trim(),
+      cta: reel.outro?.cta?.trim(),
+      footer: reel.outro?.footer?.trim(),
     };
   }
 
@@ -47,9 +57,14 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
       explicitChannel ?? (await findChannelForNiche(["horror", "horror_comic", reel.genre ?? ""]));
     return {
       kind: "horror",
-      channelName: channel?.googleChannelTitle ?? channel?.label ?? "Midnight Horror",
-      channelHandle: channel?.googleChannelHandle,
+      channelName: reel.outro?.channelName?.trim() || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
+      channelHandle: reel.outro?.channelHandle?.trim() || channel?.googleChannelHandle,
       logoUrl: channel?.logoUrl,
+      spokenLine: reel.outro?.spokenLine?.trim(),
+      title: reel.outro?.title?.trim(),
+      subtitle: reel.outro?.subtitle?.trim(),
+      cta: reel.outro?.cta?.trim(),
+      footer: reel.outro?.footer?.trim(),
     };
   }
 
@@ -84,10 +99,9 @@ export async function appendBrandedOutro(
   const tmp: string[] = [];
   try {
     await ensureDir(config.processingPath);
-    const line =
-      brand.kind === "reddit"
+    const line = brand.spokenLine || (brand.kind === "reddit"
         ? redditOutroLine(reel, brand.channelName)
-        : `Subscribe to ${brand.channelName}. The next story is already waiting.`;
+        : `Subscribe to ${brand.channelName}. The next story is already waiting.`);
     const { audioPath } = await generateNarration(line, {
       ...tts,
       outputDir: config.processingPath,
@@ -156,15 +170,15 @@ async function renderOutroCard(
     .slice(0, 2)
     .toUpperCase();
   const title = isHorror
-    ? "DON'T WATCH ALONE"
+    ? brand.title || "DON'T WATCH ALONE"
     : nextPart
-      ? `FOLLOW FOR PART ${nextPart}`
-      : "FOLLOW FOR MORE";
+      ? brand.title || `FOLLOW FOR PART ${nextPart}`
+      : brand.title || "FOLLOW FOR MORE";
   const subtitle = isHorror
-    ? "New nightmares every night"
+    ? brand.subtitle || "New nightmares every night"
     : nextPart
-      ? `Part ${nextPart} drops next`
-      : "More stories after this one";
+      ? brand.subtitle || `Part ${nextPart} drops next`
+      : brand.subtitle || "More stories after this one";
   const accent = isHorror ? "#b91c1c" : "#ff4500";
   const bgA = isHorror ? "#050505" : "#111827";
   const bgB = isHorror ? "#1f0505" : "#1f2937";
@@ -204,8 +218,8 @@ async function renderOutroCard(
   ${handle ? `<text x="540" y="${transparent ? 1110 : 1042}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="800" fill="#cbd5e1">${esc(handle)}</text>` : ""}
   <text x="540" y="${transparent ? 1190 : 1100}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="700" fill="#cbd5e1">${esc(subtitle)}</text>
   <rect x="270" y="${subscribeY}" width="540" height="78" rx="39" fill="${accent}"/>
-  <text x="540" y="${subscribeY + 52}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="900" fill="#ffffff">SUBSCRIBE</text>
-  ${isHorror ? `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#64748b">it already knows you're here</text>` : ""}
+  <text x="540" y="${subscribeY + 52}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="900" fill="#ffffff">${esc(brand.cta || "SUBSCRIBE")}</text>
+  ${isHorror ? `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#64748b">${esc(brand.footer || "it already knows you're here")}</text>` : brand.footer ? `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#cbd5e1">${esc(brand.footer)}</text>` : ""}
 </svg>`;
 
   const png = new Resvg(svg, {
