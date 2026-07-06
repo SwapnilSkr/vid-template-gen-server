@@ -91,6 +91,7 @@ export interface ICaptionStyle {
   bold?: boolean;
   uppercase?: boolean; // render caption text ALL CAPS
   animation?: "none" | "pop";
+  karaoke?: boolean; // letter-by-letter fill: word starts in activeColor, text (primaryColor) catches up as spoken. Off = flat text colour only.
 }
 
 /** Voice post-processing controls (applied at render — no TTS re-spend). */
@@ -113,6 +114,18 @@ export interface IEditEffects {
   flicker?: number; // 0-1 unstable light flicker
   chromatic?: number; // 0-1 red/blue channel shift
   scanlines?: number; // 0-1 analog scanline overlay
+}
+
+/** Rendered outro copy/brand overrides. These are render-only: changing them
+ *  should rebuild the local preview/final video, not scene stills or narration. */
+export interface IOutroSettings {
+  channelName?: string;
+  channelHandle?: string;
+  spokenLine?: string;
+  title?: string;
+  subtitle?: string;
+  cta?: string;
+  footer?: string;
 }
 
 /** Explicit voice pick made at creation time — overrides the tier default
@@ -158,6 +171,21 @@ export interface IReelEditDraft {
   subtitlesUrl?: string;
   subtitlesPath?: string;
   rootDir: string;
+  createdAt: Date;
+}
+
+/** A locally staged thumbnail composition (Thumbnail Studio). The composed PNG
+ *  lives under `rootDir` on this server only — nothing touches S3 until the
+ *  draft is saved (upload + delete superseded thumbnail) or it is wiped on
+ *  discard/restage/reel delete, so abandoned experiments never bloat storage.
+ *  `input` echoes the composition controls so the studio can restore them. */
+export interface IThumbnailDraft {
+  id: string;
+  rootDir: string;
+  imagePath: string;
+  imageUrl: string; // local /api/reels/thumb-drafts/... serving URL
+  input?: Record<string, unknown>;
+  aspectRatio?: "16:9" | "9:16" | "1:1";
   createdAt: Date;
 }
 
@@ -277,12 +305,14 @@ export interface IReel extends Document {
   horrorAudioKey?: string;
   /** Connected YouTube channel id used for rendered outro branding. */
   outroChannelId?: string;
+  outro?: IOutroSettings;
   thumbnailMode?: "frame" | "ai";
   imageModelOverride?: string;
   voiceOverride?: IVoiceOverride;
   narrationVoice?: IVoiceOverride;
   voiceVariants: IVoiceVariant[];
   editDraft?: IReelEditDraft;
+  thumbnailDraft?: IThumbnailDraft;
 
   status: ReelStatus;
   progress: number;
@@ -357,6 +387,7 @@ const captionStyleSchema = new Schema<ICaptionStyle>(
     bold: Boolean,
     uppercase: Boolean,
     animation: { type: String, enum: ["none", "pop"] },
+    karaoke: Boolean,
   },
   { _id: false }
 );
@@ -380,6 +411,19 @@ const editEffectsSchema = new Schema<IEditEffects>(
     flicker: { type: Number, min: 0, max: 1 },
     chromatic: { type: Number, min: 0, max: 1 },
     scanlines: { type: Number, min: 0, max: 1 },
+  },
+  { _id: false }
+);
+
+const outroSettingsSchema = new Schema<IOutroSettings>(
+  {
+    channelName: String,
+    channelHandle: String,
+    spokenLine: String,
+    title: String,
+    subtitle: String,
+    cta: String,
+    footer: String,
   },
   { _id: false }
 );
@@ -464,6 +508,19 @@ const reelEditDraftSchema = new Schema<IReelEditDraft>(
     subtitlesUrl: String,
     subtitlesPath: String,
     rootDir: { type: String, required: true },
+    createdAt: { type: Date, default: () => new Date() },
+  },
+  { _id: false }
+);
+
+const thumbnailDraftSchema = new Schema<IThumbnailDraft>(
+  {
+    id: { type: String, required: true },
+    rootDir: { type: String, required: true },
+    imagePath: { type: String, required: true },
+    imageUrl: { type: String, required: true },
+    input: { type: Schema.Types.Mixed },
+    aspectRatio: { type: String, enum: ["16:9", "9:16", "1:1"] },
     createdAt: { type: Date, default: () => new Date() },
   },
   { _id: false }
@@ -586,12 +643,14 @@ const reelSchema = new Schema<IReel>(
     gameplayKey: String,
     horrorAudioKey: String,
     outroChannelId: String,
+    outro: outroSettingsSchema,
     thumbnailMode: { type: String, enum: ["frame", "ai"], default: "frame" },
     imageModelOverride: String,
     voiceOverride: voiceOverrideSchema,
     narrationVoice: voiceOverrideSchema,
     voiceVariants: { type: [voiceVariantSchema], default: [] },
     editDraft: reelEditDraftSchema,
+    thumbnailDraft: thumbnailDraftSchema,
     status: {
       type: String,
       enum: [

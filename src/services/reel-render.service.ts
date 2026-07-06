@@ -721,6 +721,30 @@ function assTime(sec: number): string {
   return `${h}:${m.toString().padStart(2, "0")}:${s.padStart(5, "0")}`;
 }
 
+/** Split a word into per-letter ASS karaoke tags so it fills left-to-right across
+ *  `durationSec`. The tag durations are centiseconds relative to the cue start
+ *  and sum to exactly the cue window, so the letter sweep stays locked to the
+ *  measured speech with no cumulative drift against the audio.
+ *
+ *  `instant` chooses the transition per letter: `\kf` (default) fades each letter
+ *  smoothly across its slot; `\k` snaps it instantly at the slot boundary — a
+ *  near-instant catch-up that still never runs ahead of the spoken word. */
+function karaokeLetters(word: string, durationSec: number, instant = false): string {
+  const chars = [...word];
+  if (!chars.length) return "";
+  const tag = instant ? "k" : "kf";
+  const totalCs = Math.max(1, Math.round(durationSec * 100));
+  let acc = 0;
+  return chars
+    .map((c, i) => {
+      const target = Math.round(((i + 1) / chars.length) * totalCs);
+      const cs = Math.max(0, target - acc);
+      acc = target;
+      return `{\\${tag}${cs}}${c}`;
+    })
+    .join("");
+}
+
 /** Rough "spoken weight" of a word — letters/digits count, min 1. */
 function wordWeight(w: string): number {
   const letters = w.replace(/[^A-Za-z0-9]/g, "").length;
@@ -774,6 +798,13 @@ export function buildPortraitKaraoke(
   const OUTLINE = hexToAssColor(s.outlineColor);
   const IDLE_INLINE = hexToAssInlineColor(s.primaryColor);
   const ACTIVE_INLINE = hexToAssInlineColor(s.activeColor);
+  // Karaoke fill is opt-in. Off (default) → words render in the flat text colour
+  // only. On → a word starts in the highlight colour (activeColor) and the text
+  // colour catches up letter by letter as it's spoken. If karaoke is on but the
+  // highlight matches the text colour, there's nothing to sweep from, so letters
+  // reveal (faint → solid) instead.
+  const KARAOKE = s.karaoke === true;
+  const HAS_HIGHLIGHT = ACTIVE_INLINE !== IDLE_INLINE;
   const CHUNK = Math.max(1, Math.round(s.chunkSize));
   const bold = s.bold ? -1 : 0;
 
@@ -812,19 +843,40 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
       ends.push(en);
     }
 
-    // display in chunks; highlight the active word as it is spoken. When
-    // active == idle color (e.g. the Lurker preset), there's no highlight.
+    // Display in chunks. With karaoke OFF (default) every word is flat text
+    // colour. With karaoke ON the HIGHLIGHT colour is the base: a word starts
+    // fully highlighted and the TEXT colour catches up LETTER BY LETTER as it's
+    // spoken (\k karaoke → no drift against the audio), ending in the text
+    // colour. Across a multi-word chunk (karaoke on):
+    //   - words already spoken  → text colour,
+    //   - the word being spoken  → highlight base with text snapping in,
+    //   - words not yet spoken   → still the highlight colour (the base).
+    // If karaoke is on with no distinct highlight, the word reveals (faint → solid).
     const pop = s.animation === "pop" ? "{\\fscx112\\fscy112\\t(0,120,\\fscx100\\fscy100)}" : "";
     for (let i = 0; i < words.length; i++) {
       const chunkStart = Math.floor(i / CHUNK) * CHUNK;
       const chunk = words.slice(chunkStart, chunkStart + CHUNK);
       const activeInChunk = i - chunkStart;
+      const dur = Math.max(ends[i] - starts[i], 0);
       const text = chunk
         .map((w, k) => {
-          const isActive = k === activeInChunk;
-          // One word on screen at a time → always use primary (text) colour.
-          const useHighlight = CHUNK > 1 && isActive;
-          return `{\\1c${useHighlight ? ACTIVE_INLINE : IDLE_INLINE}}${useHighlight ? pop : ""}${w}`;
+          if (!KARAOKE) {
+            // Flat text colour, fully opaque — no highlight, no per-letter fill.
+            return `{\\1c${IDLE_INLINE}\\1a&H00&\\2a&H00&}${w}`;
+          }
+          if (k !== activeInChunk) {
+            // Idle word: text colour once spoken, else the highlight base.
+            const spoken = k < activeInChunk;
+            const col = HAS_HIGHLIGHT && !spoken ? ACTIVE_INLINE : IDLE_INLINE;
+            return `{\\1c${col}\\1a&H00&\\2a&H00&}${w}`;
+          }
+          const fill = HAS_HIGHLIGHT
+            ? // base = highlight (\2c, unsung); text (\1c) fills in per letter
+              `\\2a&H00&\\1a&H00&\\2c${ACTIVE_INLINE}\\1c${IDLE_INLINE}`
+            : // no distinct highlight → faint → solid reveal in the text colour
+              `\\2a&H90&\\1a&H00&\\2c${IDLE_INLINE}\\1c${IDLE_INLINE}`;
+          // Highlight fill snaps instantly per letter; the plain reveal stays smooth.
+          return `{${fill}}${pop}${karaokeLetters(w, dur, HAS_HIGHLIGHT)}`;
         })
         .join(" ");
       lines.push(

@@ -56,6 +56,7 @@ export const DEFAULT_CAPTION_STYLE: Required<
   bold: true,
   uppercase: false,
   animation: "none",
+  karaoke: false, // flat text colour by default; opt-in letter-by-letter fill
 };
 
 export const STYLE_PRESETS: Record<string, StylePreset> = {

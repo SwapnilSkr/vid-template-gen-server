@@ -18,6 +18,16 @@ export const EditEffectsBody = t.Object({
   scanlines: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
 });
 
+export const OutroSettingsBody = t.Object({
+  channelName: t.Optional(t.String()),
+  channelHandle: t.Optional(t.String()),
+  spokenLine: t.Optional(t.String()),
+  title: t.Optional(t.String()),
+  subtitle: t.Optional(t.String()),
+  cta: t.Optional(t.String()),
+  footer: t.Optional(t.String()),
+});
+
 export const CreateReelBody = t.Object({
   niche: t.String(),
   genre: t.Optional(t.String()),
@@ -35,6 +45,8 @@ export const CreateReelBody = t.Object({
   horrorAudioKey: t.Optional(t.String()),
   /** connected YouTube channel id used for rendered outro branding */
   outroChannelId: t.Optional(t.String()),
+  /** rendered outro copy/brand overrides */
+  outro: t.Optional(OutroSettingsBody),
   /** thumbnail generation policy: pick a video frame later, or generate AI thumbnail during render */
   thumbnailMode: t.Optional(t.Union([t.Literal("frame"), t.Literal("ai")])),
   /** explicit image model pick from the compatible image model catalog */
@@ -134,6 +146,8 @@ export const UpdateReelSettingsBody = t.Object({
   imageModel: t.Optional(t.String()),
   horrorAudioKey: t.Optional(t.String()),
   horrorReferenceId: t.Optional(t.String()),
+  outroChannelId: t.Optional(t.String()),
+  outro: t.Optional(OutroSettingsBody),
   voice: t.Optional(
     t.Object({
       model: t.Optional(t.String()),
@@ -235,16 +249,35 @@ export const PublishReelBody = t.Object({
 
 export type TPublishReelBody = typeof PublishReelBody.static;
 
+const ThumbnailAspectRatio = t.Optional(t.Union([t.Literal("16:9"), t.Literal("9:16"), t.Literal("1:1")]));
+
 export const ThumbnailFrameBody = t.Object({
   atSeconds: t.Number({ minimum: 0 }),
+  aspectRatio: ThumbnailAspectRatio,
 });
 
 export type TThumbnailFrameBody = typeof ThumbnailFrameBody.static;
 
-/** Manual thumbnail: a video frame + custom overlay caption text. */
-export const CustomThumbnailBody = t.Object({
+export const ThumbnailSceneBody = t.Object({
+  sceneIndex: t.Number({ minimum: 0 }),
+  aspectRatio: ThumbnailAspectRatio,
+});
+
+export type TThumbnailSceneBody = typeof ThumbnailSceneBody.static;
+
+/** Composition controls shared by the one-shot custom thumbnail endpoints and
+ *  Thumbnail Studio draft staging. */
+const thumbnailComposeFields = {
   atSeconds: t.Number({ minimum: 0 }),
-  text: t.String({ minLength: 1, maxLength: 120 }),
+  sourceType: t.Optional(t.Union([t.Literal("frame"), t.Literal("scene")])),
+  sceneIndex: t.Optional(t.Number({ minimum: 0 })),
+  aspectRatio: ThumbnailAspectRatio,
+  xPct: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
+  yPct: t.Optional(t.Number({ minimum: 0, maximum: 1 })),
+  widthPct: t.Optional(t.Number({ minimum: 0.2, maximum: 1 })),
+  align: t.Optional(t.Union([t.Literal("left"), t.Literal("center"), t.Literal("right")])),
+  lineHeight: t.Optional(t.Number({ minimum: 0.8, maximum: 2 })),
+  effect: t.Optional(t.Union([t.Literal("none"), t.Literal("shadow"), t.Literal("glow"), t.Literal("box")])),
   fontFamily: t.Optional(t.String()),
   fontSize: t.Optional(t.Number({ minimum: 20, maximum: 400 })),
   color: t.Optional(t.String()),
@@ -253,9 +286,24 @@ export const CustomThumbnailBody = t.Object({
   // vertical anchor for the text band
   position: t.Optional(t.Union([t.Literal("top"), t.Literal("middle"), t.Literal("bottom")])),
   uppercase: t.Optional(t.Boolean()),
+};
+
+/** Manual thumbnail: a video frame + custom overlay caption text. */
+export const CustomThumbnailBody = t.Object({
+  ...thumbnailComposeFields,
+  text: t.String({ minLength: 1, maxLength: 200 }),
 });
 
 export type TCustomThumbnailBody = typeof CustomThumbnailBody.static;
+
+/** Thumbnail Studio draft staging — text optional so a clean source (no
+ *  overlay) can be staged locally too. */
+export const StageThumbnailDraftBody = t.Object({
+  ...thumbnailComposeFields,
+  text: t.Optional(t.String({ maxLength: 200 })),
+});
+
+export type TStageThumbnailDraftBody = typeof StageThumbnailDraftBody.static;
 
 export const VoiceSampleQuery = t.Object({
   model: t.String(),
