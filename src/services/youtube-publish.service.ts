@@ -64,20 +64,20 @@ const YOUTUBE_API_OPTIONS: MethodOptions = {
 /** YouTube Data API custom-thumbnail limit (2 MiB). */
 const YOUTUBE_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024;
 
+/** Shorts shelf / channel grid uses a vertical cover (`oar2`), not the classic
+ *  16:9 `maxresdefault` that `thumbnails.set` historically updates. */
+const SHORTS_COVER_W = 1080;
+const SHORTS_COVER_H = 1920;
+
 async function encodeThumbnailJpeg(
   inputPath: string,
   outputPath: string,
   quality: number,
-  maxWidth: number
+  vf: string
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     ffmpeg(inputPath)
-      .outputOptions([
-        "-vf",
-        `scale='min(${maxWidth},iw)':-2`,
-        "-q:v",
-        String(quality),
-      ])
+      .outputOptions(["-vf", vf, "-q:v", String(quality)])
       .output(outputPath)
       .on("end", () => resolve())
       .on("error", (err) =>
@@ -87,42 +87,66 @@ async function encodeThumbnailJpeg(
   });
 }
 
-/** YouTube rejects custom thumbnails over 2 MiB. Review thumbnails are stored
- *  as PNG on S3 and can exceed that — re-encode to JPEG at publish time. */
-async function compressImageForYouTubeThumbnail(
-  image: Buffer,
-  contentType?: string | null
-): Promise<{ buffer: Buffer; mimeType: string }> {
-  if (image.length <= YOUTUBE_THUMBNAIL_MAX_BYTES) {
-    const mimeType = contentType?.split(";")[0]?.trim() || "image/png";
-    return { buffer: image, mimeType };
-  }
-
+/**
+ * Prepare a Shorts-friendly custom thumbnail: always JPEG, always 9:16
+ * (1080×1920). Uploading a 16:9 PNG often updates only `maxresdefault` while
+ * the Shorts shelf keeps an auto-picked vertical frame (`oar2`).
+ */
+async function prepareYouTubeShortsThumbnail(image: Buffer): Promise<{
+  buffer: Buffer;
+  mimeType: "image/jpeg";
+}> {
   const dir = await mkdtemp(join(tmpdir(), "yt-thumb-"));
   const inputPath = join(dir, "input.png");
   const outputPath = join(dir, "output.jpg");
   try {
     await writeFile(inputPath, image);
-    const qualities = [4, 6, 8, 10, 14, 18, 24, 31];
-    const widths = [1280, 960, 640];
-    for (const maxWidth of widths) {
-      for (const quality of qualities) {
-        await encodeThumbnailJpeg(inputPath, outputPath, quality, maxWidth);
-        const compressed = await readFile(outputPath);
-        if (compressed.length <= YOUTUBE_THUMBNAIL_MAX_BYTES) {
-          console.log(
-            `🖼️  YouTube thumbnail compressed ${Math.round(image.length / 1024)} KB → ${Math.round(compressed.length / 1024)} KB (q=${quality}, w<=${maxWidth})`
-          );
-          return { buffer: compressed, mimeType: "image/jpeg" };
-        }
+    const vf =
+      `scale=${SHORTS_COVER_W}:${SHORTS_COVER_H}:force_original_aspect_ratio=increase,` +
+      `crop=${SHORTS_COVER_W}:${SHORTS_COVER_H}`;
+    const qualities = [3, 5, 8, 12, 18, 24, 31];
+    for (const quality of qualities) {
+      await encodeThumbnailJpeg(inputPath, outputPath, quality, vf);
+      const compressed = await readFile(outputPath);
+      if (compressed.length <= YOUTUBE_THUMBNAIL_MAX_BYTES) {
+        console.log(
+          `🖼️  Shorts cover prepared ${Math.round(image.length / 1024)} KB → ` +
+            `${Math.round(compressed.length / 1024)} KB (9:16 ${SHORTS_COVER_W}x${SHORTS_COVER_H}, q=${quality})`
+        );
+        return { buffer: compressed, mimeType: "image/jpeg" };
       }
     }
     throw new Error(
-      `Could not compress thumbnail below ${YOUTUBE_THUMBNAIL_MAX_BYTES} bytes (source ${image.length} bytes)`
+      `Could not compress Shorts cover below ${YOUTUBE_THUMBNAIL_MAX_BYTES} bytes (source ${image.length} bytes)`
     );
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+async function fetchYouTubeCoverBytes(videoId: string, name: "oar2" | "maxresdefault"): Promise<Buffer | null> {
+  const url = `https://i.ytimg.com/vi/${videoId}/${name}.jpg?t=${Date.now()}`;
+  try {
+    const res = await fetchWithoutIdleTimeout(url);
+    if (!res.ok) return null;
+    return Buffer.from(await res.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+/** Wait briefly for CDN to refresh the Shorts vertical cover after thumbnails.set. */
+async function verifyShortsCoverApplied(
+  videoId: string,
+  beforeOar: Buffer | null
+): Promise<"applied" | "unchanged" | "unknown"> {
+  if (!beforeOar) return "unknown";
+  for (let attempt = 0; attempt < 4; attempt++) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const after = await fetchYouTubeCoverBytes(videoId, "oar2");
+    if (after && !after.equals(beforeOar)) return "applied";
+  }
+  return "unchanged";
 }
 
 async function downloadVideoToTempFile(url: string): Promise<{ dir: string; path: string }> {
@@ -489,6 +513,7 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
       ? "failed"
       : "missing";
     let thumbnailError: string | undefined;
+    let shortsCoverStatus: "applied" | "unchanged" | "unknown" | undefined;
 
     if (videoId && review.thumbnailUrl) {
       try {
@@ -497,10 +522,11 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
           throw new Error(`Failed to fetch thumbnail (${thumbnailRes.status})`);
         }
         const thumbnailBuffer = Buffer.from(await thumbnailRes.arrayBuffer());
-        const { buffer: uploadBuffer, mimeType } = await compressImageForYouTubeThumbnail(
-          thumbnailBuffer,
-          thumbnailRes.headers.get("content-type")
-        );
+        // Snapshot Shorts cover before upload so we can detect whether YouTube
+        // actually replaced the vertical shelf image (oar2) vs only maxres.
+        const beforeOar = await fetchYouTubeCoverBytes(videoId, "oar2");
+        const { buffer: uploadBuffer, mimeType } =
+          await prepareYouTubeShortsThumbnail(thumbnailBuffer);
         await youtube.thumbnails.set({
           videoId,
           media: {
@@ -509,6 +535,19 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
           },
         });
         thumbnailStatus = "uploaded";
+        shortsCoverStatus = await verifyShortsCoverApplied(videoId, beforeOar);
+        if (shortsCoverStatus === "applied") {
+          console.log(`🖼️  Shorts cover (oar2) updated for ${reelId} (${videoId})`);
+        } else if (shortsCoverStatus === "unchanged") {
+          console.warn(
+            `⚠️  Custom thumb API-accepted for ${reelId} (${videoId}) but Shorts cover (oar2) did not change — ` +
+              `shelf may keep an auto video frame. Check YouTube Studio → Shorts cover / select a frame.`
+          );
+        } else {
+          console.log(
+            `🖼️  Custom thumbnail accepted for ${reelId} (${videoId}) — Shorts cover verify skipped (no prior oar2)`
+          );
+        }
       } catch (error: unknown) {
         thumbnailError = getErrorMessage(error);
         console.warn(`⚠️  Thumbnail upload failed for reel ${reelId}: ${thumbnailError}`);
@@ -523,6 +562,7 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
       channelLabel: channel.label,
       thumbnailStatus,
       thumbnailError,
+      shortsCoverStatus,
       publishedAt: new Date(),
     };
     await reel.save();

@@ -200,6 +200,12 @@ export interface IYouTubePublish {
   channelLabel?: string;
   thumbnailStatus?: "pending" | "uploaded" | "missing" | "failed";
   thumbnailError?: string;
+  /**
+   * Whether the Shorts vertical cover (`oar2`) changed after our custom upload.
+   * `unchanged` means YouTube kept an auto-picked video frame for the Shorts
+   * shelf even though `thumbnails.set` succeeded for classic surfaces.
+   */
+  shortsCoverStatus?: "applied" | "unchanged" | "unknown";
   publishedAt?: Date;
 }
 
@@ -547,6 +553,10 @@ const youtubePublishSchema = new Schema<IYouTubePublish>(
       enum: ["pending", "uploaded", "missing", "failed"],
     },
     thumbnailError: String,
+    shortsCoverStatus: {
+      type: String,
+      enum: ["applied", "unchanged", "unknown"],
+    },
     publishedAt: Date,
   },
   { _id: false }

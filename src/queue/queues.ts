@@ -1,4 +1,5 @@
 import { Queue } from "bullmq";
+import { Reel } from "../models";
 import { redisConnection } from "./connection";
 
 // ============================================
@@ -133,6 +134,17 @@ export async function enqueuePublish(
       job.data.channelId === channelId
   );
   if (duplicate) return;
+
+  // Surface an in-flight publish to the studio poller. Auto-publish used to
+  // enqueue without this, so the UI stayed on "completed" until a manual refresh.
+  if (platform === "youtube") {
+    await Reel.findByIdAndUpdate(reelId, {
+      $set: {
+        "youtube.status": "pending",
+        ...(channelId ? { "youtube.channelId": channelId } : {}),
+      },
+    });
+  }
 
   await publishQueue.add(
     "publish",
