@@ -431,7 +431,7 @@ function runComposite(
       .outputOptions([
         "-map", "1:a",
         "-c:v", "libx264",
-        "-preset", "medium",
+        "-preset", config.ffmpegPreset,
         "-crf", "21",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",

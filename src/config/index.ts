@@ -49,6 +49,9 @@ export const config = {
   // FFmpeg
   ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
   ffprobePath: process.env.FFPROBE_PATH || "ffprobe",
+  // libx264 speed/quality tradeoff for final passes (caption burn, mix, FX).
+  // Scene clips already use veryfast. Docker/CPU-bound hosts: veryfast|ultrafast.
+  ffmpegPreset: process.env.FFMPEG_PRESET || "veryfast",
 
   // Gameplay background clips (Reddit/AITA format) — user-supplied .mp4 loops
   gameplayDir: absPath(process.env.GAMEPLAY_DIR, "./storage/gameplay"),

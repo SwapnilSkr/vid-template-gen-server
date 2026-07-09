@@ -132,9 +132,11 @@ async function renderImageKenBurnsInner(
   const totalDuration = +(cumulative - (n - 1) * overlap).toFixed(3);
 
   // 3. Crossfade-assemble all clips (or copy through if a single scene).
+  console.log(`🧩 Assembling ${n} scene(s) with crossfade…`);
   const joinedPath = join(config.processingPath, `${reelId}_joined.mp4`);
   await assembleCrossfade(timings, totalDuration, joinedPath);
   tmp.push(joinedPath);
+  console.log(`🧩 Assembly done (${totalDuration.toFixed(1)}s)`);
 
   // 4. Weighted karaoke captions from ACTUAL timings → ASS → burn.
   const assContent = buildPortraitKaraoke(
@@ -150,7 +152,9 @@ async function renderImageKenBurnsInner(
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
   if (options.horrorEffects) {
+    console.log(`👻 Horror final mix (preset=${config.ffmpegPreset})…`);
     await applyHorrorFinalMix(captionedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
+    console.log(`👻 Horror mix done`);
   } else {
     await copyVideo(captionedPath, finalPath);
   }
@@ -387,12 +391,13 @@ function burnSubtitlesStrict(
     fadeIn > 0
       ? assVideoFilter(assPath, `fade=t=in:st=0:d=${fadeIn}`)
       : assVideoFilter(assPath);
+  console.log(`🔤 Burning captions (preset=${config.ffmpegPreset})…`);
   return new Promise((resolve, reject) => {
     ffmpeg(video)
       .outputOptions([
         "-vf", vf,
         "-c:v", "libx264",
-        "-preset", "medium",
+        "-preset", config.ffmpegPreset,
         "-crf", "21",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
@@ -400,7 +405,10 @@ function burnSubtitlesStrict(
         "-movflags", "+faststart",
       ])
       .output(out)
-      .on("end", () => resolve(out))
+      .on("end", () => {
+        console.log(`🔤 Caption burn done`);
+        resolve(out);
+      })
       .on("error", (err) => reject(new Error(`Caption burn failed: ${err.message}`)))
       .run();
   });
@@ -519,7 +527,7 @@ function applyEditEffectsStrict(input: string, output: string, effects: IEditEff
     "-map", "0:a?", // carry the reel's audio through untouched
     "-c:a", "copy",
     "-c:v", "libx264",
-    "-preset", "medium",
+    "-preset", config.ffmpegPreset,
     "-crf", "20",
     "-pix_fmt", "yuv420p",
     "-movflags", "+faststart",
@@ -709,8 +717,9 @@ export async function applyHorrorFinalMix(
       .outputOptions([
         "-c:v",
         "libx264",
+        // Never use "slow" here — Docker/CPU hosts stall for minutes on a full-reel re-encode.
         "-preset",
-        comicEffects ? "slow" : "medium",
+        config.ffmpegPreset,
         "-crf",
         comicEffects ? "24" : "21",
         ...(comicEffects ? ["-maxrate", "8M", "-bufsize", "16M", "-tune", "animation"] : []),
