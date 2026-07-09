@@ -7,11 +7,10 @@ import { redisConnection } from "./connection";
 // Redis: a server restart/crash mid-render no longer loses the job — BullMQ
 // detects the stalled lock and redelivers it to a worker once one is back up.
 //
-// NOTE: this gives crash-survival + retry + concurrency control, not yet
-// full per-stage resumability (a redelivered job re-runs the whole pipeline
-// from the top, re-spending on regenerated assets). True stage-level resume
-// (skip scenes that already have assetUrl/audioUrl) is a follow-up — see
-// docs/architecture/render-engine.md.
+// NOTE: this gives crash-survival + retry + concurrency control. Produce
+// already skips scenes that have assetUrl/audioUrl on S3. Failed jobs can be
+// resumed via POST /api/reels/:id/resume (render-only reuse) without re-spending
+// on images/TTS. See resumeFailedReel in reel-edit.service.ts.
 // ============================================
 
 const defaultJobOptions = {

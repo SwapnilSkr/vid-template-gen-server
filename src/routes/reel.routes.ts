@@ -50,6 +50,7 @@ import {
   updateCaptionsController,
   applyCaptionsController,
   regenerateReelController,
+  resumeFailedReelController,
   approvePlanController,
   replanReelController,
   saveReelEditDraftController,
@@ -187,6 +188,9 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   // ---- Studio editing (co-creation) ----
   // Approve a reviewed plan → start producing
   .post("/:id/approve-plan", approvePlanController, { params: IdParams })
+
+  // Resume a failed produce job (reuse S3 assets, re-run render→upload)
+  .post("/:id/resume", resumeFailedReelController, { params: IdParams })
 
   // Discard the plan and re-plan (new story / reference / pasted script)
   .post("/:id/replan", replanReelController, { params: IdParams, body: ReplanReelBody })

@@ -63,6 +63,7 @@ export {
   updateCaptionsController,
   applyCaptionsController,
   regenerateReelController,
+  resumeFailedReelController,
   approvePlanController,
   replanReelController,
   saveReelEditDraftController,

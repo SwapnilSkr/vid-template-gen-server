@@ -243,6 +243,34 @@ export async function regenerateReel(reelId: string, mode: "render_only" | "asse
   return loadReel(reelId);
 }
 
+/**
+ * Resume a failed produce job. Reuses any scene stills/narration already on S3
+ * (images + TTS are the expensive part) and only re-runs render→upload.
+ * Prefer this over regenerating assets when the failure was late-stage
+ * (ffmpeg caption burn, mix, outro, upload).
+ */
+export async function resumeFailedReel(reelId: string): Promise<IReel> {
+  const reel = await loadReel(reelId);
+  if (reel.status !== "failed") {
+    throw new Error(`Reel is not failed (status: ${reel.status}) — nothing to resume`);
+  }
+  if (reel.scenes.length === 0) {
+    throw new Error("Nothing to resume — plan the reel first");
+  }
+  const hasAnyAsset = reel.scenes.some((s) => s.assetUrl || s.audioUrl);
+  if (!hasAnyAsset) {
+    // Failed before any assets landed — full produce from scratch is correct.
+    await markQueued(reelId);
+    await enqueueReelProduce(reelId);
+    return loadReel(reelId);
+  }
+  console.log(
+    `♻️  Resuming failed reel ${reelId} — reusing ${reel.scenes.filter((s) => s.assetUrl).length} image(s) / ` +
+      `${reel.scenes.filter((s) => s.audioUrl).length} narration(s), re-running render only`
+  );
+  return regenerateReel(reelId, "render_only");
+}
+
 /** Approve a reviewed plan → run the produce stage. */
 export async function approvePlan(reelId: string): Promise<IReel> {
   const reel = await loadReel(reelId);

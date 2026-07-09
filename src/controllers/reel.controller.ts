@@ -31,6 +31,7 @@ import {
   updateReelSettings,
   updateCaptions,
   regenerateReel,
+  resumeFailedReel,
   approvePlan,
   replanReel,
 } from "../services";
@@ -626,6 +627,11 @@ export async function applyCaptionsController({ params, body, set }: CaptionsCon
 /** Queue a produce run — render-only (reuse assets) or full asset regeneration. */
 export async function regenerateReelController({ params, body, set }: RegenerateReelContext) {
   return runEdit(set, () => createReelEditDraft(params.id, body.mode));
+}
+
+/** Resume a failed produce job, reusing any S3 assets already paid for. */
+export async function resumeFailedReelController({ params, set }: GetReelContext) {
+  return runEdit(set, () => resumeFailedReel(params.id));
 }
 
 /** Approve a reviewed plan → start producing. */
