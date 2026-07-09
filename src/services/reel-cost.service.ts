@@ -123,3 +123,29 @@ export async function buildReelCostBreakdown(
     generatedAt: new Date(),
   };
 }
+
+/**
+ * Merge a new produce/re-render run into the existing breakdown so re-renders
+ * accumulate OpenRouter spend instead of wiping prior actuals. Keeps prior
+ * lines and appends this run's lines with a `[Re-render]` prefix.
+ */
+export function accumulateReelCostBreakdown(
+  previous: ICostBreakdown | undefined,
+  next: ICostBreakdown,
+  runLabel = "Re-render"
+): ICostBreakdown {
+  if (!previous?.lines?.length) return next;
+
+  const stampedNext = next.lines.map((item) => ({
+    ...item,
+    label: item.label.startsWith("[") ? item.label : `[${runLabel}] ${item.label}`,
+  }));
+  const lines = [...previous.lines, ...stampedNext];
+  return {
+    currency: "USD",
+    totalUsd: roundUsd(lines.reduce((sum, item) => sum + item.costUsd, 0)),
+    lines,
+    note: next.note ?? previous.note,
+    generatedAt: new Date(),
+  };
+}

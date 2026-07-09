@@ -33,7 +33,11 @@ import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
 import { appendBrandedOutro } from "./reel-outro.service";
 import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
-import { buildReelCostBreakdown, type MeasuredCostInput } from "./reel-cost.service";
+import {
+  accumulateReelCostBreakdown,
+  buildReelCostBreakdown,
+  type MeasuredCostInput,
+} from "./reel-cost.service";
 import { markHorrorReferenceUsed } from "./horror-reference.service";
 import { resolveStoryMatchedTts } from "./reel-voice-match.service";
 import {
@@ -1014,13 +1018,17 @@ async function produceImageReel(
       });
     }
     const heroScene = isHybrid ? result.scenes.find((_, i) => reel.scenes[i]?.isHero) : undefined;
-    const costBreakdown = await buildReelCostBreakdown(reel, {
+    const hadPriorOutput = Boolean(reel.outputUrl);
+    const runBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
       tts,
       measuredCosts,
       heroVideoModel: isHybrid ? models.video : undefined,
       heroDurationSec: heroScene ? Math.min(Math.max(Math.round(heroScene.duration), 4), 8) : undefined,
     });
+    const costBreakdown = hadPriorOutput
+      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Re-render")
+      : runBreakdown;
     reel.costBreakdown = costBreakdown;
     reel.costUsd = costBreakdown.totalUsd;
 
@@ -1080,11 +1088,34 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
 
     await updateStatus(reelId, "rendering", 45);
     const gameplayMeasuredCosts: MeasuredCostInput[] = [];
+    const hadPriorOutput = Boolean(reel.outputUrl);
+    let narrationSpendUsd = 0;
+    let narrationCalls = 0;
     const result = await renderGameplayReel(reelId, story, gameplayPath, {
       ...tts,
       bodySentences,
       captionStyle: reel.captionStyle,
+      onNarrationUsage: (usage) => {
+        narrationCalls += 1;
+        if (usage.costUsd !== undefined) narrationSpendUsd += usage.costUsd;
+      },
     });
+    if (narrationCalls > 0) {
+      gameplayMeasuredCosts.push({
+        label: "Narration",
+        model: `${tts.model}/${tts.voice}`,
+        costUsd:
+          narrationSpendUsd > 0
+            ? narrationSpendUsd
+            : undefined,
+        source: narrationSpendUsd > 0 ? "actual" : "estimated",
+      });
+      // If OpenRouter didn't return per-call cost, fall back to char estimate
+      // via buildReelCostBreakdown (hasMeasuredTts only when costUsd is set).
+      if (!(narrationSpendUsd > 0)) {
+        gameplayMeasuredCosts.pop();
+      }
+    }
     const outroResult = await appendBrandedOutro(
       result.videoPath,
       reel,
@@ -1122,11 +1153,14 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
         });
       });
     }
-    const costBreakdown = await buildReelCostBreakdown(reel, {
+    const runBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
       tts,
       measuredCosts: gameplayMeasuredCosts,
     });
+    const costBreakdown = hadPriorOutput
+      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Re-render")
+      : runBreakdown;
     reel.costBreakdown = costBreakdown;
     reel.costUsd = costBreakdown.totalUsd;
 

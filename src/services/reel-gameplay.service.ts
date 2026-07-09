@@ -3,7 +3,11 @@ import { readFile, readdir, writeFile, unlink, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { config } from "../config";
 import { ensureDir, concatDemuxerEntry, assFilenameFilter } from "../utils";
-import { generateNarration, getAudioDuration } from "./openrouter-media.service";
+import {
+  generateNarration,
+  getAudioDuration,
+  type MediaUsageCallback,
+} from "./openrouter-media.service";
 import { listKeys, cdnUrlFor } from "./s3.service";
 import { renderPartOutroCard, renderRedditCard } from "./reddit-card.service";
 import type { RedditStory } from "./reel-script.service";
@@ -139,6 +143,8 @@ export interface GameplayRenderOpts {
   /** Spoken body sentences (scene narrations). Falls back to splitting story.body. */
   bodySentences?: string[];
   captionStyle?: ICaptionStyle;
+  /** Meter OpenRouter TTS spend for the cost breakdown. */
+  onNarrationUsage?: MediaUsageCallback;
 }
 
 export async function renderGameplayReel(
@@ -175,13 +181,14 @@ async function renderGameplayReelInner(
   const audioPaths: string[] = [];
   const speechDurs: number[] = [];
   const tempo = clampTempo(config.redditNarrationTempo);
-  const { bodySentences: _bs, captionStyle, ...narrationOpts } = ttsOpts;
+  const { bodySentences: _bs, captionStyle, onNarrationUsage, ...narrationOpts } = ttsOpts;
 
   for (let i = 0; i < segTexts.length; i++) {
     const { audioPath } = await generateNarration(segTexts[i], {
       ...narrationOpts,
       outputDir: config.processingPath,
       profile: "reddit",
+      onUsage: onNarrationUsage,
     });
     tmp.push(audioPath);
 
