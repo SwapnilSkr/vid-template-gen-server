@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-bun.lock
 
 # Git
 .git/
@@ -20,9 +19,10 @@ Thumbs.db
 dist/
 *.log
 
-# Environment files (handled separately)
+# Environment files (passed via compose env_file, never baked into the image)
 .env
 .env.local
+.env.docker
 .env.*.local
 
 # Storage (mounted as volumes)

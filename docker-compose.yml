@@ -1,42 +1,54 @@
-version: "3.8"
+# Server-only Docker image. Local `bun dev` is unchanged — it keeps using
+# `.env.local` (local Redis by default). This compose file loads `.env.docker`
+# so production/containers can point at Redis Cloud + the same Atlas Mongo URI.
+#
+# Setup once:
+#   cp .env.docker.example .env.docker
+#   # paste secrets (same as .env.local) but set REDIS_URL to Redis Cloud
+#   docker compose up --build   # fonts are fetched during the image build
+#
+# Or: bun run docker:up
 
 services:
   video-generator:
     build:
       context: .
       dockerfile: Dockerfile
+    image: vid-template-gen-server:latest
     container_name: video-generator
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:3000"
+    env_file:
+      - .env.docker
     environment:
+      # Force container runtime paths (override anything in the env file)
       - NODE_ENV=production
-      - PORT=3000
       - HOST=0.0.0.0
-      - ELEVEN_LABS_API_KEY=${ELEVEN_LABS_API_KEY}
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      - MAX_FILE_SIZE_MB=${MAX_FILE_SIZE_MB:-500}
-      - MAX_VIDEO_DURATION=${MAX_VIDEO_DURATION:-300}
+      - PORT=3000
+      - STORAGE_PATH=/app/storage
+      - PROCESSING_PATH=/app/storage/processing
+      - GAMEPLAY_DIR=/app/storage/gameplay
+      - FFMPEG_PATH=/usr/bin/ffmpeg
+      - FFPROBE_PATH=/usr/bin/ffprobe
     volumes:
-      # Persistent storage
       - ./storage/templates:/app/storage/templates
       - ./storage/characters:/app/storage/characters
       - ./storage/output:/app/storage/output
-      # Processing is ephemeral, no need to persist
+      - ./storage/processing:/app/storage/processing
+      - ./storage/gameplay:/app/storage/gameplay
     healthcheck:
       test:
         [
           "CMD",
-          "wget",
-          "--no-verbose",
-          "--tries=1",
-          "--spider",
-          "http://localhost:3000/health",
+          "bun",
+          "-e",
+          "fetch('http://localhost:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 20s
     deploy:
       resources:
         limits:
@@ -50,13 +62,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-# Optional: Add Redis for production job queue
-# services:
-#   redis:
-#     image: redis:7-alpine
-#     restart: unless-stopped
-#     volumes:
-#       - redis_data:/data
-
-# volumes:
-#   redis_data:

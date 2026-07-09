@@ -6,6 +6,9 @@
     "start": "bun run src/index.ts",
     "seed": "bun run src/db/seed.ts",
     "fetch-fonts": "bun run scripts/fetch-fonts.ts",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix"

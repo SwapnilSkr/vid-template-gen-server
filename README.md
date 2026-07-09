@@ -86,11 +86,15 @@ Server will be running at `http://localhost:3000`.
 
 ## 🐳 Docker Support
 
-To run the full stack with Docker (includes FFmpeg):
+Server-only image (FFmpeg + fonts baked in). Local `bun dev` is unchanged.
 
 ```bash
-docker compose up --build
+cd server
+cp .env.docker.example .env.docker   # Redis Cloud + secrets
+bun run docker:up
 ```
+
+Full flow (local smoke-test → wipe images → run on a server for others): [docs/operations/docker.md](../docs/operations/docker.md).
 
 ---
 

@@ -4,13 +4,20 @@
 # native @resvg/resvg-js addon.
 # ===========================================
 
-# Stage 1: Build (install deps + native prebuilds)
+# Stage 1: deps + caption fonts (no manual `bun run fetch-fonts` needed)
 FROM oven/bun:1-slim AS builder
 
 WORKDIR /app
 
 COPY package.json bun.lock* ./
 RUN bun install --frozen-lockfile --production
+
+# fonts.ts + fetch-fonts.ts are enough to download TTFs into assets/fonts.
+# Existing local assets/fonts (if any) are copied first and skipped by the script.
+COPY src ./src
+COPY scripts ./scripts
+COPY assets ./assets
+RUN FETCH_FONTS_STRICT=1 bun run scripts/fetch-fonts.ts
 
 # Stage 2: Production
 FROM oven/bun:1-slim AS runner
@@ -34,11 +41,9 @@ RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs -M -s /usr/sbin/nologin
 WORKDIR /app
 
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/assets ./assets
 COPY package.json ./
 COPY src ./src
-# assets/ holds BowlbyOne-Regular.ttf used by ffmpeg drawtext (textfile=).
-# Without this the render dies with "Cannot find a valid font".
-COPY assets ./assets
 
 RUN mkdir -p storage/templates storage/characters storage/processing \
              storage/output storage/gameplay \
