@@ -7,8 +7,9 @@ import type {
   AudioSegment,
   VideoSegment,
 } from "../types";
-import { ensureDir, escapeFilterPath, generateFilename } from "../utils";
+import { ensureDir, assVideoFilter, generateFilename } from "../utils";
 import type { ScreenType } from "../models";
+import { DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
 
 // Screen dimensions for aspect ratio conversion
 const SCREEN_DIMENSIONS = {
@@ -528,28 +529,35 @@ export async function addSubtitlesToVideo(
 
   // Write ASS to temp file
   const assPath = join(config.processingPath, `temp_${Date.now()}.ass`);
-  const { writeFile, unlink } = await import("node:fs/promises");
+  const { writeFile, unlink, copyFile } = await import("node:fs/promises");
   await writeFile(assPath, assContent, "utf-8");
   console.log(`📝 ASS file written to: ${assPath}`);
   console.log(`📝 ASS content preview:\n${assContent.substring(0, 500)}...`);
 
-  return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
-      .outputOptions(["-vf", `ass='${escapeFilterPath(assPath)}'`])
-      .output(output)
-      .on("end", async () => {
-        await unlink(assPath).catch(() => {});
-        console.log(
-          `📝 Subtitles added to video (position: ${position}, alignment: ${alignment})`
-        );
-        resolve(output);
-      })
-      .on("error", async (err) => {
-        await unlink(assPath).catch(() => {});
-        reject(new Error(`Subtitle burn failed: ${err.message}`));
-      })
-      .run();
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg(videoPath)
+        .outputOptions(["-vf", assVideoFilter(assPath)])
+        .output(output)
+        .on("end", () => resolve())
+        .on("error", (err) => reject(err))
+        .run();
+    });
+    await unlink(assPath).catch(() => {});
+    console.log(
+      `📝 Subtitles added to video (position: ${position}, alignment: ${alignment})`
+    );
+    return output;
+  } catch (error: unknown) {
+    await unlink(assPath).catch(() => {});
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `⚠️  Subtitle burn failed — shipping video without burned captions. Cause: ${message}`
+    );
+    await unlink(output).catch(() => {});
+    await copyFile(videoPath, output);
+    return output;
+  }
 }
 
 /**
@@ -586,7 +594,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,48,${primaryAssColor},${secondaryAssColor},&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,${alignment},10,10,${marginV},1
+Style: Default,${DEFAULT_BUNDLED_FONT_FAMILY},48,${primaryAssColor},${secondaryAssColor},&H00000000,&H80000000,1,0,0,0,100,100,0,0,1,3,1,${alignment},10,10,${marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

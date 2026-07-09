@@ -3,12 +3,11 @@ import { spawn } from "node:child_process";
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
-import { ensureDir, escapeFilterPath } from "../utils";
+import { ensureDir, assVideoFilter } from "../utils";
 import { getAudioDuration } from "./openrouter-media.service";
 import { cdnUrlFor, listKeys } from "./s3.service";
 import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
 import { captionStylePlain } from "../utils/caption-style.utils";
-import { FONTS_DIR, HAS_FONTS_DIR } from "../config/fonts";
 import type { ISceneMotion, ICaptionStyle, IEditEffects } from "../models";
 
 export const W = 1080;
@@ -384,15 +383,10 @@ function burnSubtitlesStrict(
   out: string,
   fadeIn = 0
 ): Promise<string> {
-  const escapedAss = escapeFilterPath(assPath);
-  const fontsdir = HAS_FONTS_DIR ? `:fontsdir='${escapeFilterPath(FONTS_DIR)}'` : "";
-  // Fade the composited frame (image + burned captions) in together. The intro
-  // fade lives HERE, after the burn — never before it — so captions can't flash
-  // at full opacity over a still-black frame at t=0 ("captions before the image").
   const vf =
     fadeIn > 0
-      ? `ass='${escapedAss}'${fontsdir},fade=t=in:st=0:d=${fadeIn}`
-      : `ass='${escapedAss}'${fontsdir}`;
+      ? assVideoFilter(assPath, `fade=t=in:st=0:d=${fadeIn}`)
+      : assVideoFilter(assPath);
   return new Promise((resolve, reject) => {
     ffmpeg(video)
       .outputOptions([
@@ -450,10 +444,22 @@ export function hasEditEffects(fx?: IEditEffects): boolean {
   );
 }
 
-export function applyEditEffects(input: string, output: string, fx?: IEditEffects): Promise<string> {
+export async function applyEditEffects(input: string, output: string, fx?: IEditEffects): Promise<string> {
   if (!hasEditEffects(fx)) return copyVideo(input, output);
-  const effects = fx!;
+  try {
+    return await applyEditEffectsStrict(input, output, fx!);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `⚠️  Edit-effects pass failed — shipping video without rain/grain/etc so the job can finish. ` +
+        `Re-render after fixing ffmpeg (lavfi) to restore effects. Cause: ${message}`
+    );
+    await unlink(output).catch(() => {});
+    return copyVideo(input, output);
+  }
+}
 
+function applyEditEffectsStrict(input: string, output: string, effects: IEditEffects): Promise<string> {
   const rain = Boolean(effects.rain);
   // rainIntensity 0-1 → streak opacity 0.2-0.9 (0 still shows faint drizzle).
   const rainOp = clamp01(effects.rainIntensity ?? 0.5) * 0.7 + 0.2;

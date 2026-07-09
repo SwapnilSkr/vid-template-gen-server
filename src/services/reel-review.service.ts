@@ -14,7 +14,7 @@ import { deleteFromS3, uploadImage } from "./s3.service";
 import { listTrendReferences } from "./trend-reference.service";
 import { getTrendDigest } from "./trend-insight.service";
 import { getRecipe } from "../config/niche-styles";
-import { fontFilePathByFamily } from "../config/fonts";
+import { fontFilePathByFamily, DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
 
 export interface UpdateReelReviewInput {
   title?: string;
@@ -767,7 +767,15 @@ export async function previewReelFrameWithText(
 
 function thumbnailDrawtext(input: CustomThumbnailInput, textPath: string): string {
   const size = thumbnailSize(input.aspectRatio);
-  const fontFile = fontFilePathByFamily(input.fontFamily);
+  const fontFile =
+    fontFilePathByFamily(input.fontFamily) ??
+    fontFilePathByFamily(DEFAULT_BUNDLED_FONT_FAMILY);
+  if (!fontFile) {
+    console.warn(
+      `⚠️  No bundled font file for "${input.fontFamily ?? DEFAULT_BUNDLED_FONT_FAMILY}" — ` +
+        `run \`bun run fetch-fonts\` in server/. drawtext will use the system default.`
+    );
+  }
   const fontSize = Math.min(Math.max(input.fontSize ?? 96, 20), 400);
   const color = hexToDrawColor(input.color, "0xFFFFFF");
   const outlineColor = hexToDrawColor(input.outlineColor, "0x000000");

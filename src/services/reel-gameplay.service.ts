@@ -1,12 +1,13 @@
 import ffmpeg from "fluent-ffmpeg";
 import { readFile, readdir, writeFile, unlink, stat } from "node:fs/promises";
-import { join, basename, resolve } from "node:path";
+import { join, basename } from "node:path";
 import { config } from "../config";
-import { ensureDir, escapeFilterPath } from "../utils";
+import { ensureDir, concatDemuxerEntry, assFilenameFilter } from "../utils";
 import { generateNarration, getAudioDuration } from "./openrouter-media.service";
 import { listKeys, cdnUrlFor } from "./s3.service";
 import { renderPartOutroCard, renderRedditCard } from "./reddit-card.service";
 import type { RedditStory } from "./reel-script.service";
+import { DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
 
 // ============================================
 // GameplayOverlayStrategy (Reddit / AITA).
@@ -178,8 +179,9 @@ async function renderGameplayReelInner(
   }
 
   const listPath = join(config.processingPath, `${reelId}_narr.txt`);
-  // absolute paths — ffmpeg concat resolves relative entries against the list dir
-  await writeFile(listPath, concatPaths.map((p) => `file '${resolve(p)}'`).join("\n"));
+  // absolute paths — ffmpeg concat resolves relative entries against the list dir.
+  // Use concatDemuxerEntry so Windows backslashes don't break the demuxer.
+  await writeFile(listPath, concatPaths.map(concatDemuxerEntry).join("\n"));
   tmp.push(listPath);
   const narrPath = join(config.processingPath, `${reelId}_narr.mp3`);
   await concatAudio(listPath, narrPath);
@@ -359,11 +361,11 @@ function composite(
   out: string,
   outro?: { card?: { path: string; width: number; height: number }; start?: number }
 ): Promise<string> {
-  const ass = escapeFilterPath(resolve(assPath));
+  const ass = assFilenameFilter(assPath);
   const en = finiteSeconds(titleDur, "title duration").toFixed(2);
   const x = Math.round((W - card.width) / 2);
   const fullFilters = [
-    `[0:v]ass=filename='${ass}'[base]`,
+    `[0:v]${ass}[base]`,
     `[base][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`,
   ];
   const cardOnlyFilters = [`[0:v][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`];
@@ -484,7 +486,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,Arial,76,&H00FFFFFF,&H0000D7FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,6,3,5,130,130,0,1
+Style: Cap,${DEFAULT_BUNDLED_FONT_FAMILY},76,&H00FFFFFF,&H0000D7FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,6,3,5,130,130,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
