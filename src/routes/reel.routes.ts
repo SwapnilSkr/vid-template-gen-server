@@ -18,6 +18,7 @@ import {
   ReorderScenesBody,
   UpdateReelSettingsBody,
   UpdateCaptionsBody,
+  UpdateRedditCardBody,
   RegenerateReelBody,
   ReplanReelBody,
   DraftAssetParams,
@@ -48,6 +49,7 @@ import {
   reorderScenesController,
   updateReelSettingsController,
   updateCaptionsController,
+  updateRedditCardController,
   applyCaptionsController,
   regenerateReelController,
   resumeFailedReelController,
@@ -229,6 +231,12 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .put("/:id/captions", updateCaptionsController, {
     params: IdParams,
     body: UpdateCaptionsBody,
+  })
+
+  // Reddit title card (gameplay reels)
+  .put("/:id/reddit-card", updateRedditCardController, {
+    params: IdParams,
+    body: UpdateRedditCardBody,
   })
 
   // Re-render with new caption style, upload, and delete superseded output.

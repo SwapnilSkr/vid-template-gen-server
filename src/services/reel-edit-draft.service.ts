@@ -29,6 +29,10 @@ function assertEditable(reel: IReel): void {
   if (ACTIVE_STATUSES.includes(reel.status)) {
     throw new Error(`Cannot edit while generation is active (status: ${reel.status})`);
   }
+}
+
+function assertImageDraftEditable(reel: IReel): void {
+  assertEditable(reel);
   if (reel.strategy === "gameplay_overlay") {
     throw new Error("Draft editor previews are only supported for image reels right now");
   }
@@ -336,7 +340,7 @@ export async function createSceneEditDraft(
   targets: ("image" | "audio")[]
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
-  assertEditable(reel);
+  assertImageDraftEditable(reel);
   if (!reel.scenes[index]) throw new Error(`Scene ${index} not found`);
 
   await cleanupExistingDraft(reel, { strict: true });
@@ -414,7 +418,12 @@ export async function createReelEditDraft(
   mode: "render_only" | "assets"
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
-  assertEditable(reel);
+  // Gameplay has no local image draft — queue produce (re-TTS + composite).
+  if (reel.strategy === "gameplay_overlay") {
+    const { regenerateReel } = await import("./reel-edit.service");
+    return regenerateReel(reelId, mode);
+  }
+  assertImageDraftEditable(reel);
   if (reel.scenes.length === 0) throw new Error("Nothing to regenerate — plan the reel first");
 
   await cleanupExistingDraft(reel, { strict: true });
@@ -494,7 +503,7 @@ export async function createReelEditDraft(
 
 export async function saveEditDraft(reelId: string): Promise<IReel> {
   const reel = await loadReel(reelId);
-  assertEditable(reel);
+  assertImageDraftEditable(reel);
   const draft = reel.editDraft;
   if (!draft?.outputPath || !draft.subtitlesPath) {
     throw new Error("No pending edit draft to save");
@@ -512,7 +521,8 @@ export async function saveEditDraft(reelId: string): Promise<IReel> {
 }
 
 /** Persist caption style, re-render locally, upload to S3, and delete the
- *  previous output video — no intermediate editDraft for the client to save. */
+ *  previous output video — no intermediate editDraft for the client to save.
+ *  Gameplay reels skip the image draft path and enqueue a produce re-render. */
 export async function applyCaptionsAndRender(
   reelId: string,
   patch: ICaptionStyle
@@ -523,6 +533,12 @@ export async function applyCaptionsAndRender(
 
   reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
   reel.markModified("captionStyle");
+
+  if (reel.strategy === "gameplay_overlay") {
+    await reel.save();
+    const { regenerateReel } = await import("./reel-edit.service");
+    return regenerateReel(reelId, "render_only");
+  }
 
   await cleanupExistingDraft(reel, { strict: true });
   const draftId = randomUUID();

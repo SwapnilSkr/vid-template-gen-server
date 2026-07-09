@@ -146,6 +146,7 @@ export const UpdateReelSettingsBody = t.Object({
   imageModel: t.Optional(t.String()),
   horrorAudioKey: t.Optional(t.String()),
   horrorReferenceId: t.Optional(t.String()),
+  gameplayKey: t.Optional(t.String()),
   outroChannelId: t.Optional(t.String()),
   outro: t.Optional(OutroSettingsBody),
   voice: t.Optional(
@@ -192,6 +193,17 @@ export const UpdateCaptionsBody = t.Object({
   animation: t.Optional(t.Union([t.Literal("none"), t.Literal("pop")])),
 });
 export type TUpdateCaptionsBody = typeof UpdateCaptionsBody.static;
+
+export const UpdateRedditCardBody = t.Object({
+  title: t.Optional(t.String({ minLength: 1 })),
+  subreddit: t.Optional(t.String()),
+  cardUsername: t.Optional(t.String()),
+  author: t.Optional(t.String()),
+  ageHours: t.Optional(t.Number({ minimum: 0 })),
+  upvotes: t.Optional(t.Number({ minimum: 0 })),
+  comments: t.Optional(t.Number({ minimum: 0 })),
+});
+export type TUpdateRedditCardBody = typeof UpdateRedditCardBody.static;
 
 export const RegenerateReelBody = t.Object({
   mode: t.Union([t.Literal("render_only"), t.Literal("assets")]),

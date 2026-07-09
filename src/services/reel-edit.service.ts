@@ -1,6 +1,16 @@
-import { Reel, type IReel, type ICaptionStyle, type IAudioPost, type IEditEffects, type ISceneMotion, type ReelMotionMode } from "../models";
+import {
+  Reel,
+  type IReel,
+  type ICaptionStyle,
+  type IAudioPost,
+  type IEditEffects,
+  type ISceneMotion,
+  type ReelMotionMode,
+  type IRedditStoryPayload,
+} from "../models";
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce } from "../queue/queues";
+import { syncRedditBodyFromScenes } from "./reel.service";
 
 // ============================================
 // Studio editing — human-in-the-loop scene/settings/caption edits + surgical
@@ -76,6 +86,60 @@ export async function updateScene(
   if (patch.visualPrompt !== undefined) scene.visualPrompt = patch.visualPrompt;
   if (patch.motion) scene.motion = { ...scene.motion, ...patch.motion };
   reel.markModified("scenes");
+  if (reel.strategy === "gameplay_overlay") {
+    syncRedditBodyFromScenes(reel);
+    reel.markModified("redditStory");
+  }
+  await reel.save();
+  return reel;
+}
+
+/** Edit Reddit title-card fields (and sync title/hook when title changes). */
+export async function updateRedditCard(
+  reelId: string,
+  patch: Partial<
+    Pick<
+      IRedditStoryPayload,
+      "title" | "subreddit" | "cardUsername" | "author" | "ageHours" | "upvotes" | "comments"
+    >
+  >
+): Promise<IReel> {
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+  if (reel.strategy !== "gameplay_overlay") {
+    throw new Error("Title card edits are only supported for Reddit gameplay reels");
+  }
+  if (!reel.redditStory) {
+    throw new Error("No Reddit story on this reel — plan it first");
+  }
+  const story = reel.redditStory;
+  if (patch.title !== undefined) {
+    const title = patch.title.trim();
+    if (!title) throw new Error("Title cannot be empty");
+    story.title = title;
+    reel.title = title;
+    reel.hook = title;
+  }
+  if (patch.subreddit !== undefined) story.subreddit = patch.subreddit.trim() || undefined;
+  if (patch.cardUsername !== undefined) {
+    const raw = patch.cardUsername.trim();
+    story.cardUsername = raw
+      ? raw.startsWith("u/")
+        ? raw
+        : `u/${raw}`
+      : undefined;
+  }
+  if (patch.author !== undefined) story.author = patch.author.trim() || undefined;
+  if (patch.ageHours !== undefined) {
+    story.ageHours = Number.isFinite(patch.ageHours) ? Math.max(0, Math.round(patch.ageHours)) : undefined;
+  }
+  if (patch.upvotes !== undefined) {
+    story.upvotes = Number.isFinite(patch.upvotes) ? Math.max(0, Math.round(patch.upvotes)) : undefined;
+  }
+  if (patch.comments !== undefined) {
+    story.comments = Number.isFinite(patch.comments) ? Math.max(0, Math.round(patch.comments)) : undefined;
+  }
+  reel.markModified("redditStory");
   await reel.save();
   return reel;
 }
@@ -110,17 +174,27 @@ export async function addScene(
   const reel = await loadReel(reelId);
   assertEditable(reel);
   const at = Math.min(Math.max(atIndex ?? reel.scenes.length, 0), reel.scenes.length);
+  const isGameplay = reel.strategy === "gameplay_overlay";
   const mode = (reel.motionMode ?? "ken_burns") as ReelMotionMode;
   reel.scenes.splice(at, 0, {
     index: at,
     narration,
-    visualPrompt: visualPrompt?.trim() || narration,
-    motion: { type: motionTypeFor(mode, at, reel.scenes.length + 1), direction: "in" },
+    visualPrompt: isGameplay
+      ? "gameplay background"
+      : visualPrompt?.trim() || narration,
+    motion: {
+      type: isGameplay ? "static" : motionTypeFor(mode, at, reel.scenes.length + 1),
+      direction: "in",
+    },
     startTime: 0,
     duration: 0,
     isHero: false,
   });
   reindex(reel);
+  if (isGameplay) {
+    syncRedditBodyFromScenes(reel);
+    reel.markModified("redditStory");
+  }
   await reel.save();
   return reel;
 }
@@ -132,6 +206,10 @@ export async function removeScene(reelId: string, index: number): Promise<IReel>
   if (reel.scenes.length <= 1) throw new Error("A reel must keep at least one scene");
   reel.scenes.splice(index, 1);
   reindex(reel);
+  if (reel.strategy === "gameplay_overlay") {
+    syncRedditBodyFromScenes(reel);
+    reel.markModified("redditStory");
+  }
   await reel.save();
   return reel;
 }
@@ -145,6 +223,10 @@ export async function reorderScenes(reelId: string, order: number[]): Promise<IR
   if (!valid) throw new Error("order must be a permutation of the current scene indices");
   reel.scenes = order.map((i) => reel.scenes[i]);
   reindex(reel);
+  if (reel.strategy === "gameplay_overlay") {
+    syncRedditBodyFromScenes(reel);
+    reel.markModified("redditStory");
+  }
   await reel.save();
   return reel;
 }
@@ -159,6 +241,7 @@ export async function updateReelSettings(
     imageModel?: string;
     horrorAudioKey?: string;
     horrorReferenceId?: string;
+    gameplayKey?: string;
     outroChannelId?: string;
     outro?: IReel["outro"];
     voice?: { model?: string; voice?: string; format?: "mp3" | "pcm" };
@@ -176,6 +259,7 @@ export async function updateReelSettings(
   if (patch.imageModel !== undefined) reel.imageModelOverride = patch.imageModel;
   if (patch.horrorAudioKey !== undefined) reel.horrorAudioKey = patch.horrorAudioKey;
   if (patch.horrorReferenceId !== undefined) reel.horrorReferenceId = patch.horrorReferenceId;
+  if (patch.gameplayKey !== undefined) reel.gameplayKey = patch.gameplayKey || undefined;
   if (patch.outroChannelId !== undefined) reel.outroChannelId = patch.outroChannelId || undefined;
   if (patch.outro !== undefined) {
     reel.outro = patch.outro;
@@ -295,6 +379,10 @@ export async function replanReel(
   reel.scenes = [];
   reel.title = undefined;
   reel.hook = undefined;
+  if (reel.strategy === "gameplay_overlay") {
+    reel.redditStory = undefined;
+    reel.markModified("redditStory");
+  }
   reel.status = "planning";
   reel.progress = 5;
   reel.error = undefined;
