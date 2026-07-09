@@ -31,12 +31,20 @@ services:
       - GAMEPLAY_DIR=/app/storage/gameplay
       - FFMPEG_PATH=/usr/bin/ffmpeg
       - FFPROBE_PATH=/usr/bin/ffprobe
+      # Final encode passes (caption burn / mix / FX). veryfast is ~3–5× faster
+      # than medium on Docker Desktop with little quality loss for Shorts.
+      - FFMPEG_PRESET=${FFMPEG_PRESET:-veryfast}
+      # One reel at a time — concurrent ffmpeg jobs thrash Docker Desktop CPUs.
+      - QUEUE_CONCURRENCY=${QUEUE_CONCURRENCY:-1}
     volumes:
       - ./storage/templates:/app/storage/templates
       - ./storage/characters:/app/storage/characters
       - ./storage/output:/app/storage/output
-      - ./storage/processing:/app/storage/processing
       - ./storage/gameplay:/app/storage/gameplay
+      # Keep ffmpeg scratch INSIDE the container (named volume). Binding
+      # processing/ to the Mac/Windows host is a common cause of "ffmpeg
+      # unbelievably slow" after scene clips finish.
+      - processing_data:/app/storage/processing
     healthcheck:
       test:
         [
@@ -49,16 +57,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 4G
-        reservations:
-          cpus: "0.5"
-          memory: 512M
+    # No hard CPU cap — Docker Desktop already shares host cores; a 2-CPU
+    # limit made full-reel re-encodes crawl. Soft memory ceiling only.
+    mem_limit: 6g
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  processing_data:
