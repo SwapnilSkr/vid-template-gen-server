@@ -653,6 +653,64 @@ export async function previewReelFrameThumbnail(
   }
 }
 
+export interface ThumbnailSourceInput {
+  sourceType: "frame" | "scene" | "saved";
+  atSeconds?: number;
+  sceneIndex?: number;
+  aspectRatio?: ThumbnailAspectRatio;
+}
+
+/** Render an aspect-corrected background source for the client-side Thumbnail
+ *  Studio canvas (returned as a data URL, nothing persisted). Routing remote
+ *  images (scene stills, the saved S3 thumbnail) through the server keeps the
+ *  editor canvas CORS-clean so it can export a PNG. */
+export async function previewThumbnailSource(
+  reelId: string,
+  input: ThumbnailSourceInput
+): Promise<string> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+
+  await ensureDir(config.processingPath);
+  const outPath = join(config.processingPath, generateFilename("thumb_source", "png"));
+  try {
+    if (input.sourceType === "frame") {
+      if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
+      await extractVideoFrame(reel.outputUrl, input.atSeconds ?? 0, outPath, input.aspectRatio);
+    } else if (input.sourceType === "scene") {
+      await composeStillImageThumbnail(sceneImageSource(reel, input.sceneIndex), outPath, input.aspectRatio);
+    } else {
+      const saved = reel.review?.thumbnailUrl;
+      if (!saved) throw new Error("Reel has no saved thumbnail yet");
+      await composeStillImageThumbnail(saved, outPath, input.aspectRatio);
+    }
+    const buffer = await readFile(outPath);
+    return `data:image/png;base64,${buffer.toString("base64")}`;
+  } finally {
+    await unlink(outPath).catch(() => {});
+  }
+}
+
+export type ThumbnailTextEffect =
+  | "none"
+  | "shadow"
+  | "glow"
+  | "neon"
+  | "impact"
+  | "pill"
+  | "outline"
+  | "pop"
+  | "box";
+
+export type ThumbnailPhotoLook =
+  | "none"
+  | "vivid"
+  | "cinematic"
+  | "noir"
+  | "warm"
+  | "cool"
+  | "punch";
+
 export interface CustomThumbnailInput {
   atSeconds: number;
   sourceType?: "frame" | "scene";
@@ -664,7 +722,8 @@ export interface CustomThumbnailInput {
   widthPct?: number;
   align?: "left" | "center" | "right";
   lineHeight?: number;
-  effect?: "none" | "shadow" | "glow" | "box";
+  effect?: ThumbnailTextEffect;
+  photoLook?: ThumbnailPhotoLook;
   fontFamily?: string;
   fontSize?: number;
   color?: string;
@@ -718,8 +777,25 @@ export async function composeThumbnailImage(
   }
   const textPath = join(config.processingPath, generateFilename("thumb_text", "txt"));
   await writeFile(textPath, wrapThumbnailText(input), "utf-8");
+  const drawtext = thumbnailDrawtext(input, textPath);
   try {
-    await composeSourceWithText(reel, input, outputPath, thumbnailDrawtext(input, textPath));
+    if (input.sourceType === "scene") {
+      await composeStillWithText(
+        sceneImageSource(reel, input.sceneIndex),
+        outputPath,
+        drawtext,
+        input
+      );
+    } else {
+      if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
+      await extractFrameWithText(
+        reel.outputUrl,
+        input.atSeconds,
+        outputPath,
+        drawtext,
+        input
+      );
+    }
     return outputPath;
   } finally {
     await unlink(textPath).catch(() => {});
@@ -765,46 +841,73 @@ export async function previewReelFrameWithText(
   }
 }
 
+function drawtextDecoration(effect: ThumbnailTextEffect, outlineWidth: number): string {
+  switch (effect) {
+    case "none":
+    case "outline":
+      return "";
+    case "pop":
+      return "shadowcolor=0x000000@0.88:shadowx=5:shadowy=5:";
+    case "impact":
+      return `borderw=${Math.max(outlineWidth, 10)}:shadowcolor=0x000000@0.92:shadowx=4:shadowy=5:`;
+    case "pill":
+      return "box=1:boxcolor=0x000000@0.72:boxborderw=28:";
+    case "box":
+      return "box=1:boxcolor=0x000000@0.48:boxborderw=18:";
+    case "glow":
+    case "neon":
+      return "";
+    default:
+      return "shadowcolor=0x000000@0.68:shadowx=3:shadowy=4:";
+  }
+}
+
 function thumbnailDrawtext(input: CustomThumbnailInput, textPath: string): string {
   const size = thumbnailSize(input.aspectRatio);
   const fontFile =
     fontFilePathByFamily(input.fontFamily) ??
     fontFilePathByFamily(DEFAULT_BUNDLED_FONT_FAMILY);
   if (!fontFile) {
-    console.warn(
-      `⚠️  No bundled font file for "${input.fontFamily ?? DEFAULT_BUNDLED_FONT_FAMILY}" — ` +
-        `run \`bun run fetch-fonts\` in server/. drawtext will use the system default.`
+    throw new Error(
+      `No bundled font file for "${input.fontFamily ?? DEFAULT_BUNDLED_FONT_FAMILY}" — run \`bun run fetch-fonts\` in server/`
     );
   }
   const fontSize = Math.min(Math.max(input.fontSize ?? 96, 20), 400);
   const color = hexToDrawColor(input.color, "0xFFFFFF");
   const outlineColor = hexToDrawColor(input.outlineColor, "0x000000");
-  const outlineWidth = Math.min(Math.max(input.outlineWidth ?? 4, 0), 30);
-  const x = Math.round((input.xPct ?? 0.5) * size.width);
-  const y = Math.round((input.yPct ?? 0.78) * size.height);
-  const boxWidth = Math.round((input.widthPct ?? 0.86) * size.width);
-  const left = Math.max(0, Math.min(size.width - 1, x - boxWidth / 2));
+  const effect = input.effect ?? "shadow";
+  const outlineWidth =
+    effect === "impact"
+      ? Math.min(Math.max(input.outlineWidth ?? 4, 8), 30)
+      : effect === "outline"
+        ? Math.min(Math.max(input.outlineWidth ?? 4, 6), 30)
+        : Math.min(Math.max(input.outlineWidth ?? 4, 0), 30);
+  const xPct = input.xPct ?? 0.5;
+  const yPct = input.yPct ?? 0.7;
+  const widthPct = input.widthPct ?? 0.82;
+  const boxW = Math.round(widthPct * size.width);
+  const boxLeft = Math.max(0, Math.min(size.width - 1, Math.round(xPct * size.width - boxW / 2)));
   const align = input.align ?? "center";
   const xExpr =
     align === "left"
-      ? `${Math.round(left)}`
+      ? `${boxLeft}`
       : align === "right"
-        ? `${Math.round(left + boxWidth)}-text_w`
-        : `${Math.round(left + boxWidth / 2)}-text_w/2`;
-  const yExpr = `${Math.max(0, Math.min(size.height - 1, y))}`;
-  const effect = input.effect ?? "shadow";
+        ? `max(${boxLeft},${boxLeft + boxW}-text_w)`
+        : `max(${boxLeft},min(${boxLeft + boxW}-text_w,w*${xPct}-text_w/2))`;
+  const yExpr = `h*${yPct}+${Math.round(fontSize * 0.82)}`;
   const lineSpacing = Math.round(fontSize * ((input.lineHeight ?? 1.12) - 1));
+  const decoration = drawtextDecoration(effect, outlineWidth);
 
   return [
     "drawtext=",
-    fontFile ? `fontfile='${escapeFilterPath(fontFile)}':` : "",
+    `fontfile='${escapeFilterPath(fontFile)}':`,
     `textfile='${escapeFilterPath(textPath)}':`,
     `fontsize=${fontSize}:`,
     `fontcolor=${color}:`,
     `borderw=${outlineWidth}:bordercolor=${outlineColor}:`,
-    effect === "none" ? "" : "shadowcolor=0x000000@0.68:shadowx=3:shadowy=4:",
-    effect === "box" ? "box=1:boxcolor=0x000000@0.48:boxborderw=18:" : "",
+    decoration,
     `line_spacing=${lineSpacing}:`,
+    "fix_bounds=1:",
     `x=${xExpr}:y=${yExpr}`,
   ].join("");
 }
@@ -812,7 +915,7 @@ function thumbnailDrawtext(input: CustomThumbnailInput, textPath: string): strin
 function wrapThumbnailText(input: CustomThumbnailInput): string {
   const size = thumbnailSize(input.aspectRatio);
   const fontSize = Math.min(Math.max(input.fontSize ?? 96, 20), 400);
-  const boxWidth = (input.widthPct ?? 0.86) * size.width;
+  const boxWidth = (input.widthPct ?? 0.82) * size.width;
   const maxChars = Math.max(4, Math.floor(boxWidth / (fontSize * 0.55)));
   const text = input.text ?? "";
   const raw = input.uppercase ? text.toUpperCase() : text;
@@ -850,38 +953,59 @@ function wrapThumbnailText(input: CustomThumbnailInput): string {
     .join("\n");
 }
 
-function composeSourceWithText(
-  reel: IReel,
-  input: CustomThumbnailInput,
+function composeStillWithText(
+  imageUrl: string,
   output: string,
-  drawtext: string
+  drawtext: string,
+  input: CustomThumbnailInput
 ): Promise<string> {
-  return new Promise(async (resolve, reject) => {
-    const sourcePath = join(config.processingPath, generateFilename("thumb_source", "png"));
-    const size = thumbnailSize(input.aspectRatio);
-    try {
-      await buildThumbnailSource(reel, input, sourcePath);
-      let filter = `${drawtext}`;
-      if (input.effect === "glow") {
-        filter = `${drawtext.replace(/borderw=\d+/, "borderw=22").replace(/fontcolor=[^:]+/, "fontcolor=0xFFFFFF@0.25")},${drawtext}`;
-      }
-      ffmpeg(sourcePath)
-        .outputOptions(["-vframes", "1", "-vf", filter, "-s", `${size.width}x${size.height}`])
-        .output(output)
-        .on("end", async () => {
-          await unlink(sourcePath).catch(() => {});
-          resolve(output);
-        })
-        .on("error", async (err) => {
-          await unlink(sourcePath).catch(() => {});
-          reject(new Error(`Custom thumbnail render failed: ${err.message}`));
-        })
-        .run();
-    } catch (error) {
-      await unlink(sourcePath).catch(() => {});
-      reject(error);
-    }
+  const size = thumbnailSize(input.aspectRatio);
+  const vf = thumbnailTextFilter(size, drawtext, input.effect, input.photoLook);
+  return new Promise((resolve, reject) => {
+    ffmpeg(imageUrl)
+      .outputOptions(["-vframes", "1", "-vf", vf])
+      .output(output)
+      .on("end", () => resolve(output))
+      .on("error", (err) => reject(new Error(`Still thumbnail render failed: ${err.message}`)))
+      .run();
   });
+}
+
+function photoLookFilter(look?: ThumbnailPhotoLook): string {
+  switch (look) {
+    case "vivid":
+      return "eq=saturation=1.45:contrast=1.12:brightness=0.02";
+    case "punch":
+      return "eq=saturation=1.28:contrast=1.2,unsharp=5:5:0.85:5:5:0";
+    case "cinematic":
+      return "eq=saturation=0.82:contrast=1.18:brightness=-0.06";
+    case "noir":
+      return "hue=s=0,eq=contrast=1.3:brightness=-0.03";
+    case "warm":
+      return "colortemperature=6200";
+    case "cool":
+      return "colortemperature=11000";
+    default:
+      return "";
+  }
+}
+
+function thumbnailTextFilter(
+  size: { width: number; height: number },
+  drawtext: string,
+  effect?: CustomThumbnailInput["effect"],
+  photoLook?: CustomThumbnailInput["photoLook"]
+): string {
+  const base = thumbnailCompositeFilter(size);
+  const grade = photoLookFilter(photoLook);
+  const mid = grade ? `${base},${grade}` : base;
+  if (effect === "glow" || effect === "neon") {
+    const glow = drawtext
+      .replace(/borderw=\d+/, effect === "neon" ? "borderw=26" : "borderw=22")
+      .replace(/fontcolor=[^:]+/, effect === "neon" ? "fontcolor=0xFFFFFF@0.38" : "fontcolor=0xFFFFFF@0.25");
+    return `${mid},${glow},${drawtext}`;
+  }
+  return `${mid},${drawtext}`;
 }
 
 /** Same base composition as extractVideoFrame, with a drawtext overlay appended. */
@@ -890,9 +1014,10 @@ function extractFrameWithText(
   atSeconds: number,
   output: string,
   drawtext: string,
-  aspectRatio?: ThumbnailAspectRatio
+  input: Pick<CustomThumbnailInput, "aspectRatio" | "effect" | "photoLook">
 ): Promise<string> {
-  const size = thumbnailSize(aspectRatio);
+  const size = thumbnailSize(input.aspectRatio);
+  const vf = thumbnailTextFilter(size, drawtext, input.effect, input.photoLook);
   return new Promise((resolve, reject) => {
     ffmpeg(videoUrl)
       .seekInput(Math.max(atSeconds, 0))
@@ -900,7 +1025,7 @@ function extractFrameWithText(
         "-vframes",
         "1",
         "-vf",
-        `${thumbnailCompositeFilter(size)},${drawtext}`,
+        vf,
       ])
       .output(output)
       .on("end", () => resolve(output))
