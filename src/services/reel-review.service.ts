@@ -816,6 +816,16 @@ function wrapThumbnailText(input: CustomThumbnailInput): string {
   const maxChars = Math.max(4, Math.floor(boxWidth / (fontSize * 0.55)));
   const text = input.text ?? "";
   const raw = input.uppercase ? text.toUpperCase() : text;
+
+  const breakLongWord = (word: string): string[] => {
+    if (word.length <= maxChars) return [word];
+    const chunks: string[] = [];
+    for (let i = 0; i < word.length; i += maxChars) {
+      chunks.push(word.slice(i, i + maxChars));
+    }
+    return chunks;
+  };
+
   return raw
     .split("\n")
     .flatMap((line) => {
@@ -824,12 +834,14 @@ function wrapThumbnailText(input: CustomThumbnailInput): string {
       const out: string[] = [];
       let current = "";
       for (const word of words) {
-        const next = current ? `${current} ${word}` : word;
-        if (next.length > maxChars && current) {
-          out.push(current);
-          current = word;
-        } else {
-          current = next;
+        for (const piece of breakLongWord(word)) {
+          const next = current ? `${current} ${piece}` : piece;
+          if (next.length > maxChars && current) {
+            out.push(current);
+            current = piece;
+          } else {
+            current = next;
+          }
         }
       }
       if (current) out.push(current);
