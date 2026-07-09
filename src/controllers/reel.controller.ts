@@ -1,4 +1,7 @@
 import type { Context } from "elysia";
+import { file } from "bun";
+import { existsSync } from "node:fs";
+import { basename, join } from "node:path";
 import {
   createReel,
   getReel,
@@ -34,11 +37,12 @@ import {
   resumeFailedReel,
   approvePlan,
   replanReel,
+  updateRedditCard,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { TTS_VOICE_CATALOG } from "../config/models";
 import { listStylePresets } from "../config/style-presets";
-import { listFonts } from "../config/fonts";
+import { listFonts, FONTS_DIR } from "../config/fonts";
 import type {
   TIdParams,
   TCreateReelBody,
@@ -57,6 +61,7 @@ import type {
   TReorderScenesBody,
   TUpdateReelSettingsBody,
   TUpdateCaptionsBody,
+  TUpdateRedditCardBody,
   TRegenerateReelBody,
   TReplanReelBody,
   TCustomThumbnailBody,
@@ -562,6 +567,10 @@ interface CaptionsContext extends Context {
   params: TIdParams;
   body: TUpdateCaptionsBody;
 }
+interface RedditCardContext extends Context {
+  params: TIdParams;
+  body: TUpdateRedditCardBody;
+}
 interface RegenerateReelContext extends Context {
   params: TIdParams;
   body: TRegenerateReelBody;
@@ -619,6 +628,11 @@ export async function updateCaptionsController({ params, body, set }: CaptionsCo
   return runEdit(set, () => updateCaptions(params.id, body));
 }
 
+/** Update Reddit title-card fields (gameplay reels only). */
+export async function updateRedditCardController({ params, body, set }: RedditCardContext) {
+  return runEdit(set, () => updateRedditCard(params.id, body));
+}
+
 /** Persist caption style, re-render, upload, and delete the superseded output. */
 export async function applyCaptionsController({ params, body, set }: CaptionsContext) {
   return runEdit(set, () => applyCaptionsAndRender(params.id, body));
@@ -674,6 +688,34 @@ export async function listStylePresetsController({ query }: { query: { niche?: s
 /** List the bundled caption/thumbnail fonts. */
 export async function listFontsController() {
   return { success: true, data: listFonts() };
+}
+
+/** Serve a bundled font file for WYSIWYG thumbnail/caption previews in the client. */
+export async function getFontFileController({
+  params,
+  set,
+}: {
+  params: { file: string };
+  set: Context["set"];
+}) {
+  const safe = basename(params.file);
+  if (safe !== params.file || safe.includes("..")) {
+    set.status = 400;
+    return { success: false, error: "Invalid font file" };
+  }
+  const known = listFonts().some((f) => f.file === safe);
+  if (!known) {
+    set.status = 404;
+    return { success: false, error: "Font not found" };
+  }
+  const path = join(FONTS_DIR, safe);
+  if (!existsSync(path)) {
+    set.status = 404;
+    return { success: false, error: "Font file missing on disk" };
+  }
+  set.headers["Content-Type"] = "font/ttf";
+  set.headers["Cache-Control"] = "public, max-age=86400";
+  return file(path);
 }
 
 interface CustomThumbnailContext extends Context {

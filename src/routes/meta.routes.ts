@@ -10,6 +10,7 @@ import {
   getReelDefaultsController,
   listStylePresetsController,
   listFontsController,
+  getFontFileController,
 } from "../controllers";
 
 // ============================================
@@ -23,6 +24,7 @@ export const metaRoutes = new Elysia({ prefix: "/api" })
   .get("/art-styles", listArtStylesController)
   .get("/style-presets", listStylePresetsController)
   .get("/fonts", listFontsController)
+  .get("/fonts/:file", getFontFileController)
   .get("/image-models", listImageModelsController)
   .get("/reel-defaults", getReelDefaultsController, { query: ReelDefaultsQuery })
   .get("/tts-voices", listTtsVoicesController)
