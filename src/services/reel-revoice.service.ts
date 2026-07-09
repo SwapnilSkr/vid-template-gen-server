@@ -38,6 +38,9 @@ export async function requestRevoice(
   if (reel.status !== "completed") {
     throw new Error(`Reel must be completed before revoicing (current status: ${reel.status})`);
   }
+  if (reel.voiceVariants?.some((v) => v.status === "pending")) {
+    throw new Error("A revoice job is already in progress for this reel");
+  }
   if (!reel.redditStory) throw new Error("Reel has no story to re-narrate");
 
   const fallback = resolveModels(reel.tier as Tier).tts;

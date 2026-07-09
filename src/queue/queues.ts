@@ -102,8 +102,17 @@ export async function enqueueReelPlan(reelId: string): Promise<void> {
 }
 
 /** Produce stage — assets→render→upload on an approved/edited plan. Unique
- *  jobId per run so repeated re-renders (edits) aren't deduped away. */
+ *  jobId per run so intentional re-renders aren't deduped away, but skip if a
+ *  produce job for this reel is already waiting/active (double-click / race). */
 export async function enqueueReelProduce(reelId: string): Promise<void> {
+  const activeJobs = await reelQueue.getJobs(["waiting", "delayed", "active"], 0, 200);
+  const duplicate = activeJobs.some(
+    (job) => job.data.reelId === reelId && job.data.stage === "produce"
+  );
+  if (duplicate) {
+    console.warn(`⏭️  Skipping duplicate produce enqueue for reel ${reelId}`);
+    return;
+  }
   await reelQueue.add(
     "process",
     { reelId, stage: "produce" },

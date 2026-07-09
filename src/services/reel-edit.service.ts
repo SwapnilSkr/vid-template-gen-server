@@ -33,6 +33,13 @@ function assertEditable(reel: IReel): void {
   if (ACTIVE_STATUSES.includes(reel.status)) {
     throw new Error(`Cannot edit while generation is active (status: ${reel.status})`);
   }
+  if (reel.voiceVariants?.some((v) => v.status === "pending")) {
+    throw new Error("Cannot edit while a revoice job is still rendering");
+  }
+  const yt = reel.youtube?.status;
+  if (yt === "pending" || yt === "uploading") {
+    throw new Error("Cannot edit while a YouTube publish job is in progress");
+  }
 }
 
 async function loadReel(reelId: string): Promise<IReel> {
@@ -63,12 +70,23 @@ function reindex(reel: IReel): void {
   reel.markModified("scenes");
 }
 
-/** Mark the reel as queued for a produce run (assets/render). */
+/**
+ * Atomically claim the reel for a produce run. Rejects if another produce/plan
+ * job already flipped status to an ACTIVE state (prevents double-render races
+ * from two tabs / double-clicks).
+ */
 async function markQueued(reelId: string): Promise<void> {
-  await Reel.updateOne(
-    { _id: reelId },
-    { $set: { status: "generating_assets", progress: 15 }, $unset: { error: "" } }
+  const claimed = await Reel.findOneAndUpdate(
+    { _id: reelId, status: { $nin: ACTIVE_STATUSES } },
+    { $set: { status: "generating_assets", progress: 15 }, $unset: { error: "" } },
+    { new: true }
   );
+  if (!claimed) {
+    const current = await Reel.findById(reelId).select("status").lean();
+    throw new Error(
+      `Cannot queue produce while generation is active (status: ${current?.status ?? "unknown"})`
+    );
+  }
 }
 
 // ---- Scene edits ----
@@ -310,19 +328,21 @@ export async function updateCaptions(reelId: string, patch: ICaptionStyle): Prom
 
 // ---- Regeneration control ----
 
-/** Queue a produce run. `render_only` reuses every asset (free re-render for
- *  caption/mix edits); `assets` clears all stills+narration to regenerate them. */
+/** Queue a produce run. `render_only` reuses every asset for image reels (free
+ *  ffmpeg pass); gameplay_overlay always re-runs TTS. `assets` clears all
+ *  stills+narration so the next produce regenerates them. */
 export async function regenerateReel(reelId: string, mode: "render_only" | "assets"): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
   if (reel.scenes.length === 0) throw new Error("Nothing to regenerate — plan the reel first");
+  // Claim the lock first so a concurrent tab can't also enqueue.
+  await markQueued(reelId);
   if (mode === "assets") {
     await Reel.updateOne(
       { _id: reelId },
       { $unset: { "scenes.$[].assetUrl": "", "scenes.$[].audioUrl": "" } }
     );
   }
-  await markQueued(reelId);
   await enqueueReelProduce(reelId);
   return loadReel(reelId);
 }
