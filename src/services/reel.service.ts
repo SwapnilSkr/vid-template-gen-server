@@ -441,24 +441,31 @@ const CARD_SUBREDDITS = [
   "r/JUSTNOMIL", "r/tifu", "r/confession",
 ];
 
+/** Mongoose subdocs hide schema fields from object spread — flatten first. */
+function plainRedditStory(story: IRedditStoryPayload): IRedditStoryPayload {
+  const maybeDoc = story as IRedditStoryPayload & { toObject?: () => IRedditStoryPayload };
+  return typeof maybeDoc.toObject === "function" ? maybeDoc.toObject() : { ...story };
+}
+
 /** Fill missing title-card fields once at plan time so render never randomizes. */
 export function stabilizeRedditCard(story: IRedditStoryPayload): IRedditStoryPayload {
+  const base = plainRedditStory(story);
   const pick = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)];
-  const subreddit = story.subreddit?.trim() || pick(CARD_SUBREDDITS);
+  const subreddit = base.subreddit?.trim() || pick(CARD_SUBREDDITS);
   const cardUsername =
-    story.cardUsername?.trim() ||
-    (story.author
-      ? story.author.startsWith("u/")
-        ? story.author
-        : `u/${story.author}`
+    base.cardUsername?.trim() ||
+    (base.author
+      ? base.author.startsWith("u/")
+        ? base.author
+        : `u/${base.author}`
       : `u/${pick(CARD_NAME_PARTS)}_${Math.floor(Math.random() * 9000 + 1000)}`);
   return {
-    ...story,
+    ...base,
     subreddit,
     cardUsername,
-    ageHours: Number.isFinite(story.ageHours) ? story.ageHours : Math.floor(Math.random() * 11) + 2,
-    upvotes: Number.isFinite(story.upvotes) ? story.upvotes : Math.round((Math.random() * 20 + 4) * 1000),
-    comments: Number.isFinite(story.comments) ? story.comments : Math.round((Math.random() * 3 + 0.4) * 1000),
+    ageHours: Number.isFinite(base.ageHours) ? base.ageHours : Math.floor(Math.random() * 11) + 2,
+    upvotes: Number.isFinite(base.upvotes) ? base.upvotes : Math.round((Math.random() * 20 + 4) * 1000),
+    comments: Number.isFinite(base.comments) ? base.comments : Math.round((Math.random() * 3 + 0.4) * 1000),
   };
 }
 
@@ -644,10 +651,11 @@ async function planGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void>
     story.partCount = reel.partCount ?? story.partCount ?? 1;
     await markStoryReel(meta.storyId, reelId);
   } else {
+    const existing = plainRedditStory(reel.redditStory);
     story = stabilizeRedditCard({
-      ...reel.redditStory,
-      partNumber: reel.partNumber ?? reel.redditStory.partNumber,
-      partCount: reel.partCount ?? reel.redditStory.partCount,
+      ...existing,
+      partNumber: reel.partNumber ?? existing.partNumber,
+      partCount: reel.partCount ?? existing.partCount,
     });
   }
 
@@ -1018,6 +1026,12 @@ async function produceImageReel(
 
     reel.status = "completed";
     reel.progress = 100;
+    // Mark publish pending in the same write as completed so studio polling
+    // doesn't stop between "done" and the auto-publish enqueue.
+    if (config.autoPublishYoutube) {
+      if (reel.youtube) reel.youtube.status = "pending";
+      else reel.youtube = { status: "pending" };
+    }
     await reel.save();
     await markHorrorReferenceUsed(reel.horrorReference?.referenceId?.toString(), reelId);
     if (config.autoPublishYoutube) await enqueuePublish(reelId, "youtube");
@@ -1118,6 +1132,10 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
 
     reel.status = "completed";
     reel.progress = 100;
+    if (config.autoPublishYoutube) {
+      if (reel.youtube) reel.youtube.status = "pending";
+      else reel.youtube = { status: "pending" };
+    }
     await reel.save();
     if (config.autoPublishYoutube) await enqueuePublish(reelId, "youtube");
 
