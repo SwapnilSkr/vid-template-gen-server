@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion } from "../models";
+import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion, type IRedditStoryPayload } from "../models";
 import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
 import { ensureDir, cleanupDirectory, cleanupFiles, cleanupRenderScratch } from "../utils";
@@ -12,7 +12,13 @@ import { pickArtStyle } from "../config/art-styles";
 import { getStylePreset, defaultPresetFor } from "../config/style-presets";
 import { resolveArtStyleRefKeys } from "./art-style.service";
 import { renderMotionReel, type MotionScene } from "./reel-motion.service";
-import { appendBouncingCaptionCues, renderGameplayReel, pickGameplay } from "./reel-gameplay.service";
+import {
+  appendBouncingCaptionCues,
+  renderGameplayReel,
+  pickGameplay,
+  toSentences,
+  DEFAULT_BOUNCE_CAPTION_STYLE,
+} from "./reel-gameplay.service";
 import {
   generateStory,
   generateStorySeries,
@@ -226,6 +232,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
   const story = autoTopic
     ? await generateStory(source, { genre: options.genre, tier: tier as Tier })
     : await generateStory("llm", { genre: options.genre, tier: tier as Tier });
+  const pipelineMode = options.pipelineMode ?? "review";
 
   const reel = new Reel({
     niche,
@@ -241,14 +248,17 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
+    captionStyle: DEFAULT_BOUNCE_CAPTION_STYLE,
+    pipelineMode,
     status: "pending",
     progress: 0,
     title: story.title,
     hook: story.title,
-    redditStory: toSingleRedditStoryPayload(story),
+    redditStory: stabilizeRedditCard(toSingleRedditStoryPayload(story)),
   });
   await reel.save();
-  await enqueueReel(reel._id.toString());
+  if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
+  else await enqueueReel(reel._id.toString());
 
   return { reel, reels: [reel] };
 }
@@ -268,6 +278,7 @@ async function createGameplayReelSeries(
 
   const seriesId = plannedParts.length > 1 ? randomUUID() : undefined;
   const reels: IReel[] = [];
+  const pipelineMode = options.pipelineMode ?? "review";
 
   for (const part of plannedParts) {
     const reel = new Reel({
@@ -284,18 +295,21 @@ async function createGameplayReelSeries(
       thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
       voiceOverride: toVoiceOverride(options),
+      captionStyle: DEFAULT_BOUNCE_CAPTION_STYLE,
+      pipelineMode,
       status: "pending",
       progress: 0,
       title: part.title,
       hook: part.title,
-      redditStory: toRedditStoryPayload(part),
+      redditStory: stabilizeRedditCard(toRedditStoryPayload(part)),
       seriesId,
       partNumber: part.partNumber,
       partCount: part.partCount,
     });
     await reel.save();
     reels.push(reel);
-    await enqueueReel(reel._id.toString());
+    if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
+    else await enqueueReel(reel._id.toString());
   }
 
   console.log(
@@ -418,6 +432,58 @@ function toSingleRedditStoryPayload(story: StoryDraft & { source: StorySource })
   };
 }
 
+const CARD_NAME_PARTS = [
+  "throwaway", "anon", "confused", "quiet", "tired", "petty", "curious", "notthe",
+  "just", "reluctant", "former", "the_real", "mildly", "sudden",
+];
+const CARD_SUBREDDITS = [
+  "r/AmItheAsshole", "r/relationships", "r/pettyrevenge", "r/entitledparents",
+  "r/JUSTNOMIL", "r/tifu", "r/confession",
+];
+
+/** Fill missing title-card fields once at plan time so render never randomizes. */
+export function stabilizeRedditCard(story: IRedditStoryPayload): IRedditStoryPayload {
+  const pick = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)];
+  const subreddit = story.subreddit?.trim() || pick(CARD_SUBREDDITS);
+  const cardUsername =
+    story.cardUsername?.trim() ||
+    (story.author
+      ? story.author.startsWith("u/")
+        ? story.author
+        : `u/${story.author}`
+      : `u/${pick(CARD_NAME_PARTS)}_${Math.floor(Math.random() * 9000 + 1000)}`);
+  return {
+    ...story,
+    subreddit,
+    cardUsername,
+    ageHours: Number.isFinite(story.ageHours) ? story.ageHours : Math.floor(Math.random() * 11) + 2,
+    upvotes: Number.isFinite(story.upvotes) ? story.upvotes : Math.round((Math.random() * 20 + 4) * 1000),
+    comments: Number.isFinite(story.comments) ? story.comments : Math.round((Math.random() * 3 + 0.4) * 1000),
+  };
+}
+
+/** Build sentence scenes from a Reddit story body (no AI images). */
+export function buildGameplayScenesFromBody(body: string): IReel["scenes"] {
+  const sentences = toSentences(body);
+  const lines = sentences.length ? sentences : [body.trim() || "..."];
+  return lines.map((narration, i) => ({
+    index: i,
+    narration,
+    visualPrompt: "gameplay background",
+    motion: { type: "static" as const, direction: "in" as const },
+    startTime: 0,
+    duration: 0,
+    isHero: false,
+  }));
+}
+
+/** Rebuild redditStory.body from sentence scenes (spoken body source of truth). */
+export function syncRedditBodyFromScenes(reel: IReel): void {
+  if (!reel.redditStory || reel.strategy !== "gameplay_overlay") return;
+  const body = reel.scenes.map((s) => s.narration.trim()).filter(Boolean).join(" ");
+  if (body) reel.redditStory.body = body;
+}
+
 async function updateStatus(
   id: string,
   status: IReel["status"],
@@ -487,12 +553,14 @@ export async function processReelPlan(reelId: string): Promise<void> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   const recipe = getRecipe(reel.niche);
-  // Gameplay/Reddit has no cheap plan gate — produce straight through.
-  if (recipe.strategy === "gameplay_overlay") return processGameplayReel(reel, recipe);
 
   const measuredCosts: MeasuredCostInput[] = [];
   try {
-    await planImageReel(reel, recipe, measuredCosts);
+    if (recipe.strategy === "gameplay_overlay") {
+      await planGameplayReel(reel, recipe);
+    } else {
+      await planImageReel(reel, recipe, measuredCosts);
+    }
     reel.status = "plan_review";
     reel.progress = 15;
     await reel.save();
@@ -522,6 +590,79 @@ export async function processReelProduce(reelId: string): Promise<void> {
     await updateStatus(reelId, "failed", 0, getErrorMessage(error));
     throw error;
   }
+}
+
+/** Plan stage body — LLM script/scene-graph (or structure a user-provided
+ *  story), resolve the voice, and save the scene graph. Reuses an existing plan
+ *  when scenes are already present (edited/approved plans re-run cheaply). */
+async function planGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void> {
+  const reelId = reel._id.toString();
+  const models = resolveModels(reel.tier as Tier);
+  await ensureDir(config.processingPath);
+  await updateStatus(reelId, "planning", 5);
+
+  const canReusePlan =
+    reel.scenes.length > 0 && Boolean(reel.redditStory?.title && reel.redditStory?.body);
+  if (canReusePlan) {
+    const stabilized = stabilizeRedditCard(reel.redditStory!);
+    reel.redditStory = stabilized;
+    if (!reel.captionStyle) reel.captionStyle = DEFAULT_BOUNCE_CAPTION_STYLE;
+    const tts = resolveStoryMatchedTts(models.tts, recipe.voice ?? {}, reel.voiceOverride, {
+      title: stabilized.title,
+      body: stabilized.body,
+    });
+    reel.narrationVoice = tts;
+    console.log(`♻️  Reusing existing Reddit plan for reel ${reelId}`);
+    await reel.save();
+    return;
+  }
+
+  const auto = !reel.topic?.trim() || reel.topic.trim().toLowerCase() === "auto";
+  const storySource = (reel.storySource ?? config.storyMode) as StorySource;
+  let story: IRedditStoryPayload;
+  if (!reel.redditStory) {
+    const drafted = auto
+      ? await takeNextStory(storySource, reel.tier as Tier)
+      : await planRedditStory(reel.topic, reel.tier as Tier, reel.genre);
+    const meta = drafted as StoryDraft & { source?: StorySource; storyId?: string };
+    story = stabilizeRedditCard(
+      toSingleRedditStoryPayload({
+        title: drafted.title,
+        body: drafted.body,
+        source: drafted.source ?? storySource,
+        genre: meta.genre ?? reel.genre,
+        subreddit: meta.subreddit,
+        author: meta.author,
+        upvotes: meta.upvotes,
+        comments: meta.comments,
+        ageHours: meta.ageHours,
+        seedTitle: meta.seedTitle,
+        seedUrl: meta.seedUrl,
+      })
+    );
+    story.partNumber = reel.partNumber ?? story.partNumber ?? 1;
+    story.partCount = reel.partCount ?? story.partCount ?? 1;
+    await markStoryReel(meta.storyId, reelId);
+  } else {
+    story = stabilizeRedditCard({
+      ...reel.redditStory,
+      partNumber: reel.partNumber ?? reel.redditStory.partNumber,
+      partCount: reel.partCount ?? reel.redditStory.partCount,
+    });
+  }
+
+  reel.redditStory = story;
+  reel.title = story.title;
+  reel.hook = story.title;
+  reel.scenes = buildGameplayScenesFromBody(story.body);
+  if (!reel.captionStyle) reel.captionStyle = DEFAULT_BOUNCE_CAPTION_STYLE;
+  const tts = resolveStoryMatchedTts(models.tts, recipe.voice ?? {}, reel.voiceOverride, {
+    title: story.title,
+    body: story.body,
+  });
+  reel.narrationVoice = tts;
+  await reel.save();
+  console.log(`📝 Planned Reddit reel ${reelId}: ${reel.scenes.length} sentence scene(s)`);
 }
 
 /** Plan stage body — LLM script/scene-graph (or structure a user-provided
@@ -887,7 +1028,7 @@ async function produceImageReel(
   }
 }
 
-/** Reddit / AITA pipeline: story → narration → gameplay overlay → upload. */
+/** Reddit / AITA pipeline: planned story → narration → gameplay overlay → upload. */
 async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void> {
   const reelId = reel._id.toString();
   const localFiles: string[] = [];
@@ -896,64 +1037,40 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
   try {
     await ensureDir(config.processingPath);
 
-    // 1. Get the story: explicit topic → generate on-demand; otherwise pull the
-    // next fresh one from the story bank (kept topped-up by the scheduled job).
-    await updateStatus(reelId, "planning", 8);
-    const auto = !reel.topic?.trim() || reel.topic.trim().toLowerCase() === "auto";
-    const storySource = (reel.storySource ?? config.storyMode) as StorySource;
-    const story = reel.redditStory
-      ? reel.redditStory
-      : auto
-      ? await takeNextStory(storySource, reel.tier as Tier)
-      : await planRedditStory(reel.topic, reel.tier as Tier, reel.genre);
+    // Ensure a plan exists (auto pipeline may skip plan_review).
+    if (!reel.redditStory?.body || reel.scenes.length === 0) {
+      await planGameplayReel(reel, recipe);
+      await reel.save();
+    } else {
+      reel.redditStory = stabilizeRedditCard(reel.redditStory);
+      syncRedditBodyFromScenes(reel);
+    }
+
+    const story = reel.redditStory!;
     story.partNumber = reel.partNumber ?? story.partNumber;
     story.partCount = reel.partCount ?? story.partCount;
     const { path: gameplayPath, key: gameplayKey } = await pickGameplay(reel.gameplayKey);
     reel.gameplayKey = gameplayKey;
-    // Cache is only for this render — S3 stays the source of truth (pickGameplay
-    // re-downloads on demand), so don't let clips accumulate on local disk.
     localFiles.push(gameplayPath);
-    const storyMeta = story as StoryDraft & { source?: StorySource; storyId?: string };
+
     reel.title = story.title;
     reel.hook = story.title;
-    if (!reel.redditStory) {
-      reel.redditStory = toSingleRedditStoryPayload({
-        title: story.title,
-        body: story.body,
-        source: story.source ?? storySource,
-        genre: storyMeta.genre ?? reel.genre,
-        subreddit: storyMeta.subreddit,
-        author: storyMeta.author,
-        upvotes: storyMeta.upvotes,
-        comments: storyMeta.comments,
-        ageHours: storyMeta.ageHours,
-        seedTitle: storyMeta.seedTitle,
-        seedUrl: storyMeta.seedUrl,
-      });
-    }
+    const bodySentences = reel.scenes.map((s) => s.narration.trim()).filter(Boolean);
     const tts = resolveStoryMatchedTts(models.tts, recipe.voice ?? {}, reel.voiceOverride, {
       title: story.title,
-      body: story.body,
+      body: bodySentences.join(" ") || story.body,
     });
     reel.narrationVoice = tts;
-    reel.scenes = [
-      {
-        index: 0,
-        narration: story.body,
-        visualPrompt: "gameplay background",
-        motion: { type: "static", direction: "in" },
-        startTime: 0,
-        duration: 0,
-        isHero: false,
-      },
-    ];
+    if (!reel.captionStyle) reel.captionStyle = DEFAULT_BOUNCE_CAPTION_STYLE;
     await reel.save();
-    await markStoryReel(storyMeta.storyId, reelId);
 
-    // 2. Narrate + render (TTS happens inside the gameplay renderer)
     await updateStatus(reelId, "rendering", 45);
     const gameplayMeasuredCosts: MeasuredCostInput[] = [];
-    const result = await renderGameplayReel(reelId, story, gameplayPath, tts);
+    const result = await renderGameplayReel(reelId, story, gameplayPath, {
+      ...tts,
+      bodySentences,
+      captionStyle: reel.captionStyle,
+    });
     const outroResult = await appendBrandedOutro(
       result.videoPath,
       reel,
@@ -974,22 +1091,23 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
       result.totalDuration += outroResult.durationAdded;
     }
     localFiles.push(result.videoPath, result.assPath);
-    reel.scenes[0].duration = result.totalDuration;
+    if (reel.scenes[0]) reel.scenes[0].duration = result.totalDuration;
 
-    // 3. Upload
     await updateStatus(reelId, "uploading", 90);
     const videoBuffer = await readFile(result.videoPath);
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
-    reel.review = await buildReelReviewPackage(reel, (usage) => {
-      gameplayMeasuredCosts.push({
-        label: "Thumbnail image",
-        model: resolveModels("cheap").image,
-        costUsd: usage.costUsd,
-        source: usage.costUsd !== undefined ? "actual" : "estimated",
+    if (!reel.review) {
+      reel.review = await buildReelReviewPackage(reel, (usage) => {
+        gameplayMeasuredCosts.push({
+          label: "Thumbnail image",
+          model: resolveModels("cheap").image,
+          costUsd: usage.costUsd,
+          source: usage.costUsd !== undefined ? "actual" : "estimated",
+        });
       });
-    });
+    }
     const costBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
       tts,

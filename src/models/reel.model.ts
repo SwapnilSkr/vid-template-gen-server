@@ -237,7 +237,10 @@ export interface IRedditStoryPayload {
   source?: "llm" | "hybrid" | "verbatim";
   genre?: string;
   subreddit?: string;
+  /** Source author handle without `u/` — used when cardUsername is unset. */
   author?: string;
+  /** Display username on the title card (with or without `u/` prefix). */
+  cardUsername?: string;
   upvotes?: number;
   comments?: number;
   ageHours?: number;
@@ -436,6 +439,7 @@ const redditStorySchema = new Schema<IRedditStoryPayload>(
     genre: String,
     subreddit: String,
     author: String,
+    cardUsername: String,
     upvotes: Number,
     comments: Number,
     ageHours: Number,

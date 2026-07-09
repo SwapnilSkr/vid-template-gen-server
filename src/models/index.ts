@@ -26,6 +26,7 @@ export {
   type IVoiceOverride,
   type IStoryBible,
   type IHorrorReferencePayload,
+  type IRedditStoryPayload,
   type ReelMotionMode,
   type ICaptionStyle,
   type IAudioPost,
