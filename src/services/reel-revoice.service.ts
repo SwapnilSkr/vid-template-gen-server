@@ -79,10 +79,14 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
     if (!variant) continue;
 
     try {
+      // Match the studio plan: spoken body from sentence scenes + caption style.
+      const bodySentences = reel.scenes.map((s) => s.narration.trim()).filter(Boolean);
       const result = await renderGameplayReel(`${reelId}_voice_${variantId}`, reel.redditStory, gameplayPath, {
         model: variant.model,
         voice: variant.voice,
         format: variant.format,
+        bodySentences: bodySentences.length ? bodySentences : undefined,
+        captionStyle: reel.captionStyle,
       });
       localFiles.push(result.videoPath, result.assPath);
 
@@ -105,10 +109,11 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
   await unlink(gameplayPath).catch(() => {});
 }
 
-/** Promote a ready voice variant to be the reel's primary output. The video it
- *  replaces is deleted from S3 unless it is itself a variant's render (still
- *  referenced for comparison) — otherwise every promote would orphan one object
- *  until the manual reconciliation sweep. */
+/** Promote a ready voice variant to be the reel's primary output. Also adopts
+ *  the variant's TTS choice so later re-renders (title card / captions / clip)
+ *  keep the same voice instead of snapping back to the previous narrator.
+ *  The video it replaces is deleted from S3 unless it is itself a variant's
+ *  render (still referenced for comparison). */
 export async function promoteVoiceVariant(reelId: string, variantId: string): Promise<IReel> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
@@ -121,6 +126,16 @@ export async function promoteVoiceVariant(reelId: string, variantId: string): Pr
 
   const previousOutputUrl = reel.outputUrl;
   reel.outputUrl = variant.videoUrl;
+  reel.narrationVoice = {
+    model: variant.model,
+    voice: variant.voice,
+    format: variant.format,
+  };
+  reel.voiceOverride = {
+    model: variant.model,
+    voice: variant.voice,
+    format: variant.format,
+  };
   await reel.save();
 
   const stillReferenced =
