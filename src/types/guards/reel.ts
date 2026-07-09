@@ -277,6 +277,27 @@ export const ThumbnailSceneBody = t.Object({
 
 export type TThumbnailSceneBody = typeof ThumbnailSceneBody.static;
 
+/** Aspect-corrected background source for the client-side Thumbnail Studio
+ *  canvas — a video frame, a scene still, or the currently saved thumbnail. */
+export const ThumbnailSourceBody = t.Object({
+  sourceType: t.Union([t.Literal("frame"), t.Literal("scene"), t.Literal("saved")]),
+  atSeconds: t.Optional(t.Number({ minimum: 0 })),
+  sceneIndex: t.Optional(t.Number({ minimum: 0 })),
+  aspectRatio: ThumbnailAspectRatio,
+});
+
+export type TThumbnailSourceBody = typeof ThumbnailSourceBody.static;
+
+/** Client-rendered Thumbnail Studio canvas export — a base64 PNG data URL plus
+ *  the opaque editor state so the studio can restore the layer stack later. */
+export const StageThumbnailImageBody = t.Object({
+  imageDataUrl: t.String({ minLength: 32, maxLength: 20_000_000 }),
+  aspectRatio: ThumbnailAspectRatio,
+  editorState: t.Optional(t.Record(t.String(), t.Unknown())),
+});
+
+export type TStageThumbnailImageBody = typeof StageThumbnailImageBody.static;
+
 /** Composition controls shared by the one-shot custom thumbnail endpoints and
  *  Thumbnail Studio draft staging. */
 const thumbnailComposeFields = {
@@ -289,7 +310,30 @@ const thumbnailComposeFields = {
   widthPct: t.Optional(t.Number({ minimum: 0.2, maximum: 1 })),
   align: t.Optional(t.Union([t.Literal("left"), t.Literal("center"), t.Literal("right")])),
   lineHeight: t.Optional(t.Number({ minimum: 0.8, maximum: 2 })),
-  effect: t.Optional(t.Union([t.Literal("none"), t.Literal("shadow"), t.Literal("glow"), t.Literal("box")])),
+  effect: t.Optional(
+    t.Union([
+      t.Literal("none"),
+      t.Literal("shadow"),
+      t.Literal("glow"),
+      t.Literal("neon"),
+      t.Literal("impact"),
+      t.Literal("pill"),
+      t.Literal("outline"),
+      t.Literal("pop"),
+      t.Literal("box"),
+    ])
+  ),
+  photoLook: t.Optional(
+    t.Union([
+      t.Literal("none"),
+      t.Literal("vivid"),
+      t.Literal("cinematic"),
+      t.Literal("noir"),
+      t.Literal("warm"),
+      t.Literal("cool"),
+      t.Literal("punch"),
+    ])
+  ),
   fontFamily: t.Optional(t.String()),
   fontSize: t.Optional(t.Number({ minimum: 20, maximum: 400 })),
   color: t.Optional(t.String()),

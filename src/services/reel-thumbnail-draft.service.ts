@@ -89,6 +89,53 @@ export async function stageThumbnailDraft(
   return reel;
 }
 
+const MAX_STAGED_IMAGE_BYTES = 12 * 1024 * 1024;
+const PNG_MAGIC = 0x89504e47;
+
+/** Stage a client-rendered Thumbnail Studio canvas export. The PNG is already
+ *  composed in the browser (true WYSIWYG); the opaque editor state rides along
+ *  in draft.input so the studio can restore the full layer stack next visit. */
+export async function stageThumbnailDraftImage(
+  reelId: string,
+  input: {
+    imageDataUrl: string;
+    aspectRatio?: "16:9" | "9:16" | "1:1";
+    editorState?: Record<string, unknown>;
+  }
+): Promise<IReel> {
+  const match = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(input.imageDataUrl);
+  if (!match) throw new Error("imageDataUrl must be a base64 PNG data URL");
+  const bytes = Buffer.from(match[1], "base64");
+  if (bytes.length < 8 || bytes.readUInt32BE(0) !== PNG_MAGIC) {
+    throw new Error("imageDataUrl does not decode to a PNG");
+  }
+  if (bytes.length > MAX_STAGED_IMAGE_BYTES) {
+    throw new Error("Thumbnail image is too large (max 12MB)");
+  }
+
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+
+  await cleanupThumbnailDraft(reel);
+  const draftId = randomUUID();
+  const rootDir = join(config.processingPath, "thumb-drafts", reelId, draftId);
+  await ensureDir(rootDir);
+  const imagePath = join(rootDir, "thumbnail.png");
+  await Bun.write(imagePath, bytes);
+
+  reel.thumbnailDraft = {
+    id: draftId,
+    rootDir,
+    imagePath,
+    imageUrl: localAssetUrl(draftId, basename(imagePath)),
+    input: input.editorState ? { ...input.editorState } : undefined,
+    aspectRatio: input.aspectRatio ?? "16:9",
+    createdAt: new Date(),
+  };
+  await reel.save();
+  return reel;
+}
+
 /** Upload the staged draft PNG to S3 as the review thumbnail (deleting the
  *  object it replaces) and remove the local staging dir. */
 export async function saveThumbnailDraft(reelId: string): Promise<IReel> {

@@ -12,6 +12,7 @@ import {
   regenerateReelThumbnail,
   previewReelFrameThumbnail,
   previewReelFrameWithText,
+  previewThumbnailSource,
   useReelFrameWithText,
   updateReelReview,
   requestRevoice,
@@ -66,6 +67,8 @@ import type {
   TReplanReelBody,
   TCustomThumbnailBody,
   TStageThumbnailDraftBody,
+  TStageThumbnailImageBody,
+  TThumbnailSourceBody,
   TSeriesParams,
   TDraftAssetParams,
 } from "../types/guards";
@@ -83,6 +86,7 @@ import {
   getThumbnailDraftAssetPath,
   saveThumbnailDraft,
   stageThumbnailDraft,
+  stageThumbnailDraftImage,
 } from "../services/reel-thumbnail-draft.service";
 
 // ============================================
@@ -748,6 +752,43 @@ export async function previewCustomFrameThumbnailController({ params, body, set 
 // ============================================
 // Thumbnail Studio draft controllers
 // ============================================
+
+interface ThumbnailSourceContext extends Context {
+  params: TIdParams;
+  body: TThumbnailSourceBody;
+}
+
+/** Render an aspect-corrected background source (frame / scene still / saved
+ *  thumbnail) as a data URL for the client-side editor canvas. */
+export async function getThumbnailSourceController({ params, body, set }: ThumbnailSourceContext) {
+  try {
+    const imageDataUrl = await previewThumbnailSource(params.id, body);
+    return { success: true, data: { imageDataUrl } };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+interface StageThumbnailImageContext extends Context {
+  params: TIdParams;
+  body: TStageThumbnailImageBody;
+}
+
+/** Stage a client-rendered thumbnail PNG locally (no S3 upload). */
+export async function stageThumbnailDraftImageController({
+  params,
+  body,
+  set,
+}: StageThumbnailImageContext) {
+  try {
+    const reel = await stageThumbnailDraftImage(params.id, body);
+    return { success: true, data: reel };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
 
 interface StageThumbnailDraftContext extends Context {
   params: TIdParams;

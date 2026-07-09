@@ -10,6 +10,8 @@ import {
   ThumbnailSceneBody,
   CustomThumbnailBody,
   StageThumbnailDraftBody,
+  StageThumbnailImageBody,
+  ThumbnailSourceBody,
   PublishReelBody,
   SceneIndexParams,
   UpdateSceneBody,
@@ -58,7 +60,9 @@ import {
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,
+  getThumbnailSourceController,
   stageThumbnailDraftController,
+  stageThumbnailDraftImageController,
   saveThumbnailDraftController,
   discardThumbnailDraftController,
   getThumbnailDraftAssetController,
@@ -150,11 +154,24 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
     body: CustomThumbnailBody,
   })
 
+  // Aspect-corrected background source for the client-side editor canvas
+  // (video frame, scene still, or the saved thumbnail — as a data URL).
+  .post("/:id/thumbnail-source", getThumbnailSourceController, {
+    params: IdParams,
+    body: ThumbnailSourceBody,
+  })
+
   // Thumbnail Studio: stage a composed thumbnail locally, then save (upload to
   // S3 + delete the superseded object) or discard (wipe local files).
   .post("/:id/thumbnail-draft", stageThumbnailDraftController, {
     params: IdParams,
     body: StageThumbnailDraftBody,
+  })
+
+  // Stage a client-rendered canvas export (WYSIWYG PNG + editor state)
+  .post("/:id/thumbnail-draft/image", stageThumbnailDraftImageController, {
+    params: IdParams,
+    body: StageThumbnailImageBody,
   })
 
   .post("/:id/thumbnail-draft/save", saveThumbnailDraftController, {
