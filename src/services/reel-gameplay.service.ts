@@ -8,6 +8,9 @@ import { listKeys, cdnUrlFor } from "./s3.service";
 import { renderPartOutroCard, renderRedditCard } from "./reddit-card.service";
 import type { RedditStory } from "./reel-script.service";
 import { DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
+import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
+import { captionStylePlain } from "../utils/caption-style.utils";
+import type { ICaptionStyle } from "../models";
 
 // ============================================
 // GameplayOverlayStrategy (Reddit / AITA).
@@ -103,16 +106,46 @@ function clean(text: string): string {
 }
 
 /** Split narration body into sentence-sized caption segments. */
-function toSentences(text: string): string[] {
+export function toSentences(text: string): string[] {
   const parts = clean(text).match(/[^.!?]+[.!?]*/g);
-  return parts?.map((s) => s.trim()).filter(Boolean) ?? [text];
+  return parts?.map((s) => s.trim()).filter(Boolean) ?? [clean(text)].filter(Boolean);
+}
+
+/** Default caption look for bouncing-word Reddit captions (matches prior hardcoded ASS). */
+export const DEFAULT_BOUNCE_CAPTION_STYLE = {
+  ...DEFAULT_CAPTION_STYLE,
+  fontName: DEFAULT_BUNDLED_FONT_FAMILY,
+  fontSize: 76,
+  primaryColor: "#FFFFFF",
+  activeColor: "#FFD700",
+  outlineColor: "#000000",
+  outlineWidth: 6,
+  shadow: 3,
+  alignment: 5 as const,
+  marginV: 0,
+  marginL: 130,
+  marginR: 130,
+  chunkSize: 3,
+  bold: true,
+  uppercase: false,
+  animation: "none" as const,
+  karaoke: false,
+};
+
+export interface GameplayRenderOpts {
+  model?: string;
+  voice?: string;
+  format?: "mp3" | "pcm";
+  /** Spoken body sentences (scene narrations). Falls back to splitting story.body. */
+  bodySentences?: string[];
+  captionStyle?: ICaptionStyle;
 }
 
 export async function renderGameplayReel(
   reelId: string,
   story: RedditStory,
   gameplayPath: string,
-  ttsOpts: { model?: string; voice?: string; format?: "mp3" | "pcm" } = {}
+  ttsOpts: GameplayRenderOpts = {}
 ): Promise<GameplayResult> {
   await ensureDir(config.processingPath);
   const tmp: string[] = [];
@@ -131,20 +164,22 @@ async function renderGameplayReelInner(
   reelId: string,
   story: RedditStory,
   gameplayPath: string,
-  ttsOpts: { model?: string; voice?: string; format?: "mp3" | "pcm" },
+  ttsOpts: GameplayRenderOpts,
   tmp: string[]
 ): Promise<GameplayResult> {
   // 1. Narrate: title first (read over the title card), then each sentence.
   const outroText = getPartOutroText(story);
-  const bodySentences = toSentences(story.body);
+  const bodySentences =
+    ttsOpts.bodySentences?.map((s) => clean(s)).filter(Boolean) ?? toSentences(story.body);
   const segTexts = [clean(story.title), ...bodySentences, ...(outroText ? [outroText] : [])];
   const audioPaths: string[] = [];
   const speechDurs: number[] = [];
   const tempo = clampTempo(config.redditNarrationTempo);
+  const { bodySentences: _bs, captionStyle, ...narrationOpts } = ttsOpts;
 
   for (let i = 0; i < segTexts.length; i++) {
     const { audioPath } = await generateNarration(segTexts[i], {
-      ...ttsOpts,
+      ...narrationOpts,
       outputDir: config.processingPath,
       profile: "reddit",
     });
@@ -209,7 +244,7 @@ async function renderGameplayReelInner(
     });
   }
   const assPath = join(config.processingPath, `${reelId}.ass`);
-  await writeFile(assPath, buildBouncingCaptions(capSegs), "utf-8");
+  await writeFile(assPath, buildBouncingCaptions(capSegs, captionStyle), "utf-8");
 
   // 5. Composite bg + captions + Reddit card overlay + narration.
   const card = await renderRedditCard(clean(story.title), redditCardOpts(story));
@@ -320,14 +355,22 @@ function formatCount(n: number | undefined): string | undefined {
   return String(Math.max(0, Math.round(value)));
 }
 
-function redditCardOpts(story: RedditStory) {
-  const authentic = story.source === "verbatim";
+function redditCardOpts(story: RedditStory & {
+  cardUsername?: string;
+  author?: string;
+  ageHours?: number;
+  upvotes?: number;
+  comments?: number;
+}) {
+  const username =
+    story.cardUsername?.trim() ||
+    (story.author ? (story.author.startsWith("u/") ? story.author : `u/${story.author}`) : undefined);
   return {
     subreddit: story.subreddit,
-    username: authentic && story.author ? `u/${story.author}` : undefined,
-    ageHours: authentic ? story.ageHours : undefined,
-    upvotes: authentic ? formatCount(story.upvotes) : undefined,
-    comments: authentic ? formatCount(story.comments) : undefined,
+    username,
+    ageHours: story.ageHours,
+    upvotes: formatCount(story.upvotes),
+    comments: formatCount(story.comments),
   };
 }
 
@@ -475,9 +518,34 @@ function wordWeight(w: string): number {
   return Math.max(w.replace(/[^A-Za-z0-9]/g, "").length, 1);
 }
 
+function hexToAssColor(hex?: string, fallback = "&H00FFFFFF"): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex ?? "");
+  if (!m) return fallback;
+  const rr = m[1].slice(0, 2);
+  const gg = m[1].slice(2, 4);
+  const bb = m[1].slice(4, 6);
+  return `&H00${bb}${gg}${rr}`.toUpperCase();
+}
+
+function hexToAssInlineColor(hex?: string, fallback = "&HFFFFFF&"): string {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex ?? "");
+  if (!m) return fallback;
+  const rr = m[1].slice(0, 2);
+  const gg = m[1].slice(2, 4);
+  const bb = m[1].slice(4, 6);
+  return `&H${bb}${gg}${rr}&`.toUpperCase();
+}
+
 function buildBouncingCaptions(
-  segs: { text: string; startTime: number; speech: number }[]
+  segs: { text: string; startTime: number; speech: number }[],
+  captionStyle?: ICaptionStyle
 ): string {
+  const style = captionStylePlain(captionStyle);
+  const s = { ...DEFAULT_BOUNCE_CAPTION_STYLE, ...style };
+  const IDLE = hexToAssColor(s.primaryColor);
+  const ACTIVE = hexToAssColor(s.activeColor, "&H0000D7FF");
+  const OUTLINE = hexToAssColor(s.outlineColor, "&H00000000");
+  const bold = s.bold ? -1 : 0;
   const header = `[Script Info]
 ScriptType: v4.00+
 PlayResX: ${W}
@@ -486,32 +554,55 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,${DEFAULT_BUNDLED_FONT_FAMILY},76,&H00FFFFFF,&H0000D7FF,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,6,3,5,130,130,0,1
+Style: Cap,${s.fontName},${s.fontSize},${IDLE},${ACTIVE},${OUTLINE},&H90000000,${bold},0,0,0,100,100,0,0,1,${s.outlineWidth},${s.shadow},${s.alignment},${s.marginL},${s.marginR},${s.marginV},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-  return header + buildBouncingCaptionLines(segs).join("\n") + "\n";
+  return header + buildBouncingCaptionLines(segs, s).join("\n") + "\n";
 }
 
 export async function appendBouncingCaptionCues(
   assPath: string,
-  segs: { text: string; startTime: number; speech: number }[]
+  segs: { text: string; startTime: number; speech: number }[],
+  captionStyle?: ICaptionStyle
 ): Promise<void> {
   const current = await readFile(assPath, "utf-8");
-  const lines = buildBouncingCaptionLines(segs);
+  const style = captionStylePlain(captionStyle);
+  const s = { ...DEFAULT_BOUNCE_CAPTION_STYLE, ...style };
+  const lines = buildBouncingCaptionLines(segs, s);
   if (!lines.length) return;
   await writeFile(assPath, `${current.trimEnd()}\n${lines.join("\n")}\n`, "utf-8");
 }
 
 function buildBouncingCaptionLines(
-  segs: { text: string; startTime: number; speech: number }[]
+  segs: { text: string; startTime: number; speech: number }[],
+  style: {
+    fontName: string;
+    fontSize: number;
+    primaryColor: string;
+    activeColor: string;
+    outlineColor: string;
+    outlineWidth: number;
+    shadow: number;
+    alignment: number;
+    marginV: number;
+    marginL: number;
+    marginR: number;
+    chunkSize: number;
+    bold: boolean;
+    uppercase: boolean;
+  }
 ): string[] {
   const lines: string[] = [];
+  const idleInline = hexToAssInlineColor(style.primaryColor);
+  const activeInline = hexToAssInlineColor(style.activeColor, "&H00D7FF&");
+  const uppercase = Boolean(style.uppercase);
 
   for (const seg of segs) {
-    const words = seg.text.trim().split(/\s+/).filter(Boolean);
+    const raw = uppercase ? seg.text.toUpperCase() : seg.text;
+    const words = raw.trim().split(/\s+/).filter(Boolean);
     if (!words.length) continue;
 
     const weights = words.map(wordWeight);
@@ -535,7 +626,7 @@ function buildBouncingCaptionLines(
         const text = chunk
           .map((w, k) =>
             k === active
-              ? `{\\fscx${activeScale}\\fscy${activeScale}\\1c&H0000D7FF&}${assText(w)}{\\fscx${scale}\\fscy${scale}\\1c&H00FFFFFF&}`
+              ? `{\\fscx${activeScale}\\fscy${activeScale}\\1c${activeInline}}${assText(w)}{\\fscx${scale}\\fscy${scale}\\1c${idleInline}}`
               : assText(w)
           )
           .join(" ");
