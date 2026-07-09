@@ -1,5 +1,6 @@
 import { Elysia } from "elysia";
 import { cors } from "@elysiajs/cors";
+import "./config/ffmpeg-bootstrap"; // must run before any fluent-ffmpeg import side-effects matter
 import { config, validateConfig } from "./config";
 import { connectDatabase } from "./db";
 import {

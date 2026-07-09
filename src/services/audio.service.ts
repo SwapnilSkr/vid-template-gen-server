@@ -1,7 +1,4 @@
-/**
- * Audio Test Service
- * Isolated service to test and debug audio merging functionality
- */
+import { spawn } from "node:child_process";
 import ffmpeg from "fluent-ffmpeg";
 import { join } from "node:path";
 import { unlink, readdir } from "node:fs/promises";
@@ -22,8 +19,6 @@ async function generateTestAudio(
   frequency: number,
   outputPath: string
 ): Promise<string> {
-  const { spawn } = await import("node:child_process");
-
   return new Promise((resolve, reject) => {
     const args = [
       "-f",
@@ -38,7 +33,7 @@ async function generateTestAudio(
       outputPath,
     ];
 
-    const ffmpegProcess = spawn("ffmpeg", args);
+    const ffmpegProcess = spawn(config.ffmpegPath || "ffmpeg", args);
 
     let stderr = "";
     ffmpegProcess.stderr.on("data", (data: Buffer) => {

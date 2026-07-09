@@ -1,3 +1,11 @@
+import { resolve } from "node:path";
+
+/** Resolve storage-ish paths to absolute so Windows services / PM2 / monorepo
+ *  launches with a different cwd still find the same directories. */
+function absPath(envValue: string | undefined, fallback: string): string {
+  return resolve(envValue?.trim() || fallback);
+}
+
 // Environment configuration
 export const config = {
   // Server
@@ -34,16 +42,16 @@ export const config = {
   // ElevenLabs
   elevenLabsApiKey: process.env.ELEVEN_LABS_API_KEY || "",
 
-  // Storage paths (for local processing)
-  storagePath: process.env.STORAGE_PATH || "./storage",
-  processingPath: process.env.PROCESSING_PATH || "./storage/processing",
+  // Storage paths (for local processing) — absolute so cwd doesn't matter
+  storagePath: absPath(process.env.STORAGE_PATH, "./storage"),
+  processingPath: absPath(process.env.PROCESSING_PATH, "./storage/processing"),
 
   // FFmpeg
   ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
   ffprobePath: process.env.FFPROBE_PATH || "ffprobe",
 
   // Gameplay background clips (Reddit/AITA format) — user-supplied .mp4 loops
-  gameplayDir: process.env.GAMEPLAY_DIR || "./storage/gameplay",
+  gameplayDir: absPath(process.env.GAMEPLAY_DIR, "./storage/gameplay"),
 
   // CloudFront CDN in front of the public S3 bucket (empty = fall back to S3 URL)
   cdnUrl: (process.env.CLOUDFRONT_URL || "").replace(/\/$/, ""),

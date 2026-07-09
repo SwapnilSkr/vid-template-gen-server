@@ -1,4 +1,5 @@
 import { Worker, type Job } from "bullmq";
+import "../config/ffmpeg-bootstrap"; // reel workers import fluent-ffmpeg via services — set paths first
 import { redisConnection } from "./connection";
 import { config } from "../config";
 import { getErrorMessage } from "../types";
