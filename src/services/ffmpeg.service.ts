@@ -7,7 +7,7 @@ import type {
   AudioSegment,
   VideoSegment,
 } from "../types";
-import { ensureDir, generateFilename } from "../utils";
+import { ensureDir, escapeFilterPath, generateFilename } from "../utils";
 import type { ScreenType } from "../models";
 
 // Screen dimensions for aspect ratio conversion
@@ -535,7 +535,7 @@ export async function addSubtitlesToVideo(
 
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
-      .outputOptions(["-vf", `ass='${assPath.replace(/'/g, "\\'")}'`])
+      .outputOptions(["-vf", `ass='${escapeFilterPath(assPath)}'`])
       .output(output)
       .on("end", async () => {
         await unlink(assPath).catch(() => {});

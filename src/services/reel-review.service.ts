@@ -6,7 +6,7 @@ import { config } from "../config";
 import { resolveModels } from "../config/models";
 import { Reel, type IReel, type IReelReviewPackage } from "../models";
 import { getErrorMessage } from "../types";
-import { ensureDir, generateFilename } from "../utils";
+import { ensureDir, escapeFilterPath, generateFilename } from "../utils";
 import { generateText } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateImage, type MediaUsageCallback } from "./openrouter-media.service";
@@ -701,11 +701,6 @@ async function buildThumbnailSource(
 function hexToDrawColor(hex?: string, fallback = "0xFFFFFF"): string {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex ?? "");
   return m ? `0x${m[1].toUpperCase()}` : fallback;
-}
-
-/** Escape a path for use inside an ffmpeg filtergraph option value. */
-function escapeFilterPath(p: string): string {
-  return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
 /** Compose a thumbnail PNG at `outputPath` from the chosen source (video frame

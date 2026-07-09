@@ -2,7 +2,7 @@ import ffmpeg from "fluent-ffmpeg";
 import { readFile, readdir, writeFile, unlink, stat } from "node:fs/promises";
 import { join, basename, resolve } from "node:path";
 import { config } from "../config";
-import { ensureDir } from "../utils";
+import { ensureDir, escapeFilterPath } from "../utils";
 import { generateNarration, getAudioDuration } from "./openrouter-media.service";
 import { listKeys, cdnUrlFor } from "./s3.service";
 import { renderPartOutroCard, renderRedditCard } from "./reddit-card.service";
@@ -359,7 +359,7 @@ function composite(
   out: string,
   outro?: { card?: { path: string; width: number; height: number }; start?: number }
 ): Promise<string> {
-  const ass = escapeFilterValue(resolve(assPath));
+  const ass = escapeFilterPath(resolve(assPath));
   const en = finiteSeconds(titleDur, "title duration").toFixed(2);
   const x = Math.round((W - card.width) / 2);
   const fullFilters = [
@@ -401,10 +401,6 @@ function composite(
 function finiteSeconds(value: number, label: string): number {
   if (Number.isFinite(value) && value >= 0) return value;
   throw new Error(`Invalid ${label}: ${value}`);
-}
-
-function escapeFilterValue(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
 }
 
 function runComposite(

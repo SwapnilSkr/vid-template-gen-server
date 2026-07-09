@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
-import { ensureDir } from "../utils";
+import { ensureDir, escapeFilterPath } from "../utils";
 import { getAudioDuration } from "./openrouter-media.service";
 import { cdnUrlFor, listKeys } from "./s3.service";
 import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
@@ -352,14 +352,40 @@ export function assembleCrossfade(
   });
 }
 
-export function burnSubtitles(
+/**
+ * Burn ASS captions into the video. Paths are escaped for filtergraphs so
+ * Windows drive letters (`C:`) don't split the option list. If burn still
+ * fails (missing libass, corrupt ASS, etc.), we soft-fail: copy the video
+ * through without burned captions so the produce job can finish — assets
+ * already paid for are not wasted. Callers can resume/re-render later.
+ */
+export async function burnSubtitles(
   video: string,
   assPath: string,
   out: string,
   fadeIn = 0
 ): Promise<string> {
-  const escapedAss = assPath.replace(/'/g, "\\'");
-  const fontsdir = HAS_FONTS_DIR ? `:fontsdir='${FONTS_DIR.replace(/'/g, "\\'")}'` : "";
+  try {
+    return await burnSubtitlesStrict(video, assPath, out, fadeIn);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `⚠️  Caption burn failed — shipping video without burned captions so the job can finish. ` +
+        `Re-render after fixing ffmpeg/fonts to restore captions. Cause: ${message}`
+    );
+    await unlink(out).catch(() => {});
+    return copyVideo(video, out);
+  }
+}
+
+function burnSubtitlesStrict(
+  video: string,
+  assPath: string,
+  out: string,
+  fadeIn = 0
+): Promise<string> {
+  const escapedAss = escapeFilterPath(assPath);
+  const fontsdir = HAS_FONTS_DIR ? `:fontsdir='${escapeFilterPath(FONTS_DIR)}'` : "";
   // Fade the composited frame (image + burned captions) in together. The intro
   // fade lives HERE, after the burn — never before it — so captions can't flash
   // at full opacity over a still-black frame at t=0 ("captions before the image").
