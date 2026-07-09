@@ -1,5 +1,6 @@
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // ============================================
 // Bundled fonts (server/assets/fonts) used for burned-in captions (ASS, matched
@@ -7,7 +8,14 @@ import { existsSync } from "node:fs";
 // Static single-weight display faces only — the heavy/rounded look viral
 // captions use, with predictable weights (no variable-font default-weight
 // surprises). Add a .ttf here + one entry to expose it in the pickers.
+//
+// Path is anchored to the server package root (not process.cwd()) so fonts
+// resolve correctly when the process is started from a different directory
+// (Windows services, PM2, monorepo root, etc.).
 // ============================================
+
+/** server/ — parent of src/config/ */
+const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
 export interface BundledFont {
   id: string;
@@ -18,8 +26,15 @@ export interface BundledFont {
   file: string;
 }
 
-export const FONTS_DIR = join(process.cwd(), "assets", "fonts");
-export const HAS_FONTS_DIR = existsSync(FONTS_DIR);
+export const FONTS_DIR = join(PACKAGE_ROOT, "assets", "fonts");
+
+/** Prefer this over a frozen constant — fonts may be fetched after boot. */
+export function hasFontsDir(): boolean {
+  return existsSync(FONTS_DIR);
+}
+
+/** @deprecated Use hasFontsDir() — kept for call sites that need a boolean at import time. */
+export const HAS_FONTS_DIR = hasFontsDir();
 
 export const BUNDLED_FONTS: BundledFont[] = [
   { id: "poppins_extrabold", label: "Poppins ExtraBold (bold rounded)", family: "Poppins ExtraBold", file: "Poppins-ExtraBold.ttf" },
@@ -30,6 +45,9 @@ export const BUNDLED_FONTS: BundledFont[] = [
   { id: "bowlby_one", label: "Bowlby One (chunky rounded)", family: "Bowlby One", file: "BowlbyOne-Regular.ttf" },
   { id: "bangers", label: "Bangers (comic)", family: "Bangers", file: "Bangers-Regular.ttf" },
 ];
+
+/** Default ASS Fontname — always a bundled face so Linux/Windows don't depend on Arial. */
+export const DEFAULT_BUNDLED_FONT_FAMILY = "Poppins ExtraBold";
 
 export function listFonts(): BundledFont[] {
   return BUNDLED_FONTS.filter((f) => existsSync(join(FONTS_DIR, f.file)));

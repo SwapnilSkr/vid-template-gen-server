@@ -1,4 +1,5 @@
 import type { ICaptionStyle, IAudioPost, ReelMotionMode } from "../models";
+import { DEFAULT_BUNDLED_FONT_FAMILY } from "./fonts";
 
 // ============================================
 // Style presets — a named bundle of every creative default for a reel:
@@ -41,7 +42,8 @@ export interface StylePreset {
 export const DEFAULT_CAPTION_STYLE: Required<
   Omit<ICaptionStyle, "animation">
 > & { animation: NonNullable<ICaptionStyle["animation"]> } = {
-  fontName: "Arial",
+  // Bundled face (server/assets/fonts) — never rely on system Arial (missing on many Linux boxes).
+  fontName: DEFAULT_BUNDLED_FONT_FAMILY,
   fontSize: 64,
   primaryColor: "#FFFFFF",
   activeColor: "#FFD700", // amber highlight (ASS &H0000D7FF)
