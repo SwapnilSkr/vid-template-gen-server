@@ -1,5 +1,6 @@
 import ffmpeg from "fluent-ffmpeg";
 import { join } from "node:path";
+import { writeFile, unlink } from "node:fs/promises";
 import { config } from "../config";
 import type {
   TemplateMetadata,
@@ -7,9 +8,10 @@ import type {
   AudioSegment,
   VideoSegment,
 } from "../types";
-import { ensureDir, assVideoFilter, generateFilename } from "../utils";
+import { ensureDir, assVideoFilter, applyOutputOptions, generateFilename } from "../utils";
 import type { ScreenType } from "../models";
 import { DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
+import { captionBurnFailed } from "./ffmpeg-capability.service";
 
 // Screen dimensions for aspect ratio conversion
 const SCREEN_DIMENSIONS = {
@@ -529,18 +531,17 @@ export async function addSubtitlesToVideo(
 
   // Write ASS to temp file
   const assPath = join(config.processingPath, `temp_${Date.now()}.ass`);
-  const { writeFile, unlink, copyFile } = await import("node:fs/promises");
   await writeFile(assPath, assContent, "utf-8");
   console.log(`📝 ASS file written to: ${assPath}`);
   console.log(`📝 ASS content preview:\n${assContent.substring(0, 500)}...`);
 
   try {
     await new Promise<void>((resolve, reject) => {
-      ffmpeg(videoPath)
-        .outputOptions(["-vf", assVideoFilter(assPath)])
+      const cmd = ffmpeg(videoPath);
+      applyOutputOptions(cmd, ["-vf", assVideoFilter(assPath)])
         .output(output)
         .on("end", () => resolve())
-        .on("error", (err) => reject(err))
+        .on("error", (err: Error) => reject(err))
         .run();
     });
     await unlink(assPath).catch(() => {});
@@ -550,13 +551,12 @@ export async function addSubtitlesToVideo(
     return output;
   } catch (error: unknown) {
     await unlink(assPath).catch(() => {});
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(
-      `⚠️  Subtitle burn failed — shipping video without burned captions. Cause: ${message}`
-    );
     await unlink(output).catch(() => {});
-    await copyFile(videoPath, output);
-    return output;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(
+      `❌ Subtitle burn failed — stopping so the job can resume after fixing FFmpeg. Cause: ${message}`
+    );
+    captionBurnFailed(message);
   }
 }
 

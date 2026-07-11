@@ -1,5 +1,8 @@
 import { resolve } from "node:path";
-import { FONTS_DIR, hasFontsDir } from "../config/fonts";
+import type ffmpeg from "fluent-ffmpeg";
+import { FONTS_DIR, hasBundledFonts } from "../config/fonts";
+
+type FfmpegCmd = ffmpeg.FfmpegCommand;
 
 /**
  * Escape a filesystem path for use inside an ffmpeg filtergraph option value
@@ -9,11 +12,39 @@ import { FONTS_DIR, hasFontsDir } from "../config/fonts";
  * filter parser treats `C:` as an option separator / protocol and the rest of
  * the path (plus following filters like `,fade=…`) becomes a bogus output path.
  * That is why caption burn fails on Windows but works on macOS/Linux.
+ *
+ * Also escape `[` `]` `,` `;` — filtergraph metacharacters even inside quotes
+ * on some ffmpeg builds.
  */
 export function escapeFilterPath(p: string): string {
   // Absolute + forward slashes: ffmpeg filtergraphs are happier with `/` even
   // on Windows, and it avoids backslash-escaping hell.
-  return resolve(p).replace(/\\/g, "/").replace(/:/g, "\\:").replace(/'/g, "\\'");
+  return resolve(p)
+    .replace(/\\/g, "/")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/,/g, "\\,")
+    .replace(/;/g, "\\;");
+}
+
+/**
+ * Apply output options without fluent-ffmpeg's silent argv corruption.
+ *
+ * `.outputOptions(["-vf", value])` (array form) splits any string that contains
+ * **exactly one space** into two argv entries. Paths like
+ * `/Users/Jane Doe/…/file.ass` then break the `ass=` filter, burn fails, and
+ * soft-fail ships a caption-free video. Passing options as discrete arguments
+ * disables that split (`doSplit = false` when `arguments.length > 1`).
+ */
+export function applyOutputOptions(
+  cmd: FfmpegCmd,
+  opts: readonly string[]
+): FfmpegCmd {
+  if (opts.length === 0) return cmd;
+  if (opts.length === 1) return cmd.outputOptions(opts as string[]);
+  return (cmd.outputOptions as (...args: string[]) => FfmpegCmd)(...opts);
 }
 
 /**
@@ -43,7 +74,9 @@ export function concatDemuxerEntry(p: string): string {
  * @param extras Optional trailing filters, e.g. `fade=t=in:st=0:d=0.4`
  */
 export function assVideoFilter(assPath: string, extras?: string): string {
-  const fontsdir = hasFontsDir() ? `:fontsdir='${escapeFilterPath(FONTS_DIR)}'` : "";
+  const fontsdir = hasBundledFonts()
+    ? `:fontsdir='${escapeFilterPath(FONTS_DIR)}'`
+    : "";
   const base = `ass='${escapeFilterPath(assPath)}'${fontsdir}`;
   return extras ? `${base},${extras}` : base;
 }
@@ -53,6 +86,8 @@ export function assVideoFilter(assPath: string, extras?: string): string {
  * `filename=` form: `ass=filename='…':fontsdir='…'`.
  */
 export function assFilenameFilter(assPath: string): string {
-  const fontsdir = hasFontsDir() ? `:fontsdir='${escapeFilterPath(FONTS_DIR)}'` : "";
+  const fontsdir = hasBundledFonts()
+    ? `:fontsdir='${escapeFilterPath(FONTS_DIR)}'`
+    : "";
   return `ass=filename='${escapeFilterPath(assPath)}'${fontsdir}`;
 }

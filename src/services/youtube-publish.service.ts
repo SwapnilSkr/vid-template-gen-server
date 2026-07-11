@@ -12,6 +12,7 @@ import { config } from "../config";
 import { OAuthState, Reel, YouTubeChannel } from "../models";
 import { getErrorMessage } from "../types";
 import { ensureReelReviewPackage } from "./reel-review.service";
+import { applyOutputOptions } from "../utils";
 
 export interface YouTubePublishChannel {
   id: string;
@@ -76,11 +77,11 @@ async function encodeThumbnailJpeg(
   vf: string
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    ffmpeg(inputPath)
-      .outputOptions(["-vf", vf, "-q:v", String(quality)])
+    const cmd = ffmpeg(inputPath);
+    applyOutputOptions(cmd, ["-vf", vf, "-q:v", String(quality)])
       .output(outputPath)
       .on("end", () => resolve())
-      .on("error", (err) =>
+      .on("error", (err: Error) =>
         reject(new Error(`YouTube thumbnail compress failed: ${err.message}`))
       )
       .run();

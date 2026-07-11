@@ -6,7 +6,7 @@ import { config } from "../config";
 import { resolveModels } from "../config/models";
 import { Reel, type IReel, type IReelReviewPackage } from "../models";
 import { getErrorMessage } from "../types";
-import { ensureDir, escapeFilterPath, generateFilename } from "../utils";
+import { ensureDir, escapeFilterPath, applyOutputOptions, generateFilename } from "../utils";
 import { generateText } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateImage, type MediaUsageCallback } from "./openrouter-media.service";
@@ -962,11 +962,11 @@ function composeStillWithText(
   const size = thumbnailSize(input.aspectRatio);
   const vf = thumbnailTextFilter(size, drawtext, input.effect, input.photoLook);
   return new Promise((resolve, reject) => {
-    ffmpeg(imageUrl)
-      .outputOptions(["-vframes", "1", "-vf", vf])
+    const cmd = ffmpeg(imageUrl);
+    applyOutputOptions(cmd, ["-vframes", "1", "-vf", vf])
       .output(output)
       .on("end", () => resolve(output))
-      .on("error", (err) => reject(new Error(`Still thumbnail render failed: ${err.message}`)))
+      .on("error", (err: Error) => reject(new Error(`Still thumbnail render failed: ${err.message}`)))
       .run();
   });
 }
@@ -1019,17 +1019,11 @@ function extractFrameWithText(
   const size = thumbnailSize(input.aspectRatio);
   const vf = thumbnailTextFilter(size, drawtext, input.effect, input.photoLook);
   return new Promise((resolve, reject) => {
-    ffmpeg(videoUrl)
-      .seekInput(Math.max(atSeconds, 0))
-      .outputOptions([
-        "-vframes",
-        "1",
-        "-vf",
-        vf,
-      ])
+    const cmd = ffmpeg(videoUrl).seekInput(Math.max(atSeconds, 0));
+    applyOutputOptions(cmd, ["-vframes", "1", "-vf", vf])
       .output(output)
       .on("end", () => resolve(output))
-      .on("error", (err) => reject(new Error(`Custom thumbnail render failed: ${err.message}`)))
+      .on("error", (err: Error) => reject(new Error(`Custom thumbnail render failed: ${err.message}`)))
       .run();
   });
 }

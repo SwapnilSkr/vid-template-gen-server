@@ -3,11 +3,12 @@ import { spawn } from "node:child_process";
 import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
-import { ensureDir, assVideoFilter } from "../utils";
+import { ensureDir, assVideoFilter, applyOutputOptions } from "../utils";
 import { getAudioDuration } from "./openrouter-media.service";
 import { cdnUrlFor, listKeys } from "./s3.service";
 import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
 import { captionStylePlain } from "../utils/caption-style.utils";
+import { captionBurnFailed } from "./ffmpeg-capability.service";
 import type { ISceneMotion, ICaptionStyle, IEditEffects } from "../models";
 
 export const W = 1080;
@@ -147,16 +148,16 @@ async function renderImageKenBurnsInner(
   await writeFile(assPath, assContent, "utf-8");
 
   const captionedPath = join(config.processingPath, `${reelId}_captioned.mp4`);
-  await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
+  const burnedPath = await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
   tmp.push(captionedPath);
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
   if (options.horrorEffects) {
     console.log(`👻 Horror final mix (preset=${config.ffmpegPreset})…`);
-    await applyHorrorFinalMix(captionedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
+    await applyHorrorFinalMix(burnedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
     console.log(`👻 Horror mix done`);
   } else {
-    await copyVideo(captionedPath, finalPath);
+    await copyVideo(burnedPath, finalPath);
   }
 
   return {
@@ -357,10 +358,13 @@ export function assembleCrossfade(
 
 /**
  * Burn ASS captions into the video. Paths are escaped for filtergraphs so
- * Windows drive letters (`C:`) don't split the option list. If burn still
- * fails (missing libass, corrupt ASS, etc.), we soft-fail: copy the video
- * through without burned captions so the produce job can finish — assets
- * already paid for are not wasted. Callers can resume/re-render later.
+ * Windows drive letters (`C:`) don't split the option list. Output options are
+ * applied via {@link applyOutputOptions} so paths with exactly one space
+ * (e.g. `/Users/Jane Doe/…`) are not corrupted by fluent-ffmpeg.
+ *
+ * Caption burn is a hard failure: we do NOT soft-ship a caption-free MP4.
+ * Scene images/TTS already on S3 stay intact — the produce job fails at the
+ * render checkpoint so Resume can re-run render-only after ffmpeg/fonts are fixed.
  */
 export async function burnSubtitles(
   video: string,
@@ -372,16 +376,15 @@ export async function burnSubtitles(
     return await burnSubtitlesStrict(video, assPath, out, fadeIn);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(
-      `⚠️  Caption burn failed — shipping video without burned captions so the job can finish. ` +
-        `Re-render after fixing ffmpeg/fonts to restore captions. Cause: ${message}`
-    );
     await unlink(out).catch(() => {});
-    return copyVideo(video, out);
+    console.error(
+      `❌ Caption burn failed — stopping produce so paid assets are kept for resume. Cause: ${message}`
+    );
+    captionBurnFailed(message);
   }
 }
 
-function burnSubtitlesStrict(
+export function burnSubtitlesStrict(
   video: string,
   assPath: string,
   out: string,
@@ -393,23 +396,23 @@ function burnSubtitlesStrict(
       : assVideoFilter(assPath);
   console.log(`🔤 Burning captions (preset=${config.ffmpegPreset})…`);
   return new Promise((resolve, reject) => {
-    ffmpeg(video)
-      .outputOptions([
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-preset", config.ffmpegPreset,
-        "-crf", "21",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-movflags", "+faststart",
-      ])
+    const cmd = ffmpeg(video);
+    applyOutputOptions(cmd, [
+      "-vf", vf,
+      "-c:v", "libx264",
+      "-preset", config.ffmpegPreset,
+      "-crf", "21",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac",
+      "-b:a", "192k",
+      "-movflags", "+faststart",
+    ])
       .output(out)
       .on("end", () => {
         console.log(`🔤 Caption burn done`);
         resolve(out);
       })
-      .on("error", (err) => reject(new Error(`Caption burn failed: ${err.message}`)))
+      .on("error", (err: Error) => reject(new Error(`Caption burn failed: ${err.message}`)))
       .run();
   });
 }
