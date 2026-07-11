@@ -206,7 +206,12 @@ export const UpdateRedditCardBody = t.Object({
 export type TUpdateRedditCardBody = typeof UpdateRedditCardBody.static;
 
 export const RegenerateReelBody = t.Object({
-  mode: t.Union([t.Literal("render_only"), t.Literal("assets")]),
+  mode: t.Union([
+    t.Literal("render_only"),
+    t.Literal("assets"),
+    t.Literal("outro_only"),
+    t.Literal("composite_only"),
+  ]),
 });
 export type TRegenerateReelBody = typeof RegenerateReelBody.static;
 

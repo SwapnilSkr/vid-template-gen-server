@@ -326,11 +326,23 @@ export interface IReel extends Document {
   status: ReelStatus;
   progress: number;
   outputUrl?: string;
+  /** Pre-outro assembled body video — enables outro-only re-renders. */
+  bodyVideoUrl?: string;
+  /**
+   * Pre-caption scene assembly (Ken Burns / motion / hybrid). Enables caption
+   * and edit-FX re-renders to skip re-assembly from stills.
+   */
+  assemblyVideoUrl?: string;
   subtitlesUrl?: string;
   /** False when FFmpeg caption burn soft-failed (MP4 has no burned-in text). */
   captionsBurned?: boolean;
   captionBurnError?: string;
-  outroAudioUrl?: string; // cached outro narration — reused on render-only re-runs
+  /** Cached title-card narration for gameplay_overlay (reused on render-only). */
+  titleAudioUrl?: string;
+  /** Cached "Stay tuned for part N" line for multi-part Reddit reels. */
+  partOutroAudioUrl?: string;
+  /** Cached branded outro narration — reused when the spoken line is unchanged. */
+  outroAudioUrl?: string;
   review?: IReelReviewPackage;
   costUsd?: number;
   costBreakdown?: ICostBreakdown;
@@ -686,9 +698,13 @@ const reelSchema = new Schema<IReel>(
     },
     progress: { type: Number, default: 0, min: 0, max: 100 },
     outputUrl: String,
+    bodyVideoUrl: String,
+    assemblyVideoUrl: String,
     subtitlesUrl: String,
     captionsBurned: { type: Boolean, default: true },
     captionBurnError: String,
+    titleAudioUrl: String,
+    partOutroAudioUrl: String,
     outroAudioUrl: String,
     review: reelReviewSchema,
     costUsd: Number,

@@ -45,9 +45,9 @@ export function startWorkers(): void {
   const reelWorker = new Worker<ReelJobData, void, "process">(
     "reel-processing",
     async (job: Job<ReelJobData, void, "process">) => {
-      const { reelId, stage } = job.data;
+      const { reelId, stage, produceMode } = job.data;
       if (stage === "plan") await processReelPlan(reelId);
-      else if (stage === "produce") await processReelProduce(reelId);
+      else if (stage === "produce") await processReelProduce(reelId, produceMode ?? "full");
       else await processReel(reelId);
     },
     { ...workerBaseOptions, concurrency: config.queueConcurrency }

@@ -26,6 +26,9 @@ export interface ReelJobData {
   /** undefined = full auto (plan+produce). "plan" stops at plan_review for
    *  human review; "produce" runs assets→render→upload on an approved/edited plan. */
   stage?: "plan" | "produce";
+  /** Produce-only: skip body rebuild and append a new outro onto bodyVideoUrl.
+   *  composite_only finishes from assembly/narration caches (no TTS / no Ken Burns). */
+  produceMode?: "full" | "outro_only" | "composite_only";
 }
 
 export interface CompositionJobData {
@@ -104,7 +107,11 @@ export async function enqueueReelPlan(reelId: string): Promise<void> {
 /** Produce stage — assets→render→upload on an approved/edited plan. Unique
  *  jobId per run so intentional re-renders aren't deduped away, but skip if a
  *  produce job for this reel is already waiting/active (double-click / race). */
-export async function enqueueReelProduce(reelId: string): Promise<void> {
+export async function enqueueReelProduce(
+  reelId: string,
+  options: { produceMode?: "full" | "outro_only" | "composite_only" } = {}
+): Promise<void> {
+  const produceMode = options.produceMode ?? "full";
   const activeJobs = await reelQueue.getJobs(["waiting", "delayed", "active"], 0, 200);
   const duplicate = activeJobs.some(
     (job) => job.data.reelId === reelId && job.data.stage === "produce"
@@ -115,7 +122,7 @@ export async function enqueueReelProduce(reelId: string): Promise<void> {
   }
   await reelQueue.add(
     "process",
-    { reelId, stage: "produce" },
+    { reelId, stage: "produce", produceMode },
     { jobId: `${reelId}-produce-${Date.now()}` }
   );
 }
