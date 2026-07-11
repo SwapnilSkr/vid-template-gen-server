@@ -304,17 +304,49 @@ async function buildDraftPreview(
         }
       );
 
+  if (result.assemblyPath) {
+    localFiles.push(result.assemblyPath);
+    const prevAssembly = reel.assemblyVideoUrl;
+    reel.assemblyVideoUrl = await uploadVideo(
+      await readFile(result.assemblyPath),
+      "reels",
+      `${reelKey}_assembly.mp4`
+    );
+    if (prevAssembly && prevAssembly !== reel.assemblyVideoUrl) {
+      await deleteFromS3(prevAssembly).catch(() => {});
+    }
+  }
+
+  let bodyPath = result.videoPath;
   if (hasEditEffects(reel.editEffects)) {
     const fxPath = join(rootDir, "preview_fx.mp4");
     await applyEditEffects(result.videoPath, fxPath, reel.editEffects);
     localFiles.push(result.videoPath, fxPath);
-    result.videoPath = fxPath;
+    bodyPath = fxPath;
   }
 
-  const outroResult = await appendBrandedOutro(result.videoPath, reel, tts);
+  const prevBody = reel.bodyVideoUrl;
+  reel.bodyVideoUrl = await uploadVideo(await readFile(bodyPath), "reels", `${reelKey}_body.mp4`);
+  if (prevBody && prevBody !== reel.bodyVideoUrl) {
+    await deleteFromS3(prevBody).catch(() => {});
+  }
+
+  const outroResult = await appendBrandedOutro(bodyPath, reel, tts);
+  let finalVideoPath = bodyPath;
   if (outroResult) {
-    localFiles.push(result.videoPath, outroResult.videoPath);
-    result.videoPath = outroResult.videoPath;
+    localFiles.push(outroResult.videoPath);
+    if (outroResult.outroAudioGenerated) {
+      localFiles.push(outroResult.outroAudioPath);
+      const prevOutro = reel.outroAudioUrl;
+      reel.outroAudioUrl = await uploadAudio(
+        await readFile(outroResult.outroAudioPath),
+        `${reelKey}_outro.mp3`
+      );
+      if (prevOutro && prevOutro !== reel.outroAudioUrl) {
+        await deleteFromS3(prevOutro).catch(() => {});
+      }
+    }
+    finalVideoPath = outroResult.videoPath;
     if (outroResult.subtitle) {
       await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
     }
@@ -322,9 +354,9 @@ async function buildDraftPreview(
 
   const outputPath = join(rootDir, "preview.mp4");
   const subtitlesPath = join(rootDir, "preview.ass");
-  await writeFile(outputPath, await readFile(result.videoPath));
+  await writeFile(outputPath, await readFile(finalVideoPath));
   await writeFile(subtitlesPath, await readFile(result.assPath));
-  localFiles.push(result.videoPath, result.assPath);
+  localFiles.push(finalVideoPath, result.assPath);
 
   result.scenes.forEach((t, i) => {
     reel.scenes[i].startTime = t.startTime;
@@ -416,14 +448,32 @@ export async function createSceneEditDraft(
 
 export async function createReelEditDraft(
   reelId: string,
-  mode: "render_only" | "assets"
+  mode: "render_only" | "assets" | "outro_only" | "composite_only"
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
-  // Gameplay has no local image draft — queue produce (re-TTS + composite).
-  // regenerateReel asserts ffmpeg once.
-  if (reel.strategy === "gameplay_overlay") {
+  // Cheap intents always go through the produce queue.
+  if (mode === "outro_only" || mode === "composite_only") {
     const { regenerateReel } = await import("./reel-edit.service");
     return regenerateReel(reelId, mode);
+  }
+  // Gameplay has no local image draft — queue produce (reuse cached TTS when present).
+  if (reel.strategy === "gameplay_overlay") {
+    const { regenerateReel } = await import("./reel-edit.service");
+    // Visual-only / caption re-renders with a full narration cache → composite_only.
+    if (
+      mode === "render_only" &&
+      reel.titleAudioUrl &&
+      reel.scenes.length > 0 &&
+      reel.scenes.every((s) => Boolean(s.audioUrl))
+    ) {
+      return regenerateReel(reelId, "composite_only");
+    }
+    return regenerateReel(reelId, mode);
+  }
+  // Horror/image: caption/FX re-render from assembly cache skips Ken Burns.
+  if (mode === "render_only" && reel.assemblyVideoUrl) {
+    const { regenerateReel } = await import("./reel-edit.service");
+    return regenerateReel(reelId, "composite_only");
   }
   assertFfmpegReady("Re-render");
   assertImageDraftEditable(reel);
@@ -525,7 +575,7 @@ export async function saveEditDraft(reelId: string): Promise<IReel> {
 
 /** Persist caption style, re-render locally, upload to S3, and delete the
  *  previous output video — no intermediate editDraft for the client to save.
- *  Gameplay reels skip the image draft path and enqueue a produce re-render. */
+ *  Uses assembly/narration caches when present (composite_only / gameplay). */
 export async function applyCaptionsAndRender(
   reelId: string,
   patch: ICaptionStyle
@@ -536,12 +586,20 @@ export async function applyCaptionsAndRender(
 
   reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
   reel.markModified("captionStyle");
+  // Captions are burned into body; assembly stays reusable.
+  reel.bodyVideoUrl = undefined;
+  await reel.save();
 
+  const { regenerateReel } = await import("./reel-edit.service");
   if (reel.strategy === "gameplay_overlay") {
-    await reel.save();
-    // regenerateReel asserts ffmpeg once.
-    const { regenerateReel } = await import("./reel-edit.service");
-    return regenerateReel(reelId, "render_only");
+    const cacheReady =
+      Boolean(reel.titleAudioUrl) &&
+      reel.scenes.length > 0 &&
+      reel.scenes.every((s) => Boolean(s.audioUrl));
+    return regenerateReel(reelId, cacheReady ? "composite_only" : "render_only");
+  }
+  if (reel.assemblyVideoUrl) {
+    return regenerateReel(reelId, "composite_only");
   }
 
   assertFfmpegReady("Apply captions");

@@ -49,6 +49,33 @@ async function loadReel(reelId: string): Promise<IReel> {
   return reel;
 }
 
+/** Clear cached render artifacts that are invalidated by body/composite changes. */
+async function clearBodyVideoCache(reelId: string): Promise<void> {
+  await Reel.updateOne({ _id: reelId }, { $unset: { bodyVideoUrl: "" } });
+}
+
+/** Clear pre-caption assembly (scene/stills/audio/motion changes). */
+async function clearAssemblyCache(reelId: string): Promise<void> {
+  await Reel.updateOne({ _id: reelId }, { $unset: { assemblyVideoUrl: "", bodyVideoUrl: "" } });
+}
+
+/** Clear all gameplay narration + outro caches (voice change / full assets regen). */
+async function clearNarrationCaches(reelId: string): Promise<void> {
+  await Reel.updateOne(
+    { _id: reelId },
+    {
+      $unset: {
+        titleAudioUrl: "",
+        partOutroAudioUrl: "",
+        outroAudioUrl: "",
+        bodyVideoUrl: "",
+        assemblyVideoUrl: "",
+        "scenes.$[].audioUrl": "",
+      },
+    }
+  );
+}
+
 /** Per-scene motion type for a reel's motion mode (mirrors reel.service). */
 function motionTypeFor(mode: ReelMotionMode, i: number, total: number): ISceneMotion["type"] {
   switch (mode) {
@@ -101,16 +128,24 @@ export async function updateScene(
   assertEditable(reel);
   const scene = reel.scenes[index];
   if (!scene) throw new Error(`Scene ${index} not found`);
+  const narrationChanged =
+    patch.narration !== undefined && patch.narration !== scene.narration;
   if (patch.narration !== undefined) scene.narration = patch.narration;
   if (patch.visualPrompt !== undefined) scene.visualPrompt = patch.visualPrompt;
   if (patch.motion) scene.motion = { ...scene.motion, ...patch.motion };
+  if (narrationChanged) {
+    scene.audioUrl = undefined;
+  }
   reel.markModified("scenes");
   if (reel.strategy === "gameplay_overlay") {
     syncRedditBodyFromScenes(reel);
     reel.markModified("redditStory");
   }
   await reel.save();
-  return reel;
+  if (narrationChanged || patch.visualPrompt !== undefined || patch.motion) {
+    await clearAssemblyCache(reelId);
+  }
+  return loadReel(reelId);
 }
 
 /** Edit Reddit title-card fields (and sync title/hook when title changes). */
@@ -132,6 +167,8 @@ export async function updateRedditCard(
     throw new Error("No Reddit story on this reel — plan it first");
   }
   const story = reel.redditStory;
+  const titleChanged =
+    patch.title !== undefined && patch.title.trim() !== story.title;
   if (patch.title !== undefined) {
     const title = patch.title.trim();
     if (!title) throw new Error("Title cannot be empty");
@@ -160,7 +197,12 @@ export async function updateRedditCard(
   }
   reel.markModified("redditStory");
   await reel.save();
-  return reel;
+  // Card is burned into the body video; title audio only invalidates when spoken.
+  // Gameplay has no assemblyVideoUrl — clearing body is enough for composite rebuild.
+  const unset: Record<string, ""> = { bodyVideoUrl: "" };
+  if (titleChanged) unset.titleAudioUrl = "";
+  await Reel.updateOne({ _id: reelId }, { $unset: unset });
+  return loadReel(reelId);
 }
 
 /** Clear the chosen asset(s) for one scene and queue a produce run — only that
@@ -215,7 +257,8 @@ export async function addScene(
     reel.markModified("redditStory");
   }
   await reel.save();
-  return reel;
+  await clearAssemblyCache(reelId);
+  return loadReel(reelId);
 }
 
 export async function removeScene(reelId: string, index: number): Promise<IReel> {
@@ -230,7 +273,8 @@ export async function removeScene(reelId: string, index: number): Promise<IReel>
     reel.markModified("redditStory");
   }
   await reel.save();
-  return reel;
+  await clearAssemblyCache(reelId);
+  return loadReel(reelId);
 }
 
 export async function reorderScenes(reelId: string, order: number[]): Promise<IReel> {
@@ -247,7 +291,8 @@ export async function reorderScenes(reelId: string, order: number[]): Promise<IR
     reel.markModified("redditStory");
   }
   await reel.save();
-  return reel;
+  await clearAssemblyCache(reelId);
+  return loadReel(reelId);
 }
 
 // ---- Reel-level settings ----
@@ -279,6 +324,9 @@ export async function updateReelSettings(
   if (patch.horrorAudioKey !== undefined) reel.horrorAudioKey = patch.horrorAudioKey;
   if (patch.horrorReferenceId !== undefined) reel.horrorReferenceId = patch.horrorReferenceId;
   if (patch.gameplayKey !== undefined) reel.gameplayKey = patch.gameplayKey || undefined;
+  const prevOutroChannel = reel.outroChannelId;
+  const prevSpokenLine = reel.outro?.spokenLine;
+  const prevOutroChannelName = reel.outro?.channelName;
   if (patch.outroChannelId !== undefined) reel.outroChannelId = patch.outroChannelId || undefined;
   if (patch.outro !== undefined) {
     reel.outro = patch.outro;
@@ -308,31 +356,55 @@ export async function updateReelSettings(
   const clearsAudio =
     patch.voice !== undefined ||
     (patch.audioPost?.voiceProfile !== undefined && patch.audioPost.voiceProfile !== prevVoiceProfile);
+  const clearsOutroAudio =
+    (patch.outroChannelId !== undefined && patch.outroChannelId !== prevOutroChannel) ||
+    (patch.outro !== undefined &&
+      (patch.outro.spokenLine !== prevSpokenLine ||
+        patch.outro.channelName !== prevOutroChannelName));
+  const clearsAssembly =
+    patch.motionMode !== undefined || clearsImages || clearsAudio;
+  const clearsBody =
+    patch.gameplayKey !== undefined || patch.editEffects !== undefined || clearsAssembly;
+
   const unset: Record<string, ""> = {};
   if (clearsImages) unset["scenes.$[].assetUrl"] = "";
-  if (clearsAudio) unset["scenes.$[].audioUrl"] = "";
+  if (clearsAudio) {
+    unset["scenes.$[].audioUrl"] = "";
+    unset.titleAudioUrl = "";
+    unset.partOutroAudioUrl = "";
+    unset.outroAudioUrl = "";
+  } else if (clearsOutroAudio) {
+    unset.outroAudioUrl = "";
+  }
+  if (clearsAssembly) unset.assemblyVideoUrl = "";
+  if (clearsBody) unset.bodyVideoUrl = "";
   if (Object.keys(unset).length) await Reel.updateOne({ _id: reelId }, { $unset: unset });
 
   return loadReel(reelId);
 }
 
 /** Manual (non-AI) caption look edit — merges over the current style. Applied on
- *  the next render (render-only re-burn, free for parallax/ken_burns). */
+ *  the next render (re-burn from assembly when present — no Ken Burns). */
 export async function updateCaptions(reelId: string, patch: ICaptionStyle): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
   reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
   reel.markModified("captionStyle");
   await reel.save();
-  return reel;
+  // Captions are burned into bodyVideoUrl; assembly (pre-caption) stays valid.
+  await clearBodyVideoCache(reelId);
+  return loadReel(reelId);
 }
 
 // ---- Regeneration control ----
 
-/** Queue a produce run. `render_only` reuses every asset for image reels (free
- *  ffmpeg pass); gameplay_overlay always re-runs TTS. `assets` clears all
- *  stills+narration so the next produce regenerates them. */
-export async function regenerateReel(reelId: string, mode: "render_only" | "assets"): Promise<IReel> {
+/** Queue a produce run. `render_only` reuses cached assets. `composite_only`
+ *  rebuilds from assembly/narration caches with no TTS. `outro_only` appends a
+ *  new branded outro onto bodyVideoUrl. `assets` clears stills+narration. */
+export async function regenerateReel(
+  reelId: string,
+  mode: "render_only" | "assets" | "outro_only" | "composite_only"
+): Promise<IReel> {
   assertFfmpegReady("Regenerate");
   const reel = await loadReel(reelId);
   assertEditable(reel);
@@ -340,12 +412,15 @@ export async function regenerateReel(reelId: string, mode: "render_only" | "asse
   // Claim the lock first so a concurrent tab can't also enqueue.
   await markQueued(reelId);
   if (mode === "assets") {
+    await clearNarrationCaches(reelId);
     await Reel.updateOne(
       { _id: reelId },
       { $unset: { "scenes.$[].assetUrl": "", "scenes.$[].audioUrl": "" } }
     );
   }
-  await enqueueReelProduce(reelId);
+  const produceMode =
+    mode === "outro_only" ? "outro_only" : mode === "composite_only" ? "composite_only" : "full";
+  await enqueueReelProduce(reelId, { produceMode });
   return loadReel(reelId);
 }
 

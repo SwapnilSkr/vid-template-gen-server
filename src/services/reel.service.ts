@@ -17,6 +17,7 @@ import {
   renderGameplayReel,
   pickGameplay,
   toSentences,
+  getPartOutroText,
   DEFAULT_BOUNCE_CAPTION_STYLE,
 } from "./reel-gameplay.service";
 import {
@@ -28,7 +29,7 @@ import {
   type StoryPartDraft,
 } from "./story.service";
 import { generateImage, generateNarration } from "./openrouter-media.service";
-import { renderImageKenBurns, applyEditEffects, hasEditEffects, type RenderScene } from "./reel-render.service";
+import { renderImageKenBurns, applyEditEffects, hasEditEffects, finishFromAssembly, type RenderScene } from "./reel-render.service";
 import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
 import { appendBrandedOutro } from "./reel-outro.service";
 import { assertFfmpegReady, isCaptionBurnError } from "./ffmpeg-capability.service";
@@ -603,16 +604,343 @@ export async function processReelPlan(reelId: string): Promise<void> {
 /** Produce stage: images → narration → render → upload, reusing any assets the
  *  reel already has. Enqueued when a reviewed plan is approved, or to re-render
  *  after edits (surgical regen = clear the changed scene's asset first). */
-export async function processReelProduce(reelId: string): Promise<void> {
+export async function processReelProduce(
+  reelId: string,
+  produceMode: "full" | "outro_only" | "composite_only" = "full"
+): Promise<void> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   const recipe = getRecipe(reel.niche);
+
+  if (produceMode === "outro_only") {
+    await processOutroOnlyReel(reel, recipe);
+    return;
+  }
+
+  if (produceMode === "composite_only") {
+    if (recipe.strategy === "gameplay_overlay") {
+      await processGameplayReel(reel, recipe, { requireCachedNarration: true });
+      return;
+    }
+    // Horror / image: finish from assemblyVideoUrl when present.
+    await processImageCompositeOnly(reel, recipe);
+    return;
+  }
+
   if (recipe.strategy === "gameplay_overlay") return processGameplayReel(reel, recipe);
 
   const localFiles: string[] = [];
   const measuredCosts: MeasuredCostInput[] = [];
   try {
     await produceImageReel(reel, recipe, measuredCosts, localFiles);
+  } catch (error: unknown) {
+    await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
+    await failProduce(reelId, error);
+    throw error;
+  }
+}
+
+/** Swap a cached media URL on the reel, deleting the superseded S3 object. */
+async function replaceCachedMediaUrl(
+  reel: IReel,
+  field: "bodyVideoUrl" | "assemblyVideoUrl" | "titleAudioUrl" | "partOutroAudioUrl" | "outroAudioUrl",
+  nextUrl: string | undefined
+): Promise<void> {
+  const prev = reel[field];
+  if (nextUrl) reel[field] = nextUrl;
+  else delete reel[field];
+  if (prev && prev !== nextUrl) {
+    await deleteFromS3(prev).catch(() => {});
+  }
+}
+
+/** Persist newly generated outro narration; no-op when the clip reused cache. */
+async function persistOutroAudio(
+  reel: IReel,
+  outroResult:
+    | {
+        outroAudioPath: string;
+        outroAudioGenerated: boolean;
+      }
+    | undefined,
+  localFiles: string[]
+): Promise<void> {
+  if (!outroResult) return;
+  if (outroResult.outroAudioGenerated) {
+    localFiles.push(outroResult.outroAudioPath);
+    const buf = await readFile(outroResult.outroAudioPath);
+    const url = await uploadAudio(buf, `${reel._id}_outro.mp3`);
+    await replaceCachedMediaUrl(reel, "outroAudioUrl", url);
+  }
+}
+
+/** Upload the pre-outro body so later outro-only jobs can skip a full rebuild. */
+async function persistBodyVideo(
+  reel: IReel,
+  bodyPath: string,
+  localFiles: string[]
+): Promise<void> {
+  const buf = await readFile(bodyPath);
+  const url = await uploadVideo(buf, "reels", `${reel._id}_body.mp4`);
+  await replaceCachedMediaUrl(reel, "bodyVideoUrl", url);
+  void localFiles;
+}
+
+/** Upload pre-caption assembly so caption/FX edits skip Ken Burns re-assembly. */
+async function persistAssemblyVideo(
+  reel: IReel,
+  assemblyPath: string,
+  localFiles: string[]
+): Promise<void> {
+  localFiles.push(assemblyPath);
+  const buf = await readFile(assemblyPath);
+  const url = await uploadVideo(buf, "reels", `${reel._id}_assembly.mp4`);
+  await replaceCachedMediaUrl(reel, "assemblyVideoUrl", url);
+}
+
+/** Caption/FX composite from cached assemblyVideoUrl (horror/image) — no Ken Burns. */
+async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Promise<void> {
+  const reelId = reel._id.toString();
+  if (!reel.assemblyVideoUrl || reel.scenes.some((s) => s.startTime === undefined)) {
+    console.warn(
+      `⚠️  Composite-only requested for ${reelId} but assembly cache is incomplete — falling back to full produce`
+    );
+    const localFiles: string[] = [];
+    const measuredCosts: MeasuredCostInput[] = [];
+    try {
+      await produceImageReel(reel, recipe, measuredCosts, localFiles);
+    } catch (error: unknown) {
+      await cleanupFiles(localFiles);
+      await cleanupRenderScratch(reelId);
+      await failProduce(reelId, error);
+      throw error;
+    }
+    return;
+  }
+
+  const localFiles: string[] = [];
+  const measuredCosts: MeasuredCostInput[] = [];
+  const models = resolveModels(reel.tier as Tier);
+  try {
+    assertFfmpegReady("Composite-only produce", { fresh: true });
+    await ensureDir(config.processingPath);
+    await updateStatus(reelId, "rendering", 45);
+
+    const assemblyPath = await downloadGeneratedAsset(
+      reel.assemblyVideoUrl,
+      `${reelId}_assembly_reused.mp4`
+    );
+    localFiles.push(assemblyPath);
+
+    let result = await finishFromAssembly(
+      reelId,
+      assemblyPath,
+      reel.scenes.map((s) => ({
+        narration: s.narration,
+        startTime: s.startTime ?? 0,
+        duration: s.duration || 1,
+      })),
+      {
+        horrorEffects: isHorrorNiche(reel.niche),
+        comicEffects: reel.niche === "horror_comic",
+        horrorAudioKey: reel.horrorAudioKey,
+        captionStyle: reel.captionStyle,
+      }
+    );
+    localFiles.push(result.videoPath, result.assPath);
+
+    if (hasEditEffects(reel.editEffects)) {
+      const fxPath = join(config.processingPath, `${reelId}_fx.mp4`);
+      await applyEditEffects(result.videoPath, fxPath, reel.editEffects);
+      localFiles.push(fxPath);
+      result = { ...result, videoPath: fxPath };
+    }
+
+    await persistBodyVideo(reel, result.videoPath, localFiles);
+
+    const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
+    const hadPriorOutput = Boolean(reel.outputUrl);
+    const outroResult = await appendBrandedOutro(result.videoPath, reel, tts, (usage) => {
+      measuredCosts.push({
+        label: "Outro narration",
+        model: `${tts.model}/${tts.voice}`,
+        costUsd: usage.costUsd,
+        source: usage.costUsd !== undefined ? "actual" : "estimated",
+      });
+    });
+    if (outroResult) {
+      localFiles.push(outroResult.videoPath);
+      result = {
+        ...result,
+        videoPath: outroResult.videoPath,
+        totalDuration: result.totalDuration + outroResult.durationAdded,
+      };
+      await persistOutroAudio(reel, outroResult, localFiles);
+      if (outroResult.subtitle) {
+        await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
+      }
+    }
+
+    await updateStatus(reelId, "uploading", 90);
+    reel.captionsBurned = true;
+    reel.captionBurnError = undefined;
+    const prevOutput = reel.outputUrl;
+    reel.outputUrl = await uploadVideo(await readFile(result.videoPath), "reels", `${reelId}.mp4`);
+    if (prevOutput && prevOutput !== reel.outputUrl) {
+      await deleteFromS3(prevOutput).catch(() => {});
+    }
+    reel.subtitlesUrl = await uploadSubtitles(await readFile(result.assPath, "utf-8"), reelId);
+
+    const runBreakdown = await buildReelCostBreakdown(reel, {
+      llmModel: models.llm,
+      tts,
+      measuredCosts,
+    });
+    reel.costBreakdown = hadPriorOutput
+      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Composite re-render")
+      : runBreakdown;
+    reel.costUsd = reel.costBreakdown.totalUsd;
+    reel.status = "completed";
+    reel.progress = 100;
+    reel.error = undefined;
+    await reel.save();
+
+    await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
+    console.log(`🎉 Composite-only re-render complete: ${reel._id} (assembly reused)`);
+  } catch (error: unknown) {
+    await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
+    await failProduce(reelId, error);
+    throw error;
+  }
+}
+
+/** Outro-only produce: concat a new branded outro onto the cached body video. */
+async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<void> {
+  const reelId = reel._id.toString();
+  if (!reel.bodyVideoUrl) {
+    console.warn(
+      `⚠️  Outro-only requested for ${reelId} but bodyVideoUrl is missing — falling back to full produce`
+    );
+    if (recipe.strategy === "gameplay_overlay") return processGameplayReel(reel, recipe);
+    const localFiles: string[] = [];
+    const measuredCosts: MeasuredCostInput[] = [];
+    try {
+      await produceImageReel(reel, recipe, measuredCosts, localFiles);
+    } catch (error: unknown) {
+      await cleanupFiles(localFiles);
+      await cleanupRenderScratch(reelId);
+      await failProduce(reelId, error);
+      throw error;
+    }
+    return;
+  }
+
+  const localFiles: string[] = [];
+  const measuredCosts: MeasuredCostInput[] = [];
+  const models = resolveModels(reel.tier as Tier);
+  try {
+    assertFfmpegReady("Outro-only produce", { fresh: true });
+    await ensureDir(config.processingPath);
+    await updateStatus(reelId, "rendering", 50);
+
+    const bodyPath = await downloadGeneratedAsset(reel.bodyVideoUrl, `${reelId}_body_reused.mp4`);
+    localFiles.push(bodyPath);
+
+    const tts =
+      recipe.strategy === "gameplay_overlay"
+        ? resolveStoryMatchedTts(
+            models.tts,
+            recipe.voice ?? {},
+            reel.voiceOverride,
+            {
+              title: reel.redditStory?.title ?? reel.title ?? "",
+              body: reel.scenes.map((s) => s.narration).join(" ") || reel.redditStory?.body || "",
+            }
+          )
+        : resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
+
+    let gameplayPath: string | undefined;
+    if (recipe.strategy === "gameplay_overlay") {
+      const picked = await pickGameplay(reel.gameplayKey);
+      gameplayPath = picked.path;
+      reel.gameplayKey = picked.key;
+      localFiles.push(gameplayPath);
+    }
+
+    const hadPriorOutput = Boolean(reel.outputUrl);
+    const outroResult = await appendBrandedOutro(
+      bodyPath,
+      reel,
+      tts,
+      (usage) => {
+        measuredCosts.push({
+          label: "Outro narration",
+          model: `${tts.model}/${tts.voice}`,
+          costUsd: usage.costUsd,
+          source: usage.costUsd !== undefined ? "actual" : "estimated",
+        });
+      },
+      { backgroundVideo: gameplayPath }
+    );
+
+    let finalPath = bodyPath;
+    let assPath: string | undefined;
+    if (outroResult) {
+      localFiles.push(outroResult.videoPath);
+      finalPath = outroResult.videoPath;
+      await persistOutroAudio(reel, outroResult, localFiles);
+      if (outroResult.subtitle && reel.subtitlesUrl) {
+        // Best-effort: rebuild captions file only when we already have one.
+        try {
+          const existing = await fetch(reel.subtitlesUrl);
+          if (existing.ok) {
+            assPath = join(config.processingPath, `${reelId}_outro_only.ass`);
+            await writeFile(assPath, Buffer.from(await existing.arrayBuffer()));
+            await appendBouncingCaptionCues(assPath, [outroResult.subtitle]);
+            localFiles.push(assPath);
+          }
+        } catch {
+          /* keep prior subtitles */
+        }
+      }
+    }
+
+    await updateStatus(reelId, "uploading", 90);
+    const videoBuffer = await readFile(finalPath);
+    const prevOutput = reel.outputUrl;
+    reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
+    if (prevOutput && prevOutput !== reel.outputUrl) {
+      await deleteFromS3(prevOutput).catch(() => {});
+    }
+    if (assPath) {
+      const assContent = await readFile(assPath, "utf-8");
+      const prevSubs = reel.subtitlesUrl;
+      reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
+      if (prevSubs && prevSubs !== reel.subtitlesUrl) {
+        await deleteFromS3(prevSubs).catch(() => {});
+      }
+    }
+
+    const runBreakdown = await buildReelCostBreakdown(reel, {
+      llmModel: models.llm,
+      tts,
+      measuredCosts,
+    });
+    reel.costBreakdown = hadPriorOutput
+      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Outro re-render")
+      : runBreakdown;
+    reel.costUsd = reel.costBreakdown.totalUsd;
+    reel.status = "completed";
+    reel.progress = 100;
+    reel.error = undefined;
+    await reel.save();
+
+    await cleanupFiles(localFiles);
+    await cleanupRenderScratch(reelId);
+    console.log(`🎉 Outro-only re-render complete: ${reel._id}`);
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
     await cleanupRenderScratch(reelId);
@@ -986,6 +1314,10 @@ async function produceImageReel(
             captionStyle: reel.captionStyle,
           }
         );
+    if (result.assemblyPath) {
+      await persistAssemblyVideo(reel, result.assemblyPath, localFiles);
+    }
+
     // Co-creatable cinematic edit FX (rain/grain/vignette/letterbox) — a final
     // pass over the reel BODY, before the branded outro so the outro stays clean.
     // Render-only: a caption/preset re-render re-applies these for free.
@@ -995,6 +1327,9 @@ async function produceImageReel(
       localFiles.push(fxPath);
       result.videoPath = fxPath;
     }
+
+    // Cache body (pre-outro) so Studio outro edits can skip a full rebuild.
+    await persistBodyVideo(reel, result.videoPath, localFiles);
 
     const outroResult = await appendBrandedOutro(result.videoPath, reel, tts, (usage) => {
       measuredCosts.push({
@@ -1008,6 +1343,7 @@ async function produceImageReel(
       localFiles.push(outroResult.videoPath);
       result.videoPath = outroResult.videoPath;
       result.totalDuration += outroResult.durationAdded;
+      await persistOutroAudio(reel, outroResult, localFiles);
       if (outroResult.subtitle) {
         await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
       }
@@ -1075,13 +1411,17 @@ async function produceImageReel(
 }
 
 /** Reddit / AITA pipeline: planned story → narration → gameplay overlay → upload. */
-async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void> {
+async function processGameplayReel(
+  reel: IReel,
+  recipe: NicheRecipe,
+  options: { requireCachedNarration?: boolean } = {}
+): Promise<void> {
   const reelId = reel._id.toString();
   const localFiles: string[] = [];
   const models = resolveModels(reel.tier as Tier);
 
   try {
-    // Gate before TTS — gameplay re-narrates on every produce.
+    // Gate before any OpenRouter spend — missing ffmpeg must not burn TTS credits.
     assertFfmpegReady("Gameplay produce", { fresh: true });
 
     await ensureDir(config.processingPath);
@@ -1113,6 +1453,40 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     if (!reel.captionStyle) reel.captionStyle = DEFAULT_BOUNCE_CAPTION_STYLE;
     await reel.save();
 
+    // Download cached paced narration segments (title / sentences / part-outro).
+    const partOutroText = getPartOutroText(story);
+    const cachedSegmentPaths: (string | undefined)[] = [];
+    if (reel.titleAudioUrl) {
+      const titlePath = await downloadGeneratedAsset(reel.titleAudioUrl, `${reelId}_title_reused.mp3`);
+      cachedSegmentPaths[0] = titlePath;
+      localFiles.push(titlePath);
+    }
+    for (let i = 0; i < bodySentences.length; i++) {
+      const url = reel.scenes[i]?.audioUrl;
+      if (!url) continue;
+      const path = await downloadGeneratedAsset(url, `${reelId}_body_${i}_reused.mp3`);
+      cachedSegmentPaths[i + 1] = path;
+      localFiles.push(path);
+    }
+    if (partOutroText && reel.partOutroAudioUrl) {
+      const path = await downloadGeneratedAsset(
+        reel.partOutroAudioUrl,
+        `${reelId}_part_outro_reused.mp3`
+      );
+      cachedSegmentPaths[1 + bodySentences.length] = path;
+      localFiles.push(path);
+    }
+
+    if (options.requireCachedNarration) {
+      const need = 1 + bodySentences.length + (partOutroText ? 1 : 0);
+      const have = cachedSegmentPaths.filter(Boolean).length;
+      if (have < need) {
+        throw new Error(
+          `Composite-only requires cached narration (${have}/${need} segments). Run a normal re-render once to populate the cache.`
+        );
+      }
+    }
+
     await updateStatus(reelId, "rendering", 45);
     const gameplayMeasuredCosts: MeasuredCostInput[] = [];
     const hadPriorOutput = Boolean(reel.outputUrl);
@@ -1122,27 +1496,53 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
       ...tts,
       bodySentences,
       captionStyle: reel.captionStyle,
+      cachedSegmentPaths,
       onNarrationUsage: (usage) => {
         narrationCalls += 1;
         if (usage.costUsd !== undefined) narrationSpendUsd += usage.costUsd;
       },
     });
+
+    // Retain paced segments for upload + disk cleanup.
+    const segs = result.narrationSegments;
+    localFiles.push(segs.titlePath, ...segs.bodyPaths);
+    if (segs.partOutroPath) localFiles.push(segs.partOutroPath);
+
+    if (segs.titleGenerated) {
+      const url = await uploadAudio(await readFile(segs.titlePath), `${reelId}_title.mp3`);
+      await replaceCachedMediaUrl(reel, "titleAudioUrl", url);
+    }
+    for (let i = 0; i < segs.bodyPaths.length; i++) {
+      if (!segs.bodyGenerated[i] || !reel.scenes[i]) continue;
+      const prev = reel.scenes[i].audioUrl;
+      const url = await uploadAudio(await readFile(segs.bodyPaths[i]), `${reelId}_body_${i}.mp3`);
+      reel.scenes[i].audioUrl = url;
+      if (prev && prev !== url) await deleteFromS3(prev).catch(() => {});
+    }
+    if (segs.partOutroPath && segs.partOutroGenerated) {
+      const url = await uploadAudio(await readFile(segs.partOutroPath), `${reelId}_part_outro.mp3`);
+      await replaceCachedMediaUrl(reel, "partOutroAudioUrl", url);
+    } else if (!partOutroText && reel.partOutroAudioUrl) {
+      await replaceCachedMediaUrl(reel, "partOutroAudioUrl", undefined);
+    }
+    reel.markModified("scenes");
+
     if (narrationCalls > 0) {
       gameplayMeasuredCosts.push({
         label: "Narration",
         model: `${tts.model}/${tts.voice}`,
-        costUsd:
-          narrationSpendUsd > 0
-            ? narrationSpendUsd
-            : undefined,
+        costUsd: narrationSpendUsd > 0 ? narrationSpendUsd : undefined,
         source: narrationSpendUsd > 0 ? "actual" : "estimated",
       });
-      // If OpenRouter didn't return per-call cost, fall back to char estimate
-      // via buildReelCostBreakdown (hasMeasuredTts only when costUsd is set).
       if (!(narrationSpendUsd > 0)) {
         gameplayMeasuredCosts.pop();
       }
+    } else if (segs.generatedCount === 0) {
+      console.log(`♻️  Gameplay reel ${reelId}: reused all narration segments (0 TTS calls)`);
     }
+
+    await persistBodyVideo(reel, result.videoPath, localFiles);
+
     const outroResult = await appendBrandedOutro(
       result.videoPath,
       reel,
@@ -1161,6 +1561,7 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
       localFiles.push(outroResult.videoPath);
       result.videoPath = outroResult.videoPath;
       result.totalDuration += outroResult.durationAdded;
+      await persistOutroAudio(reel, outroResult, localFiles);
     }
     localFiles.push(result.videoPath, result.assPath);
     if (reel.scenes[0]) reel.scenes[0].duration = result.totalDuration;
@@ -1169,7 +1570,11 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     reel.captionsBurned = true;
     reel.captionBurnError = undefined;
     const videoBuffer = await readFile(result.videoPath);
+    const prevOutput = reel.outputUrl;
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
+    if (prevOutput && prevOutput !== reel.outputUrl) {
+      await deleteFromS3(prevOutput).catch(() => {});
+    }
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
     if (!reel.review) {
@@ -1204,7 +1609,9 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
 
     await cleanupFiles(localFiles);
     await cleanupRenderScratch(reelId);
-    console.log(`🎉 Reddit reel complete: ${reel._id} (${result.totalDuration.toFixed(1)}s)`);
+    console.log(
+      `🎉 Reddit reel complete: ${reel._id} (${result.totalDuration.toFixed(1)}s, TTS segments=${segs.generatedCount})`
+    );
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
     await cleanupRenderScratch(reelId);
@@ -1237,7 +1644,12 @@ export async function deleteReel(id: string): Promise<boolean> {
 
   const assetUrls = [
     reel.outputUrl,
+    reel.bodyVideoUrl,
+    reel.assemblyVideoUrl,
     reel.subtitlesUrl,
+    reel.titleAudioUrl,
+    reel.partOutroAudioUrl,
+    reel.outroAudioUrl,
     reel.review?.thumbnailUrl,
     ...reel.scenes.flatMap((s) => [s.assetUrl, s.audioUrl]),
     ...reel.voiceVariants.map((v) => v.videoUrl),
