@@ -11,6 +11,7 @@ import {
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce } from "../queue/queues";
 import { syncRedditBodyFromScenes } from "./reel.service";
+import { assertFfmpegReady } from "./ffmpeg-capability.service";
 
 // ============================================
 // Studio editing — human-in-the-loop scene/settings/caption edits + surgical
@@ -332,6 +333,7 @@ export async function updateCaptions(reelId: string, patch: ICaptionStyle): Prom
  *  ffmpeg pass); gameplay_overlay always re-runs TTS. `assets` clears all
  *  stills+narration so the next produce regenerates them. */
 export async function regenerateReel(reelId: string, mode: "render_only" | "assets"): Promise<IReel> {
+  assertFfmpegReady("Regenerate");
   const reel = await loadReel(reelId);
   assertEditable(reel);
   if (reel.scenes.length === 0) throw new Error("Nothing to regenerate — plan the reel first");
@@ -361,22 +363,20 @@ export async function resumeFailedReel(reelId: string): Promise<IReel> {
   if (reel.scenes.length === 0) {
     throw new Error("Nothing to resume — plan the reel first");
   }
-  const hasAnyAsset = reel.scenes.some((s) => s.assetUrl || s.audioUrl);
-  if (!hasAnyAsset) {
-    // Failed before any assets landed — full produce from scratch is correct.
-    await markQueued(reelId);
-    await enqueueReelProduce(reelId);
-    return loadReel(reelId);
+  const imageN = reel.scenes.filter((s) => s.assetUrl).length;
+  const audioN = reel.scenes.filter((s) => s.audioUrl).length;
+  if (imageN || audioN) {
+    console.log(
+      `♻️  Resuming failed reel ${reelId} — reusing ${imageN} image(s) / ${audioN} narration(s), re-running render only`
+    );
   }
-  console.log(
-    `♻️  Resuming failed reel ${reelId} — reusing ${reel.scenes.filter((s) => s.assetUrl).length} image(s) / ` +
-      `${reel.scenes.filter((s) => s.audioUrl).length} narration(s), re-running render only`
-  );
+  // Single ffmpeg gate via regenerateReel (also covers the no-assets path).
   return regenerateReel(reelId, "render_only");
 }
 
 /** Approve a reviewed plan → run the produce stage. */
 export async function approvePlan(reelId: string): Promise<IReel> {
+  assertFfmpegReady("Generate");
   const reel = await loadReel(reelId);
   if (reel.status !== "plan_review") {
     throw new Error(`Reel is not awaiting plan review (status: ${reel.status})`);

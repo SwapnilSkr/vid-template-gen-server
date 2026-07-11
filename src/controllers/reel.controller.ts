@@ -28,13 +28,11 @@ import {
   listArtStyles,
   listAllYouTubePublishChannels,
   updateScene,
-  regenerateScene,
   addScene,
   removeScene,
   reorderScenes,
   updateReelSettings,
   updateCaptions,
-  regenerateReel,
   resumeFailedReel,
   approvePlan,
   replanReel,
@@ -73,6 +71,7 @@ import type {
   TDraftAssetParams,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
+import { httpErrorFromUnknown } from "../services/ffmpeg-capability.service";
 import {
   createReelEditDraft,
   createSceneEditDraft,
@@ -193,8 +192,9 @@ export async function createReelController({ body, set }: CreateReelContext) {
       message: "Reel generation started! Check status for progress.",
     };
   } catch (error: unknown) {
-    set.status = 400;
-    return { success: false, error: getErrorMessage(error) };
+    const mapped = httpErrorFromUnknown(error);
+    set.status = mapped.status;
+    return mapped.body;
   }
 }
 
@@ -253,6 +253,8 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       costUsd: reel.costUsd,
       costBreakdown: reel.costBreakdown,
       error: reel.error,
+      captionsBurned: reel.captionsBurned,
+      captionBurnError: reel.captionBurnError,
       youtube: reel.youtube,
       gameplayKey: reel.gameplayKey,
       horrorAudioKey: reel.horrorAudioKey,
@@ -339,7 +341,11 @@ export async function listYouTubeChannelsController() {
 }
 
 /** Enqueue (or retry) a YouTube publish job for a completed reel. */
-export async function publishReelController({ params, body, set }: PublishReelContext) {
+export async function publishReelController({
+  params,
+  body,
+  set,
+}: PublishReelContext) {
   const reel = await getReel(params.id);
   if (!reel) {
     set.status = 404;
@@ -359,7 +365,10 @@ export async function publishReelController({ params, body, set }: PublishReelCo
     : undefined;
   if (body?.channelId && !channel) {
     set.status = 400;
-    return { success: false, error: `Unknown YouTube channel: ${body.channelId}` };
+    return {
+      success: false,
+      error: `Unknown YouTube channel: ${body.channelId}`,
+    };
   }
 
   reel.youtube = {
@@ -412,7 +421,11 @@ export async function downloadReelController({ params, set }: GetReelContext) {
 }
 
 /** Request 1-5 re-narrated voice variants of a completed gameplay reel. */
-export async function revoiceReelController({ params, body, set }: RevoiceReelContext) {
+export async function revoiceReelController({
+  params,
+  body,
+  set,
+}: RevoiceReelContext) {
   const reel = await getReel(params.id);
   if (!reel) {
     set.status = 404;
@@ -420,7 +433,11 @@ export async function revoiceReelController({ params, body, set }: RevoiceReelCo
   }
   try {
     const updated = await requestRevoice(params.id, body.variants);
-    return { success: true, data: updated.voiceVariants, message: "Revoice queued" };
+    return {
+      success: true,
+      data: updated.voiceVariants,
+      message: "Revoice queued",
+    };
   } catch (error: unknown) {
     set.status = 400;
     return { success: false, error: getErrorMessage(error) };
@@ -428,7 +445,10 @@ export async function revoiceReelController({ params, body, set }: RevoiceReelCo
 }
 
 /** Promote a ready voice variant to become the reel's primary output. */
-export async function promoteVoiceVariantController({ params, set }: PromoteVoiceVariantContext) {
+export async function promoteVoiceVariantController({
+  params,
+  set,
+}: PromoteVoiceVariantContext) {
   try {
     const reel = await promoteVoiceVariant(params.id, params.variantId);
     return {
@@ -442,9 +462,17 @@ export async function promoteVoiceVariantController({ params, set }: PromoteVoic
 }
 
 /** Use a specific frame of the rendered video as the thumbnail. */
-export async function useReelFrameAsThumbnailController({ params, body, set }: ThumbnailFrameContext) {
+export async function useReelFrameAsThumbnailController({
+  params,
+  body,
+  set,
+}: ThumbnailFrameContext) {
   try {
-    const review = await useReelFrameAsThumbnail(params.id, body.atSeconds, body.aspectRatio);
+    const review = await useReelFrameAsThumbnail(
+      params.id,
+      body.atSeconds,
+      body.aspectRatio,
+    );
     return { success: true, data: review };
   } catch (error: unknown) {
     set.status = 400;
@@ -453,9 +481,17 @@ export async function useReelFrameAsThumbnailController({ params, body, set }: T
 }
 
 /** Render a local, non-persisted thumbnail frame preview. */
-export async function previewReelFrameThumbnailController({ params, body, set }: ThumbnailFrameContext) {
+export async function previewReelFrameThumbnailController({
+  params,
+  body,
+  set,
+}: ThumbnailFrameContext) {
   try {
-    const imageDataUrl = await previewReelFrameThumbnail(params.id, body.atSeconds, body.aspectRatio);
+    const imageDataUrl = await previewReelFrameThumbnail(
+      params.id,
+      body.atSeconds,
+      body.aspectRatio,
+    );
     return { success: true, data: { imageDataUrl } };
   } catch (error: unknown) {
     set.status = 400;
@@ -469,9 +505,17 @@ interface ThumbnailSceneContext extends Context {
 }
 
 /** Use a generated scene still as the thumbnail. */
-export async function useReelSceneImageAsThumbnailController({ params, body, set }: ThumbnailSceneContext) {
+export async function useReelSceneImageAsThumbnailController({
+  params,
+  body,
+  set,
+}: ThumbnailSceneContext) {
   try {
-    const review = await useReelSceneImageAsThumbnail(params.id, body.sceneIndex, body.aspectRatio);
+    const review = await useReelSceneImageAsThumbnail(
+      params.id,
+      body.sceneIndex,
+      body.aspectRatio,
+    );
     return { success: true, data: review };
   } catch (error: unknown) {
     set.status = 400;
@@ -512,7 +556,11 @@ export async function listHorrorAudioController() {
 }
 
 /** List reference-art styles (registry ∪ S3 manifest), optionally by niche. */
-export async function listArtStylesController({ query }: { query: { niche?: string } }) {
+export async function listArtStylesController({
+  query,
+}: {
+  query: { niche?: string };
+}) {
   try {
     return { success: true, data: await listArtStyles(query.niche) };
   } catch (error: unknown) {
@@ -520,13 +568,23 @@ export async function listArtStylesController({ query }: { query: { niche?: stri
   }
 }
 
-export async function getReelDefaultsController({ query }: ReelDefaultsContext) {
-  return { success: true, data: getReelDefaults(query.niche, query.tier ?? "cheap") };
+export async function getReelDefaultsController({
+  query,
+}: ReelDefaultsContext) {
+  return {
+    success: true,
+    data: getReelDefaults(query.niche, query.tier ?? "cheap"),
+  };
 }
 
 /** Generate (or return cached) a short preview clip for a catalog voice. */
-export async function getVoiceSampleController({ query, set }: VoiceSampleContext) {
-  const option = TTS_VOICE_CATALOG.find((v) => v.model === query.model && v.voice === query.voice);
+export async function getVoiceSampleController({
+  query,
+  set,
+}: VoiceSampleContext) {
+  const option = TTS_VOICE_CATALOG.find(
+    (v) => v.model === query.model && v.voice === query.voice,
+  );
   if (!option) {
     set.status = 404;
     return { success: false, error: "Unknown voice — not in the catalog" };
@@ -587,68 +645,121 @@ interface DraftAssetContext extends Context {
   params: TDraftAssetParams;
 }
 
-/** Shared 400 wrapper for the edit endpoints (all just mutate + return reel). */
+/** Shared error wrapper for the edit endpoints (all just mutate + return reel). */
 async function runEdit(set: Context["set"], action: () => Promise<unknown>) {
   try {
     return { success: true, data: await action() };
   } catch (error: unknown) {
-    set.status = 400;
-    return { success: false, error: getErrorMessage(error) };
+    const mapped = httpErrorFromUnknown(error);
+    set.status = mapped.status;
+    return mapped.body;
   }
 }
 
 /** Edit one scene's narration / visual prompt / motion. */
-export async function updateSceneController({ params, body, set }: SceneEditContext) {
-  return runEdit(set, () => updateScene(params.id, parseInt(params.index, 10), body));
+export async function updateSceneController({
+  params,
+  body,
+  set,
+}: SceneEditContext) {
+  return runEdit(set, () =>
+    updateScene(params.id, parseInt(params.index, 10), body),
+  );
 }
 
 /** Regenerate a single scene's image and/or audio (surgical, reuses the rest). */
-export async function regenerateSceneController({ params, body, set }: SceneRegenContext) {
-  return runEdit(set, () => createSceneEditDraft(params.id, parseInt(params.index, 10), body.regenerate));
+export async function regenerateSceneController({
+  params,
+  body,
+  set,
+}: SceneRegenContext) {
+  return runEdit(set, () =>
+    createSceneEditDraft(
+      params.id,
+      parseInt(params.index, 10),
+      body.regenerate,
+    ),
+  );
 }
 
 /** Insert a new scene (optionally at a position). */
-export async function addSceneController({ params, body, set }: AddSceneContext) {
-  return runEdit(set, () => addScene(params.id, body.narration, body.visualPrompt, body.atIndex));
+export async function addSceneController({
+  params,
+  body,
+  set,
+}: AddSceneContext) {
+  return runEdit(set, () =>
+    addScene(params.id, body.narration, body.visualPrompt, body.atIndex),
+  );
 }
 
 /** Remove a scene by index. */
-export async function removeSceneController({ params, set }: SceneIndexContext) {
+export async function removeSceneController({
+  params,
+  set,
+}: SceneIndexContext) {
   return runEdit(set, () => removeScene(params.id, parseInt(params.index, 10)));
 }
 
 /** Reorder scenes by a permutation of current indices. */
-export async function reorderScenesController({ params, body, set }: ReorderScenesContext) {
+export async function reorderScenesController({
+  params,
+  body,
+  set,
+}: ReorderScenesContext) {
   return runEdit(set, () => reorderScenes(params.id, body.order));
 }
 
 /** Update reel-level creative settings (art/motion/image model/voice/audio). */
-export async function updateReelSettingsController({ params, body, set }: SettingsContext) {
+export async function updateReelSettingsController({
+  params,
+  body,
+  set,
+}: SettingsContext) {
   return runEdit(set, () => updateReelSettings(params.id, body));
 }
 
 /** Update the caption look (manual, non-AI). */
-export async function updateCaptionsController({ params, body, set }: CaptionsContext) {
+export async function updateCaptionsController({
+  params,
+  body,
+  set,
+}: CaptionsContext) {
   return runEdit(set, () => updateCaptions(params.id, body));
 }
 
 /** Update Reddit title-card fields (gameplay reels only). */
-export async function updateRedditCardController({ params, body, set }: RedditCardContext) {
+export async function updateRedditCardController({
+  params,
+  body,
+  set,
+}: RedditCardContext) {
   return runEdit(set, () => updateRedditCard(params.id, body));
 }
 
 /** Persist caption style, re-render, upload, and delete the superseded output. */
-export async function applyCaptionsController({ params, body, set }: CaptionsContext) {
+export async function applyCaptionsController({
+  params,
+  body,
+  set,
+}: CaptionsContext) {
   return runEdit(set, () => applyCaptionsAndRender(params.id, body));
 }
 
 /** Queue a produce run — render-only (reuse assets) or full asset regeneration. */
-export async function regenerateReelController({ params, body, set }: RegenerateReelContext) {
+export async function regenerateReelController({
+  params,
+  body,
+  set,
+}: RegenerateReelContext) {
   return runEdit(set, () => createReelEditDraft(params.id, body.mode));
 }
 
 /** Resume a failed produce job, reusing any S3 assets already paid for. */
-export async function resumeFailedReelController({ params, set }: GetReelContext) {
+export async function resumeFailedReelController({
+  params,
+  set,
+}: GetReelContext) {
   return runEdit(set, () => resumeFailedReel(params.id));
 }
 
@@ -658,25 +769,42 @@ export async function approvePlanController({ params, set }: GetReelContext) {
 }
 
 /** Discard the plan and re-plan (new story / reference / pasted script). */
-export async function replanReelController({ params, body, set }: ReplanContext) {
+export async function replanReelController({
+  params,
+  body,
+  set,
+}: ReplanContext) {
   return runEdit(set, () => replanReel(params.id, body));
 }
 
-export async function saveReelEditDraftController({ params, set }: GetReelContext) {
+export async function saveReelEditDraftController({
+  params,
+  set,
+}: GetReelContext) {
   return runEdit(set, () => saveEditDraft(params.id));
 }
 
-export async function discardReelEditDraftController({ params, set }: GetReelContext) {
+export async function discardReelEditDraftController({
+  params,
+  set,
+}: GetReelContext) {
   return runEdit(set, () => discardEditDraft(params.id));
 }
 
-export async function getReelDraftAssetController({ params, set }: DraftAssetContext) {
+export async function getReelDraftAssetController({
+  params,
+  set,
+}: DraftAssetContext) {
   try {
     const path = await getDraftAssetPath(params.draftId, params.filename);
-    if (params.filename.endsWith(".mp4")) set.headers["content-type"] = "video/mp4";
-    else if (params.filename.endsWith(".mp3")) set.headers["content-type"] = "audio/mpeg";
-    else if (params.filename.endsWith(".png")) set.headers["content-type"] = "image/png";
-    else if (params.filename.endsWith(".ass")) set.headers["content-type"] = "text/plain";
+    if (params.filename.endsWith(".mp4"))
+      set.headers["content-type"] = "video/mp4";
+    else if (params.filename.endsWith(".mp3"))
+      set.headers["content-type"] = "audio/mpeg";
+    else if (params.filename.endsWith(".png"))
+      set.headers["content-type"] = "image/png";
+    else if (params.filename.endsWith(".ass"))
+      set.headers["content-type"] = "text/plain";
     return Bun.file(path);
   } catch (error: unknown) {
     set.status = 404;
@@ -685,7 +813,11 @@ export async function getReelDraftAssetController({ params, set }: DraftAssetCon
 }
 
 /** List the style-preset bundles (optionally filtered by niche). */
-export async function listStylePresetsController({ query }: { query: { niche?: string } }) {
+export async function listStylePresetsController({
+  query,
+}: {
+  query: { niche?: string };
+}) {
   return { success: true, data: listStylePresets(query.niche) };
 }
 
@@ -728,7 +860,11 @@ interface CustomThumbnailContext extends Context {
 }
 
 /** Compose a thumbnail from a video frame + custom overlay text (manual variant). */
-export async function customFrameThumbnailController({ params, body, set }: CustomThumbnailContext) {
+export async function customFrameThumbnailController({
+  params,
+  body,
+  set,
+}: CustomThumbnailContext) {
   try {
     const review = await useReelFrameWithText(params.id, body);
     return { success: true, data: review };
@@ -739,7 +875,11 @@ export async function customFrameThumbnailController({ params, body, set }: Cust
 }
 
 /** Render a local, non-persisted thumbnail text-overlay preview. */
-export async function previewCustomFrameThumbnailController({ params, body, set }: CustomThumbnailContext) {
+export async function previewCustomFrameThumbnailController({
+  params,
+  body,
+  set,
+}: CustomThumbnailContext) {
   try {
     const imageDataUrl = await previewReelFrameWithText(params.id, body);
     return { success: true, data: { imageDataUrl } };
@@ -760,7 +900,11 @@ interface ThumbnailSourceContext extends Context {
 
 /** Render an aspect-corrected background source (frame / scene still / saved
  *  thumbnail) as a data URL for the client-side editor canvas. */
-export async function getThumbnailSourceController({ params, body, set }: ThumbnailSourceContext) {
+export async function getThumbnailSourceController({
+  params,
+  body,
+  set,
+}: ThumbnailSourceContext) {
   try {
     const imageDataUrl = await previewThumbnailSource(params.id, body);
     return { success: true, data: { imageDataUrl } };
@@ -796,7 +940,11 @@ interface StageThumbnailDraftContext extends Context {
 }
 
 /** Compose and stage a thumbnail locally (no S3 upload). */
-export async function stageThumbnailDraftController({ params, body, set }: StageThumbnailDraftContext) {
+export async function stageThumbnailDraftController({
+  params,
+  body,
+  set,
+}: StageThumbnailDraftContext) {
   try {
     const reel = await stageThumbnailDraft(params.id, body);
     return { success: true, data: reel };
@@ -807,7 +955,10 @@ export async function stageThumbnailDraftController({ params, body, set }: Stage
 }
 
 /** Upload the staged thumbnail draft to S3 and clean up the local files. */
-export async function saveThumbnailDraftController({ params, set }: GetReelContext) {
+export async function saveThumbnailDraftController({
+  params,
+  set,
+}: GetReelContext) {
   try {
     const reel = await saveThumbnailDraft(params.id);
     return { success: true, data: reel };
@@ -818,7 +969,10 @@ export async function saveThumbnailDraftController({ params, set }: GetReelConte
 }
 
 /** Discard the staged thumbnail draft (local files only). */
-export async function discardThumbnailDraftController({ params, set }: GetReelContext) {
+export async function discardThumbnailDraftController({
+  params,
+  set,
+}: GetReelContext) {
   try {
     const reel = await discardThumbnailDraft(params.id);
     return { success: true, data: reel };
@@ -829,9 +983,15 @@ export async function discardThumbnailDraftController({ params, set }: GetReelCo
 }
 
 /** Serve a locally staged thumbnail draft image. */
-export async function getThumbnailDraftAssetController({ params, set }: DraftAssetContext) {
+export async function getThumbnailDraftAssetController({
+  params,
+  set,
+}: DraftAssetContext) {
   try {
-    const path = await getThumbnailDraftAssetPath(params.draftId, params.filename);
+    const path = await getThumbnailDraftAssetPath(
+      params.draftId,
+      params.filename,
+    );
     set.headers["content-type"] = "image/png";
     return Bun.file(path);
   } catch (error: unknown) {

@@ -15,6 +15,7 @@ import { Reel, type ICaptionStyle, type IReel } from "../models";
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { deleteFromS3 } from "./s3.service";
 import { cleanupDirectory, cleanupFiles, cleanupRenderScratch, ensureDir } from "../utils";
+import { assertFfmpegReady } from "./ffmpeg-capability.service";
 
 const ACTIVE_STATUSES: IReel["status"][] = [
   "planning",
@@ -419,10 +420,12 @@ export async function createReelEditDraft(
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
   // Gameplay has no local image draft — queue produce (re-TTS + composite).
+  // regenerateReel asserts ffmpeg once.
   if (reel.strategy === "gameplay_overlay") {
     const { regenerateReel } = await import("./reel-edit.service");
     return regenerateReel(reelId, mode);
   }
+  assertFfmpegReady("Re-render");
   assertImageDraftEditable(reel);
   if (reel.scenes.length === 0) throw new Error("Nothing to regenerate — plan the reel first");
 
@@ -536,10 +539,12 @@ export async function applyCaptionsAndRender(
 
   if (reel.strategy === "gameplay_overlay") {
     await reel.save();
+    // regenerateReel asserts ffmpeg once.
     const { regenerateReel } = await import("./reel-edit.service");
     return regenerateReel(reelId, "render_only");
   }
 
+  assertFfmpegReady("Apply captions");
   await cleanupExistingDraft(reel, { strict: true });
   const draftId = randomUUID();
   const rootDir = join(config.processingPath, "edit-drafts", reelId, draftId);
