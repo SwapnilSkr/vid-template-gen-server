@@ -436,6 +436,10 @@ async function buildDraftPreview(
     if (outroResult.subtitle) {
       await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
     }
+  } else if (reel.skipBrandedOutro && reel.outroAudioUrl) {
+    const prevOutro = reel.outroAudioUrl;
+    reel.outroAudioUrl = undefined;
+    await deleteFromS3(prevOutro).catch(() => {});
   }
 
   const outputPath = join(rootDir, "preview.mp4");

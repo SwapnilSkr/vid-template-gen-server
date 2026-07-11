@@ -12,6 +12,7 @@ import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce } from "../queue/queues";
 import { syncRedditBodyFromScenes } from "./reel.service";
 import { assertFfmpegReady } from "./ffmpeg-capability.service";
+import { deleteFromS3 } from "./s3.service";
 
 // ============================================
 // Studio editing — human-in-the-loop scene/settings/caption edits + surgical
@@ -130,6 +131,9 @@ export async function updateScene(
   if (!scene) throw new Error(`Scene ${index} not found`);
   const narrationChanged =
     patch.narration !== undefined && patch.narration !== scene.narration;
+  const staleAudioUrl = narrationChanged ? scene.audioUrl : undefined;
+  const staleAssembly = reel.assemblyVideoUrl;
+  const staleBody = reel.bodyVideoUrl;
   if (patch.narration !== undefined) scene.narration = patch.narration;
   if (patch.visualPrompt !== undefined) scene.visualPrompt = patch.visualPrompt;
   if (patch.motion) scene.motion = { ...scene.motion, ...patch.motion };
@@ -144,6 +148,7 @@ export async function updateScene(
   await reel.save();
   if (narrationChanged || patch.visualPrompt !== undefined || patch.motion) {
     await clearAssemblyCache(reelId);
+    await deleteCachedMediaUrls([staleAudioUrl, staleAssembly, staleBody]);
   }
   return loadReel(reelId);
 }
@@ -264,8 +269,11 @@ export async function addScene(
 export async function removeScene(reelId: string, index: number): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
-  if (!reel.scenes[index]) throw new Error(`Scene ${index} not found`);
+  const scene = reel.scenes[index];
+  if (!scene) throw new Error(`Scene ${index} not found`);
   if (reel.scenes.length <= 1) throw new Error("A reel must keep at least one scene");
+
+  const orphaned = [scene.assetUrl, scene.audioUrl, reel.assemblyVideoUrl, reel.bodyVideoUrl];
   reel.scenes.splice(index, 1);
   reindex(reel);
   if (reel.strategy === "gameplay_overlay") {
@@ -274,6 +282,7 @@ export async function removeScene(reelId: string, index: number): Promise<IReel>
   }
   await reel.save();
   await clearAssemblyCache(reelId);
+  await deleteCachedMediaUrls(orphaned);
   return loadReel(reelId);
 }
 
@@ -297,6 +306,12 @@ export async function reorderScenes(reelId: string, order: number[]): Promise<IR
 
 // ---- Reel-level settings ----
 
+/** Delete superseded S3 objects; ignore failures so edits never block on GC. */
+async function deleteCachedMediaUrls(urls: (string | undefined)[]): Promise<void> {
+  const unique = [...new Set(urls.filter((url): url is string => Boolean(url)))];
+  await Promise.all(unique.map((url) => deleteFromS3(url).catch(() => {})));
+}
+
 export async function updateReelSettings(
   reelId: string,
   patch: {
@@ -309,6 +324,8 @@ export async function updateReelSettings(
     gameplayKey?: string;
     outroChannelId?: string;
     outro?: IReel["outro"];
+    skipPartOutro?: boolean;
+    skipBrandedOutro?: boolean;
     voice?: { model?: string; voice?: string; format?: "mp3" | "pcm" };
     audioPost?: IAudioPost;
     editEffects?: IEditEffects;
@@ -319,6 +336,11 @@ export async function updateReelSettings(
   const prevArt = reel.artStyleId;
   const prevModel = reel.imageModelOverride;
   const prevVoiceProfile = reel.audioPost?.voiceProfile;
+  const prevSkipPartOutro = Boolean(reel.skipPartOutro);
+  const prevSkipBrandedOutro = Boolean(reel.skipBrandedOutro);
+  const prevPartOutroAudioUrl = reel.partOutroAudioUrl;
+  const prevOutroAudioUrl = reel.outroAudioUrl;
+  const prevBodyVideoUrl = reel.bodyVideoUrl;
 
   if (patch.thumbnailSceneIndex !== undefined) {
     if (!reel.niche.startsWith("horror")) throw new Error("Scene cover selection is only available for horror reels");
@@ -341,6 +363,8 @@ export async function updateReelSettings(
     reel.outro = patch.outro;
     reel.markModified("outro");
   }
+  if (patch.skipPartOutro !== undefined) reel.skipPartOutro = patch.skipPartOutro;
+  if (patch.skipBrandedOutro !== undefined) reel.skipBrandedOutro = patch.skipBrandedOutro;
   if (patch.voice !== undefined) reel.voiceOverride = patch.voice;
   if (patch.audioPost !== undefined) reel.audioPost = patch.audioPost;
   // Edit FX are render-only — no assets to clear, just re-render to apply.
@@ -375,19 +399,54 @@ export async function updateReelSettings(
   const clearsBody =
     patch.gameplayKey !== undefined || patch.editEffects !== undefined || clearsAssembly;
 
+  const nextSkipPartOutro =
+    patch.skipPartOutro !== undefined ? patch.skipPartOutro : prevSkipPartOutro;
+  const nextSkipBrandedOutro =
+    patch.skipBrandedOutro !== undefined ? patch.skipBrandedOutro : prevSkipBrandedOutro;
+  const partOutroToggledOff = nextSkipPartOutro && !prevSkipPartOutro;
+  const partOutroToggledOn = !nextSkipPartOutro && prevSkipPartOutro;
+  const brandedOutroToggledOff = nextSkipBrandedOutro && !prevSkipBrandedOutro;
+
   const unset: Record<string, ""> = {};
+  const s3Delete: (string | undefined)[] = [];
+
   if (clearsImages) unset["scenes.$[].assetUrl"] = "";
   if (clearsAudio) {
     unset["scenes.$[].audioUrl"] = "";
     unset.titleAudioUrl = "";
     unset.partOutroAudioUrl = "";
     unset.outroAudioUrl = "";
+    s3Delete.push(prevPartOutroAudioUrl, prevOutroAudioUrl);
   } else if (clearsOutroAudio) {
     unset.outroAudioUrl = "";
+    s3Delete.push(prevOutroAudioUrl);
   }
   if (clearsAssembly) unset.assemblyVideoUrl = "";
-  if (clearsBody) unset.bodyVideoUrl = "";
-  if (Object.keys(unset).length) await Reel.updateOne({ _id: reelId }, { $unset: unset });
+  if (clearsBody) {
+    unset.bodyVideoUrl = "";
+    s3Delete.push(prevBodyVideoUrl);
+  }
+
+  // Part outro is baked into the gameplay body — toggling it requires a body rebuild
+  // and drops the cached "Stay tuned…" TTS from S3.
+  if (partOutroToggledOff || partOutroToggledOn) {
+    unset.bodyVideoUrl = "";
+    s3Delete.push(prevBodyVideoUrl);
+  }
+  if (partOutroToggledOff) {
+    unset.partOutroAudioUrl = "";
+    s3Delete.push(prevPartOutroAudioUrl);
+  }
+  // Branded outro sits after bodyVideoUrl — body stays valid; only outro audio goes.
+  if (brandedOutroToggledOff) {
+    unset.outroAudioUrl = "";
+    s3Delete.push(prevOutroAudioUrl);
+  }
+
+  if (Object.keys(unset).length) {
+    await Reel.updateOne({ _id: reelId }, { $unset: unset });
+  }
+  await deleteCachedMediaUrls(s3Delete);
 
   return loadReel(reelId);
 }
