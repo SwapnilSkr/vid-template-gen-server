@@ -474,6 +474,11 @@ export async function updateReelReview(
   reelId: string,
   input: UpdateReelReviewInput
 ): Promise<IReelReviewPackage> {
+  if (input.title !== undefined && input.title.length > 100) throw new Error("YouTube titles are limited to 100 characters");
+  if (input.description !== undefined && input.description.length > 5000) throw new Error("YouTube descriptions are limited to 5,000 characters");
+  const hashtagCount = `${input.title ?? ""} ${input.description ?? ""}`.match(/#[\p{L}\p{N}_]+/gu)?.length ?? 0;
+  if (hashtagCount > 60) throw new Error("YouTube ignores all hashtags when a video contains more than 60");
+  if (input.tags && input.tags.join(",").length > 500) throw new Error("YouTube upload tags are limited to 500 total characters");
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   const current = reel.review ?? (await buildReelReviewPackage(reel));

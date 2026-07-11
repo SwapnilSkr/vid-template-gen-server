@@ -251,9 +251,9 @@ export const VariantParams = t.Object({
 export type TVariantParams = typeof VariantParams.static;
 
 export const UpdateReelReviewBody = t.Object({
-  title: t.Optional(t.String()),
-  description: t.Optional(t.String()),
-  tags: t.Optional(t.Array(t.String())),
+  title: t.Optional(t.String({ maxLength: 100 })),
+  description: t.Optional(t.String({ maxLength: 5000 })),
+  tags: t.Optional(t.Array(t.String({ maxLength: 100 }), { maxItems: 50 })),
   thumbnailPrompt: t.Optional(t.String()),
   visibilityNotes: t.Optional(t.String()),
   status: t.Optional(t.Union([t.Literal("draft"), t.Literal("ready"), t.Literal("approved")])),
