@@ -331,6 +331,10 @@ export interface IReel extends Document {
   /** Connected YouTube channel id used for rendered outro branding. */
   outroChannelId?: string;
   outro?: IOutroSettings;
+  /** When true, skip the multi-part "Stay tuned for part N" segment (Reddit). */
+  skipPartOutro?: boolean;
+  /** When true, skip the branded channel end card + spoken subscribe line. */
+  skipBrandedOutro?: boolean;
   thumbnailMode?: "frame" | "ai";
   imageModelOverride?: string;
   voiceOverride?: IVoiceOverride;
@@ -714,6 +718,8 @@ const reelSchema = new Schema<IReel>(
     horrorAudioKey: String,
     outroChannelId: String,
     outro: outroSettingsSchema,
+    skipPartOutro: { type: Boolean, default: false },
+    skipBrandedOutro: { type: Boolean, default: false },
     thumbnailMode: { type: String, enum: ["frame", "ai"], default: "frame" },
     imageModelOverride: String,
     voiceOverride: voiceOverrideSchema,

@@ -100,6 +100,8 @@ export async function appendBrandedOutro(
     }
   | undefined
 > {
+  if (reel.skipBrandedOutro) return undefined;
+
   const brand = await resolveOutroBrand(reel);
   if (!brand) return undefined;
 

@@ -91,6 +91,7 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
         bodySentences: bodySentences.length ? bodySentences : undefined,
         captionStyle: reel.captionStyle,
         forceFreshNarration: true,
+        skipPartOutro: reel.skipPartOutro,
       });
       localFiles.push(result.videoPath, result.assPath);
       localFiles.push(

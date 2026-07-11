@@ -184,10 +184,17 @@ export interface GameplayRenderOpts {
   }) => Promise<void> | void;
   /** Fired once all narration segments are ready, before FFmpeg composite. */
   onNarrationComplete?: () => Promise<void> | void;
+  /** Skip the multi-part "Stay tuned for part N" segment even when mid-series. */
+  skipPartOutro?: boolean;
 }
 
-/** Spoken part-outro line for multi-part Reddit stories (undefined on final part). */
-export function getPartOutroText(story: Pick<RedditStory, "partNumber" | "partCount">): string | undefined {
+/** Spoken part-outro line for multi-part Reddit stories (undefined on final part
+ *  or when the reel opts out via skipPartOutro). */
+export function getPartOutroText(
+  story: Pick<RedditStory, "partNumber" | "partCount">,
+  options: { skip?: boolean } = {}
+): string | undefined {
+  if (options.skip) return undefined;
   const partNumber = story.partNumber ?? 1;
   const partCount = story.partCount ?? 1;
   if (partNumber >= partCount) return undefined;
@@ -229,7 +236,7 @@ async function renderGameplayReelInner(
   // 1. Narrate: title first (read over the title card), then each sentence.
   // Reuse paced segment mp3s from S3 when provided — render-only / caption /
   // title-card visual edits should not re-spend OpenRouter TTS.
-  const outroText = getPartOutroText(story);
+  const outroText = getPartOutroText(story, { skip: ttsOpts.skipPartOutro });
   const bodySentences =
     ttsOpts.bodySentences?.map((s) => clean(s)).filter(Boolean) ?? toSentences(story.body);
   const segTexts = [clean(story.title), ...bodySentences, ...(outroText ? [outroText] : [])];

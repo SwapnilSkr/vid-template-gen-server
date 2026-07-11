@@ -262,6 +262,8 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       horrorAudioKey: reel.horrorAudioKey,
       outroChannelId: reel.outroChannelId,
       outro: reel.outro,
+      skipPartOutro: reel.skipPartOutro,
+      skipBrandedOutro: reel.skipBrandedOutro,
       thumbnailMode: reel.thumbnailMode,
       imageModelOverride: reel.imageModelOverride,
       voiceOverride: reel.voiceOverride,

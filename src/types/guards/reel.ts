@@ -150,6 +150,8 @@ export const UpdateReelSettingsBody = t.Object({
   gameplayKey: t.Optional(t.String()),
   outroChannelId: t.Optional(t.String()),
   outro: t.Optional(OutroSettingsBody),
+  skipPartOutro: t.Optional(t.Boolean()),
+  skipBrandedOutro: t.Optional(t.Boolean()),
   voice: t.Optional(
     t.Object({
       model: t.Optional(t.String()),

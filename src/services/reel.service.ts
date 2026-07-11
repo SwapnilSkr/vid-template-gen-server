@@ -733,7 +733,13 @@ async function persistOutroAudio(
     | undefined,
   localFiles: string[]
 ): Promise<void> {
-  if (!outroResult) return;
+  if (!outroResult) {
+    // Skip / failed append — drop any stale branded-outro TTS left on the reel.
+    if (reel.skipBrandedOutro && reel.outroAudioUrl) {
+      await replaceCachedMediaUrl(reel, "outroAudioUrl", undefined);
+    }
+    return;
+  }
   if (outroResult.outroAudioGenerated) {
     localFiles.push(outroResult.outroAudioPath);
     const buf = await readFile(outroResult.outroAudioPath);
@@ -864,6 +870,7 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
         source: usage.costUsd !== undefined ? "actual" : "estimated",
       });
     });
+    await persistOutroAudio(reel, outroResult, localFiles);
     if (outroResult) {
       localFiles.push(outroResult.videoPath);
       result = {
@@ -871,7 +878,6 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
         videoPath: outroResult.videoPath,
         totalDuration: result.totalDuration + outroResult.durationAdded,
       };
-      await persistOutroAudio(reel, outroResult, localFiles);
       if (outroResult.subtitle) {
         await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
       }
@@ -984,10 +990,10 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
 
     let finalPath = bodyPath;
     let assPath: string | undefined;
+    await persistOutroAudio(reel, outroResult, localFiles);
     if (outroResult) {
       localFiles.push(outroResult.videoPath);
       finalPath = outroResult.videoPath;
-      await persistOutroAudio(reel, outroResult, localFiles);
       if (outroResult.subtitle && reel.subtitlesUrl) {
         // Best-effort: rebuild captions file only when we already have one.
         try {
@@ -1434,11 +1440,11 @@ async function produceImageReel(
         source: usage.costUsd !== undefined ? "actual" : "estimated",
       });
     });
+    await persistOutroAudio(reel, outroResult, localFiles);
     if (outroResult) {
       localFiles.push(outroResult.videoPath);
       result.videoPath = outroResult.videoPath;
       result.totalDuration += outroResult.durationAdded;
-      await persistOutroAudio(reel, outroResult, localFiles);
       if (outroResult.subtitle) {
         await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
       }
@@ -1550,7 +1556,7 @@ async function processGameplayReel(
     await reel.save();
 
     // Download cached paced narration segments (title / sentences / part-outro).
-    const partOutroText = getPartOutroText(story);
+    const partOutroText = getPartOutroText(story, { skip: reel.skipPartOutro });
     const cachedSegmentPaths: (string | undefined)[] = [];
     let shortsCoverPath: string | undefined;
     let shortsCoverBackground: GameplayRenderOpts["shortsCoverBackground"];
@@ -1605,6 +1611,7 @@ async function processGameplayReel(
       cachedSegmentPaths,
       shortsCoverPath,
       shortsCoverBackground,
+      skipPartOutro: reel.skipPartOutro,
       onNarrationUsage: (usage) => {
         narrationCalls += 1;
         if (usage.costUsd !== undefined) narrationSpendUsd += usage.costUsd;
@@ -1676,11 +1683,11 @@ async function processGameplayReel(
       },
       { backgroundVideo: gameplayPath }
     );
+    await persistOutroAudio(reel, outroResult, localFiles);
     if (outroResult) {
       localFiles.push(outroResult.videoPath);
       result.videoPath = outroResult.videoPath;
       result.totalDuration += outroResult.durationAdded;
-      await persistOutroAudio(reel, outroResult, localFiles);
     }
     localFiles.push(result.videoPath, result.assPath);
     if (reel.scenes[0]) reel.scenes[0].duration = result.totalDuration;
