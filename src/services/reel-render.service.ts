@@ -37,6 +37,11 @@ export interface RenderResult {
   scenes: { startTime: number; duration: number }[];
   totalDuration: number;
   heroVideoPath?: string;
+  /**
+   * Pre-caption assembly (Ken Burns / motion / hybrid join). Caller owns cleanup.
+   * Persisted as reel.assemblyVideoUrl so caption/FX re-renders skip re-assembly.
+   */
+  assemblyPath?: string;
 }
 
 export interface SceneTiming {
@@ -151,13 +156,27 @@ async function renderImageKenBurnsInner(
   const burnedPath = await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
   tmp.push(captionedPath);
 
+  // Durable pre-caption assembly for caption/FX re-renders (skip Ken Burns).
+  const assemblyPath = join(config.processingPath, `${reelId}_assembly.mp4`);
+  try {
+    await copyVideo(joinedPath, assemblyPath);
+  } catch (error) {
+    await unlink(assemblyPath).catch(() => {});
+    throw error;
+  }
+
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
-  if (options.horrorEffects) {
-    console.log(`👻 Horror final mix (preset=${config.ffmpegPreset})…`);
-    await applyHorrorFinalMix(burnedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
-    console.log(`👻 Horror mix done`);
-  } else {
-    await copyVideo(burnedPath, finalPath);
+  try {
+    if (options.horrorEffects) {
+      console.log(`👻 Horror final mix (preset=${config.ffmpegPreset})…`);
+      await applyHorrorFinalMix(burnedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
+      console.log(`👻 Horror mix done`);
+    } else {
+      await copyVideo(burnedPath, finalPath);
+    }
+  } catch (error) {
+    await unlink(assemblyPath).catch(() => {});
+    throw error;
   }
 
   return {
@@ -165,6 +184,7 @@ async function renderImageKenBurnsInner(
     assPath,
     scenes: timings.map((t) => ({ startTime: t.startTime, duration: t.d })),
     totalDuration,
+    assemblyPath,
   };
 }
 
@@ -426,6 +446,70 @@ function copyVideo(input: string, output: string): Promise<string> {
       .on("error", (err) => reject(new Error(`Final copy failed: ${err.message}`)))
       .run();
   });
+}
+
+/**
+ * Caption → optional horror mix on a cached pre-caption assembly.
+ * Skips Ken Burns / motion / hybrid re-assembly (compute win for caption & FX edits).
+ * Caller applies edit FX + branded outro afterward.
+ */
+export async function finishFromAssembly(
+  reelId: string,
+  assemblyPath: string,
+  scenes: { narration: string; startTime: number; duration: number }[],
+  options: RenderOptions = {}
+): Promise<RenderResult> {
+  await ensureDir(config.processingPath);
+  const tmp: string[] = [];
+  try {
+    const timings: SceneTiming[] = scenes.map((s) => ({
+      clipPath: "",
+      narration: s.narration,
+      d: s.duration,
+      speech: Math.max(s.duration - TAIL, 0.05),
+      startTime: s.startTime,
+    }));
+    const totalDuration =
+      timings.length === 0
+        ? 0
+        : +(timings[timings.length - 1].startTime + timings[timings.length - 1].d).toFixed(3);
+
+    const assContent = buildPortraitKaraoke(
+      timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech })),
+      options.captionStyle
+    );
+    const assPath = join(config.processingPath, `${reelId}_from_asm.ass`);
+    await writeFile(assPath, assContent, "utf-8");
+
+    const captionedPath = join(config.processingPath, `${reelId}_from_asm_cap.mp4`);
+    const burnedPath = await burnSubtitles(assemblyPath, assPath, captionedPath, EDGE_FADE);
+    tmp.push(captionedPath);
+
+    const finalPath = join(config.processingPath, `${reelId}_from_asm_final.mp4`);
+    if (options.horrorEffects) {
+      await applyHorrorFinalMix(
+        burnedPath,
+        finalPath,
+        tmp,
+        options.horrorAudioKey,
+        timings,
+        options.comicEffects
+      );
+    } else {
+      await copyVideo(burnedPath, finalPath);
+    }
+
+    return {
+      videoPath: finalPath,
+      assPath,
+      scenes: timings.map((t) => ({ startTime: t.startTime, duration: t.d })),
+      totalDuration,
+      assemblyPath,
+    };
+  } catch (error) {
+    await Promise.all(tmp.map((f) => unlink(f).catch(() => {})));
+    throw error;
+  }
 }
 
 // ============================================

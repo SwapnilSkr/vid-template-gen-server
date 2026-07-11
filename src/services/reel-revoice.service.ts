@@ -90,8 +90,16 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
         format: variant.format,
         bodySentences: bodySentences.length ? bodySentences : undefined,
         captionStyle: reel.captionStyle,
+        forceFreshNarration: true,
       });
       localFiles.push(result.videoPath, result.assPath);
+      localFiles.push(
+        result.narrationSegments.titlePath,
+        ...result.narrationSegments.bodyPaths,
+        ...(result.narrationSegments.partOutroPath
+          ? [result.narrationSegments.partOutroPath]
+          : [])
+      );
 
       const buffer = await readFile(result.videoPath);
       variant.videoUrl = await uploadVideo(buffer, "reels", `${reelId}_voice_${variantId}.mp4`);
@@ -139,6 +147,14 @@ export async function promoteVoiceVariant(reelId: string, variantId: string): Pr
     voice: variant.voice,
     format: variant.format,
   };
+  // Promoted voice invalidates prior narration caches (different TTS).
+  reel.titleAudioUrl = undefined;
+  reel.partOutroAudioUrl = undefined;
+  reel.outroAudioUrl = undefined;
+  reel.bodyVideoUrl = undefined;
+  reel.assemblyVideoUrl = undefined;
+  for (const scene of reel.scenes) scene.audioUrl = undefined;
+  reel.markModified("scenes");
   await reel.save();
 
   const stillReferenced =

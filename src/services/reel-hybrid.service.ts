@@ -140,6 +140,15 @@ async function renderHybridSceneInner(
   }
 
   // 5. Karaoke captions (reused as-is from image_kenburns).
+  // Cache the pre-caption input (joined or joined+ambient bed) as assembly.
+  const assemblyPath = join(config.processingPath, `${reelId}_assembly.mp4`);
+  try {
+    await copyAssembly(subtitleInputPath, assemblyPath);
+  } catch (error) {
+    await unlink(assemblyPath).catch(() => {});
+    throw error;
+  }
+
   const assContent = buildPortraitKaraoke(
     timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech })),
     opts.captionStyle
@@ -148,7 +157,13 @@ async function renderHybridSceneInner(
   await writeFile(assPath, assContent, "utf-8");
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
-  const burnedPath = await burnSubtitles(subtitleInputPath, assPath, finalPath, EDGE_FADE);
+  let burnedPath: string;
+  try {
+    burnedPath = await burnSubtitles(subtitleInputPath, assPath, finalPath, EDGE_FADE);
+  } catch (error) {
+    await unlink(assemblyPath).catch(() => {});
+    throw error;
+  }
 
   return {
     videoPath: burnedPath,
@@ -156,7 +171,19 @@ async function renderHybridSceneInner(
     scenes: timings.map((t) => ({ startTime: t.startTime, duration: t.d })),
     totalDuration,
     heroVideoPath: generatedHeroVideoPath,
+    assemblyPath,
   };
+}
+
+async function copyAssembly(input: string, output: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(input)
+      .outputOptions(["-c", "copy", "-movflags", "+faststart"])
+      .output(output)
+      .on("end", () => resolve(output))
+      .on("error", (err) => reject(new Error(`Assembly copy failed: ${err.message}`)))
+      .run();
+  });
 }
 
 const HERO_CUT_DURATION = 0.08; // near-instant flash-cut, not a crossfade

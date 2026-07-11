@@ -137,11 +137,24 @@ async function renderMotionReelInner(
   const burnedPath = await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
   tmp.push(captionedPath);
 
+  const assemblyPath = join(config.processingPath, `${reelId}_assembly.mp4`);
+  try {
+    await copyThrough(joinedPath, assemblyPath);
+  } catch (error) {
+    await unlink(assemblyPath).catch(() => {});
+    throw error;
+  }
+
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
-  if (options.horrorEffects) {
-    await applyHorrorFinalMix(burnedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
-  } else {
-    await copyThrough(burnedPath, finalPath);
+  try {
+    if (options.horrorEffects) {
+      await applyHorrorFinalMix(burnedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
+    } else {
+      await copyThrough(burnedPath, finalPath);
+    }
+  } catch (error) {
+    await unlink(assemblyPath).catch(() => {});
+    throw error;
   }
 
   return {
@@ -149,6 +162,7 @@ async function renderMotionReelInner(
     assPath,
     scenes: timings.map((t) => ({ startTime: t.startTime, duration: t.d })),
     totalDuration,
+    assemblyPath,
   };
 }
 

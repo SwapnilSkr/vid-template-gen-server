@@ -32,6 +32,17 @@ export interface GameplayResult {
   videoPath: string;
   assPath: string;
   totalDuration: number;
+  /** Paced segment audio used in the concat (upload newly generated ones). */
+  narrationSegments: {
+    titlePath: string;
+    bodyPaths: string[];
+    partOutroPath?: string;
+    titleGenerated: boolean;
+    bodyGenerated: boolean[];
+    partOutroGenerated: boolean;
+    /** How many segments spent OpenRouter TTS this run. */
+    generatedCount: number;
+  };
 }
 
 export interface PickedGameplay {
@@ -146,6 +157,21 @@ export interface GameplayRenderOpts {
   captionStyle?: ICaptionStyle;
   /** Meter OpenRouter TTS spend for the cost breakdown. */
   onNarrationUsage?: MediaUsageCallback;
+  /**
+   * Local paced mp3 paths parallel to [title, ...body, partOutro?].
+   * When present (and forceFreshNarration is false), that segment skips TTS.
+   */
+  cachedSegmentPaths?: (string | undefined)[];
+  /** Revoice / explicit full re-TTS — ignore cachedSegmentPaths. */
+  forceFreshNarration?: boolean;
+}
+
+/** Spoken part-outro line for multi-part Reddit stories (undefined on final part). */
+export function getPartOutroText(story: Pick<RedditStory, "partNumber" | "partCount">): string | undefined {
+  const partNumber = story.partNumber ?? 1;
+  const partCount = story.partCount ?? 1;
+  if (partNumber >= partCount) return undefined;
+  return `Stay tuned for part ${partNumber + 1}.`;
 }
 
 export async function renderGameplayReel(
@@ -156,9 +182,14 @@ export async function renderGameplayReel(
 ): Promise<GameplayResult> {
   await ensureDir(config.processingPath);
   const tmp: string[] = [];
+  /** Newly generated paced segments — kept for caller upload on success. */
+  const retain: string[] = [];
 
   try {
-    return await renderGameplayReelInner(reelId, story, gameplayPath, ttsOpts, tmp);
+    return await renderGameplayReelInner(reelId, story, gameplayPath, ttsOpts, tmp, retain);
+  } catch (error) {
+    await Promise.all(retain.map((f) => unlink(f).catch(() => {})));
+    throw error;
   } finally {
     // Cleanup must run even on failure (ffmpeg error, network blip, etc.) —
     // previously this only ran on the success path, so a failed render left
@@ -172,19 +203,39 @@ async function renderGameplayReelInner(
   story: RedditStory,
   gameplayPath: string,
   ttsOpts: GameplayRenderOpts,
-  tmp: string[]
+  tmp: string[],
+  retain: string[]
 ): Promise<GameplayResult> {
   // 1. Narrate: title first (read over the title card), then each sentence.
+  // Reuse paced segment mp3s from S3 when provided — render-only / caption /
+  // title-card visual edits should not re-spend OpenRouter TTS.
   const outroText = getPartOutroText(story);
   const bodySentences =
     ttsOpts.bodySentences?.map((s) => clean(s)).filter(Boolean) ?? toSentences(story.body);
   const segTexts = [clean(story.title), ...bodySentences, ...(outroText ? [outroText] : [])];
   const audioPaths: string[] = [];
   const speechDurs: number[] = [];
+  const generatedFlags: boolean[] = [];
   const tempo = clampTempo(config.redditNarrationTempo);
-  const { bodySentences: _bs, captionStyle, onNarrationUsage, ...narrationOpts } = ttsOpts;
+  const {
+    bodySentences: _bs,
+    captionStyle,
+    onNarrationUsage,
+    cachedSegmentPaths,
+    forceFreshNarration,
+    ...narrationOpts
+  } = ttsOpts;
 
   for (let i = 0; i < segTexts.length; i++) {
+    const cachedPath =
+      !forceFreshNarration && cachedSegmentPaths?.[i] ? cachedSegmentPaths[i] : undefined;
+    if (cachedPath) {
+      audioPaths.push(cachedPath);
+      speechDurs.push(await getAudioDuration(cachedPath));
+      generatedFlags.push(false);
+      continue;
+    }
+
     const { audioPath } = await generateNarration(segTexts[i], {
       ...narrationOpts,
       outputDir: config.processingPath,
@@ -193,11 +244,13 @@ async function renderGameplayReelInner(
     });
     tmp.push(audioPath);
 
+    // Paced path is returned to the caller for S3 upload — retain on success.
     const pacedPath = join(config.processingPath, `${reelId}_paced_${i}.mp3`);
     await changeAudioTempo(audioPath, pacedPath, tempo);
-    tmp.push(pacedPath);
+    retain.push(pacedPath);
     audioPaths.push(pacedPath);
     speechDurs.push(await getAudioDuration(pacedPath));
+    generatedFlags.push(true);
   }
 
   // 2. Concat narration into one track; resolve segment start times. TTS clips
@@ -266,7 +319,26 @@ async function renderGameplayReelInner(
     start: outroStart,
   });
 
-  return { videoPath: finalPath, assPath, totalDuration: total };
+  const bodyPaths = audioPaths.slice(1, 1 + bodySentences.length);
+  const partOutroPath = outroText ? audioPaths[audioPaths.length - 1] : undefined;
+  const titleGenerated = generatedFlags[0] ?? true;
+  const bodyGenerated = generatedFlags.slice(1, 1 + bodySentences.length);
+  const partOutroGenerated = outroText ? Boolean(generatedFlags[generatedFlags.length - 1]) : false;
+
+  return {
+    videoPath: finalPath,
+    assPath,
+    totalDuration: total,
+    narrationSegments: {
+      titlePath: audioPaths[0],
+      bodyPaths,
+      partOutroPath,
+      titleGenerated,
+      bodyGenerated,
+      partOutroGenerated,
+      generatedCount: generatedFlags.filter(Boolean).length,
+    },
+  };
 }
 
 // ---- ffmpeg steps ----
@@ -288,13 +360,6 @@ function clampTempo(tempo: number): number {
   // FFmpeg atempo supports 0.5-100, but short-form narration becomes harsh
   // quickly. Keep env mistakes from producing unusable audio.
   return Math.min(Math.max(tempo, 0.75), 1.5);
-}
-
-function getPartOutroText(story: RedditStory): string | undefined {
-  const partNumber = story.partNumber ?? 1;
-  const partCount = story.partCount ?? 1;
-  if (partNumber >= partCount) return undefined;
-  return `Stay tuned for part ${partNumber + 1}.`;
 }
 
 function changeAudioTempo(input: string, output: string, tempo: number): Promise<string> {

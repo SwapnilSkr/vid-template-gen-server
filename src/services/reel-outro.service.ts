@@ -84,12 +84,19 @@ export async function appendBrandedOutro(
   reel: IReel,
   tts: OutroTts,
   onUsage?: MediaUsageCallback,
-  options: { backgroundVideo?: string } = {}
+  options: {
+    backgroundVideo?: string;
+    /** Skip cached reel.outroAudioUrl (e.g. after spoken-line change cleared it). */
+    forceFreshOutroAudio?: boolean;
+  } = {}
 ): Promise<
   | {
       videoPath: string;
       durationAdded: number;
       subtitle?: { text: string; startTime: number; speech: number };
+      /** Local outro narration mp3 — upload when outroAudioGenerated. */
+      outroAudioPath: string;
+      outroAudioGenerated: boolean;
     }
   | undefined
 > {
@@ -97,18 +104,36 @@ export async function appendBrandedOutro(
   if (!brand) return undefined;
 
   const tmp: string[] = [];
+  let retainAudioPath: string | undefined;
   try {
     await ensureDir(config.processingPath);
     const line = brand.spokenLine || (brand.kind === "reddit"
         ? redditOutroLine(reel, brand.channelName)
         : `Subscribe to ${brand.channelName}. The next story is already waiting.`);
-    const { audioPath } = await generateNarration(line, {
-      ...tts,
-      outputDir: config.processingPath,
-      profile: brand.kind === "horror" ? "horror" : "reddit",
-      onUsage,
-    });
-    tmp.push(audioPath);
+
+    let audioPath: string;
+    let outroAudioGenerated = false;
+    if (!options.forceFreshOutroAudio && reel.outroAudioUrl) {
+      audioPath = join(config.processingPath, `${reel._id}_outro_reused.mp3`);
+      const res = await fetch(reel.outroAudioUrl);
+      if (!res.ok) {
+        throw new Error(`Could not reuse outro audio (${res.status})`);
+      }
+      await writeFile(audioPath, Buffer.from(await res.arrayBuffer()));
+      // Reused file can be deleted after the clip is rendered (not returned for upload).
+      tmp.push(audioPath);
+    } else {
+      const generated = await generateNarration(line, {
+        ...tts,
+        outputDir: config.processingPath,
+        profile: brand.kind === "horror" ? "horror" : "reddit",
+        onUsage,
+      });
+      audioPath = generated.audioPath;
+      outroAudioGenerated = true;
+      // Keep for caller upload — not added to tmp.
+      retainAudioPath = audioPath;
+    }
 
     const cardPath = await renderOutroCard(
       brand,
@@ -127,6 +152,8 @@ export async function appendBrandedOutro(
     return {
       videoPath: output,
       durationAdded,
+      outroAudioPath: audioPath,
+      outroAudioGenerated,
       subtitle: {
         text: line,
         startTime: mainDuration,
@@ -134,6 +161,7 @@ export async function appendBrandedOutro(
       },
     };
   } catch (error) {
+    if (retainAudioPath) await unlink(retainAudioPath).catch(() => {});
     console.warn(
       `Skipping branded outro for reel ${reel._id}: ${error instanceof Error ? error.message : String(error)}`
     );
