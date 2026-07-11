@@ -166,6 +166,24 @@ export interface GameplayRenderOpts {
   forceFreshNarration?: boolean;
   /** User-composed 9:16 Shorts cover. Render-only input; never generated here. */
   shortsCoverPath?: string;
+  /** Live grade applied to moving gameplay only during the title interval. */
+  shortsCoverBackground?: {
+    brightness?: number;
+    contrast?: number;
+    saturation?: number;
+    hue?: number;
+    grayscale?: number;
+    blur?: number;
+  };
+  /** Fired after each title/body/outro narration segment (TTS or cache hit). */
+  onNarrationProgress?: (info: {
+    index: number;
+    total: number;
+    label: string;
+    generated: boolean;
+  }) => Promise<void> | void;
+  /** Fired once all narration segments are ready, before FFmpeg composite. */
+  onNarrationComplete?: () => Promise<void> | void;
 }
 
 /** Spoken part-outro line for multi-part Reddit stories (undefined on final part). */
@@ -226,19 +244,30 @@ async function renderGameplayReelInner(
     cachedSegmentPaths,
     forceFreshNarration,
     shortsCoverPath,
+    shortsCoverBackground,
+    onNarrationProgress,
+    onNarrationComplete,
     ...narrationOpts
   } = ttsOpts;
 
   for (let i = 0; i < segTexts.length; i++) {
+    const label =
+      i === 0
+        ? `Title narration (1/${segTexts.length})`
+        : outroText && i === segTexts.length - 1
+          ? `Part-outro narration (${i + 1}/${segTexts.length})`
+          : `Sentence narration ${i}/${segTexts.length - (outroText ? 1 : 0)}`;
     const cachedPath =
       !forceFreshNarration && cachedSegmentPaths?.[i] ? cachedSegmentPaths[i] : undefined;
     if (cachedPath) {
       audioPaths.push(cachedPath);
       speechDurs.push(await getAudioDuration(cachedPath));
       generatedFlags.push(false);
+      await onNarrationProgress?.({ index: i, total: segTexts.length, label, generated: false });
       continue;
     }
 
+    console.log(`🎙️  Gameplay ${reelId}: ${label}`);
     const { audioPath } = await generateNarration(segTexts[i], {
       ...narrationOpts,
       outputDir: config.processingPath,
@@ -254,7 +283,10 @@ async function renderGameplayReelInner(
     audioPaths.push(pacedPath);
     speechDurs.push(await getAudioDuration(pacedPath));
     generatedFlags.push(true);
+    await onNarrationProgress?.({ index: i, total: segTexts.length, label, generated: true });
   }
+
+  await onNarrationComplete?.();
 
   // 2. Concat narration into one track; resolve segment start times. TTS clips
   // are silence-trimmed, so we add deliberate short pauses instead of relying
@@ -320,7 +352,7 @@ async function renderGameplayReelInner(
   await composite(bgPath, narrPath, assPath, card, 250, titleDur, finalPath, {
     card: outroCard,
     start: outroStart,
-  }, shortsCoverPath);
+  }, shortsCoverPath, shortsCoverBackground);
 
   const bodyPaths = audioPaths.slice(1, 1 + bodySentences.length);
   const partOutroPath = outroText ? audioPaths[audioPaths.length - 1] : undefined;
@@ -479,13 +511,15 @@ function composite(
   titleDur: number,
   out: string,
   outro?: { card?: { path: string; width: number; height: number }; start?: number },
-  shortsCoverPath?: string
+  shortsCoverPath?: string,
+  shortsCoverBackground?: GameplayRenderOpts["shortsCoverBackground"]
 ): Promise<string> {
   const ass = assFilenameFilter(assPath);
   const en = finiteSeconds(titleDur, "title duration").toFixed(2);
   const x = Math.round((W - card.width) / 2);
+  const liveGrade = shortsCoverLiveGrade(shortsCoverBackground, en);
   const fullFilters = [
-    `[0:v]${ass}[base]`,
+    `[0:v]${liveGrade}${ass}[base]`,
     `[base][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`,
   ];
   let outputLabel = "vtitle";
@@ -515,6 +549,30 @@ function composite(
       captionBurnFailed(message, "Gameplay composite.");
     }
   );
+}
+
+function shortsCoverLiveGrade(
+  bg: GameplayRenderOpts["shortsCoverBackground"],
+  until: string,
+): string {
+  if (!bg) return "";
+  const finite = (value: number | undefined, fallback: number) => Number.isFinite(value) ? value! : fallback;
+  const filters: string[] = [];
+  const brightness = Math.min(1, Math.max(-1, finite(bg.brightness, 1) - 1));
+  const contrast = Math.min(2, Math.max(0, finite(bg.contrast, 1)));
+  const saturation = Math.min(3, Math.max(0, finite(bg.saturation, 1)));
+  if (brightness !== 0 || contrast !== 1 || saturation !== 1) {
+    filters.push(`eq=brightness=${brightness.toFixed(3)}:contrast=${contrast.toFixed(3)}:saturation=${saturation.toFixed(3)}:enable='lt(t,${until})'`);
+  }
+  const hue = Math.min(180, Math.max(-180, finite(bg.hue, 0)));
+  const grayscale = Math.min(1, Math.max(0, finite(bg.grayscale, 0)));
+  if (hue !== 0 || grayscale > 0) {
+    const sat = (1 - grayscale).toFixed(3);
+    filters.push(`hue=h=${hue.toFixed(2)}:s=${sat}:enable='lt(t,${until})'`);
+  }
+  const blur = Math.min(20, Math.max(0, finite(bg.blur, 0)));
+  if (blur > 0) filters.push(`gblur=sigma=${blur.toFixed(2)}:enable='lt(t,${until})'`);
+  return filters.length ? `${filters.join(",")},` : "";
 }
 
 function finiteSeconds(value: number, label: string): number {
