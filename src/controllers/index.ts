@@ -81,6 +81,8 @@ export {
   saveThumbnailDraftController,
   discardThumbnailDraftController,
   getThumbnailDraftAssetController,
+  saveShortsCoverController,
+  clearShortsCoverController,
 } from "./reel.controller";
 
 // Trend controllers

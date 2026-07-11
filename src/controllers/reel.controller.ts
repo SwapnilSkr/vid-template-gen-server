@@ -69,6 +69,7 @@ import type {
   TThumbnailSourceBody,
   TSeriesParams,
   TDraftAssetParams,
+  TSaveShortsCoverBody,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
 import { httpErrorFromUnknown } from "../services/ffmpeg-capability.service";
@@ -87,6 +88,7 @@ import {
   stageThumbnailDraft,
   stageThumbnailDraftImage,
 } from "../services/reel-thumbnail-draft.service";
+import { clearShortsCover, saveShortsCover } from "../services/reel-shorts-cover.service";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -267,6 +269,8 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       voiceVariants: reel.voiceVariants,
       editDraft: reel.editDraft,
       thumbnailDraft: reel.thumbnailDraft,
+      shortsCover: reel.shortsCover,
+      thumbnailSceneIndex: reel.thumbnailSceneIndex,
     },
   };
 }
@@ -917,6 +921,29 @@ export async function getThumbnailSourceController({
 interface StageThumbnailImageContext extends Context {
   params: TIdParams;
   body: TStageThumbnailImageBody;
+}
+
+interface SaveShortsCoverContext extends Context {
+  params: TIdParams;
+  body: TSaveShortsCoverBody;
+}
+
+export async function saveShortsCoverController({ params, body, set }: SaveShortsCoverContext) {
+  try {
+    return { success: true, data: await saveShortsCover(params.id, body) };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+export async function clearShortsCoverController({ params, set }: GetReelContext) {
+  try {
+    return { success: true, data: await clearShortsCover(params.id) };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
 }
 
 /** Stage a client-rendered thumbnail PNG locally (no S3 upload). */

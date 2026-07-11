@@ -134,6 +134,7 @@ export const ReorderScenesBody = t.Object({
 export type TReorderScenesBody = typeof ReorderScenesBody.static;
 
 export const UpdateReelSettingsBody = t.Object({
+  thumbnailSceneIndex: t.Optional(t.Number({ minimum: 0 })),
   artStyleId: t.Optional(t.String()),
   motionMode: t.Optional(
     t.Union([
@@ -302,6 +303,18 @@ export const StageThumbnailImageBody = t.Object({
 });
 
 export type TStageThumbnailImageBody = typeof StageThumbnailImageBody.static;
+
+export const SaveShortsCoverBody = t.Object({
+  imageDataUrl: t.String({ minLength: 32, maxLength: 20_000_000 }),
+  sourceType: t.Union([t.Literal("reddit_title_card"), t.Literal("scene"), t.Literal("video_frame")]),
+  sceneIndex: t.Optional(t.Number({ minimum: 0 })),
+  atSeconds: t.Optional(t.Number({ minimum: 0 })),
+  placement: t.Optional(t.Union([t.Literal("opening"), t.Literal("source_scene")])),
+  holdSeconds: t.Optional(t.Number({ minimum: 0.25, maximum: 5 })),
+  editorState: t.Optional(t.Record(t.String(), t.Unknown())),
+  sourceFingerprint: t.Optional(t.String()),
+});
+export type TSaveShortsCoverBody = typeof SaveShortsCoverBody.static;
 
 /** Composition controls shared by the one-shot custom thumbnail endpoints and
  *  Thumbnail Studio draft staging. */

@@ -189,6 +189,20 @@ export interface IThumbnailDraft {
   createdAt: Date;
 }
 
+/** Vertical cover intentionally embedded in the rendered Short. Unlike the
+ * publication thumbnail this is a real video asset and never triggers AI. */
+export interface IShortsCover {
+  imageUrl?: string;
+  sourceType: "reddit_title_card" | "scene" | "video_frame";
+  sceneIndex?: number;
+  atSeconds?: number;
+  placement: "opening" | "source_scene";
+  holdSeconds?: number;
+  editorState?: Record<string, unknown>;
+  sourceFingerprint?: string;
+  updatedAt?: Date;
+}
+
 /** YouTube publish state — separate from the render pipeline `status` so a
  *  publish retry never re-triggers rendering/asset generation. */
 export interface IYouTubePublish {
@@ -322,6 +336,9 @@ export interface IReel extends Document {
   voiceVariants: IVoiceVariant[];
   editDraft?: IReelEditDraft;
   thumbnailDraft?: IThumbnailDraft;
+  shortsCover?: IShortsCover;
+  /** Planner recommendation; changing it never regenerates a scene. */
+  thumbnailSceneIndex?: number;
 
   status: ReelStatus;
   progress: number;
@@ -551,6 +568,25 @@ const thumbnailDraftSchema = new Schema<IThumbnailDraft>(
   { _id: false }
 );
 
+const shortsCoverSchema = new Schema<IShortsCover>(
+  {
+    imageUrl: String,
+    sourceType: {
+      type: String,
+      enum: ["reddit_title_card", "scene", "video_frame"],
+      required: true,
+    },
+    sceneIndex: Number,
+    atSeconds: Number,
+    placement: { type: String, enum: ["opening", "source_scene"], default: "opening" },
+    holdSeconds: { type: Number, min: 0.25, max: 5, default: 0.75 },
+    editorState: Schema.Types.Mixed,
+    sourceFingerprint: String,
+    updatedAt: Date,
+  },
+  { _id: false }
+);
+
 const youtubePublishSchema = new Schema<IYouTubePublish>(
   {
     status: {
@@ -680,6 +716,8 @@ const reelSchema = new Schema<IReel>(
     voiceVariants: { type: [voiceVariantSchema], default: [] },
     editDraft: reelEditDraftSchema,
     thumbnailDraft: thumbnailDraftSchema,
+    shortsCover: shortsCoverSchema,
+    thumbnailSceneIndex: Number,
     status: {
       type: String,
       enum: [

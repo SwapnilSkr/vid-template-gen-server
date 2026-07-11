@@ -24,6 +24,7 @@ import {
   RegenerateReelBody,
   ReplanReelBody,
   DraftAssetParams,
+  SaveShortsCoverBody,
 } from "../types/guards";
 import {
   createReelController,
@@ -66,6 +67,8 @@ import {
   saveThumbnailDraftController,
   discardThumbnailDraftController,
   getThumbnailDraftAssetController,
+  saveShortsCoverController,
+  clearShortsCoverController,
 } from "../controllers";
 
 // ============================================
@@ -181,6 +184,14 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .post("/:id/thumbnail-draft/discard", discardThumbnailDraftController, {
     params: IdParams,
   })
+
+  // Vertical artwork embedded in the actual Short. Saving is deterministic;
+  // applying it uses the existing composite-only render path (zero AI calls).
+  .put("/:id/shorts-cover", saveShortsCoverController, {
+    params: IdParams,
+    body: SaveShortsCoverBody,
+  })
+  .delete("/:id/shorts-cover", clearShortsCoverController, { params: IdParams })
 
   // Request re-narrated voice variants (different TTS model/voice, same story + gameplay clip)
   .post("/:id/revoice", revoiceReelController, {
