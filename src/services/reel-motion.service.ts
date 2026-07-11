@@ -134,14 +134,14 @@ async function renderMotionReelInner(
   await writeFile(assPath, assContent, "utf-8");
 
   const captionedPath = join(config.processingPath, `${reelId}_captioned.mp4`);
-  await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
+  const burnedPath = await burnSubtitles(joinedPath, assPath, captionedPath, EDGE_FADE);
   tmp.push(captionedPath);
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
   if (options.horrorEffects) {
-    await applyHorrorFinalMix(captionedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
+    await applyHorrorFinalMix(burnedPath, finalPath, tmp, options.horrorAudioKey, timings, options.comicEffects);
   } else {
-    await copyThrough(captionedPath, finalPath);
+    await copyThrough(burnedPath, finalPath);
   }
 
   return {

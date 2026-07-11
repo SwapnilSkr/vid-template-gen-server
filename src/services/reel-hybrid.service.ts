@@ -4,6 +4,7 @@ import { writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
 import { ensureDir } from "../utils";
+import type { ICaptionStyle } from "../models";
 import { getAudioDuration, generateHeroVideo, type MediaUsageCallback } from "./openrouter-media.service";
 import {
   W,
@@ -54,6 +55,7 @@ export interface HybridRenderOptions {
   heroVideoModel?: string;
   onHeroGenerated?: (videoPath: string) => Promise<void>;
   onHeroUsage?: MediaUsageCallback;
+  captionStyle?: ICaptionStyle;
 }
 
 export async function renderHybridScene(
@@ -139,16 +141,17 @@ async function renderHybridSceneInner(
 
   // 5. Karaoke captions (reused as-is from image_kenburns).
   const assContent = buildPortraitKaraoke(
-    timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech }))
+    timings.map((t) => ({ text: t.narration, startTime: t.startTime, speech: t.speech })),
+    opts.captionStyle
   );
   const assPath = join(config.processingPath, `${reelId}.ass`);
   await writeFile(assPath, assContent, "utf-8");
 
   const finalPath = join(config.processingPath, `${reelId}_final.mp4`);
-  await burnSubtitles(subtitleInputPath, assPath, finalPath, EDGE_FADE);
+  const burnedPath = await burnSubtitles(subtitleInputPath, assPath, finalPath, EDGE_FADE);
 
   return {
-    videoPath: finalPath,
+    videoPath: burnedPath,
     assPath,
     scenes: timings.map((t) => ({ startTime: t.startTime, duration: t.d })),
     totalDuration,

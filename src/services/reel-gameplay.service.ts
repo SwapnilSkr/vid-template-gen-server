@@ -14,6 +14,7 @@ import type { RedditStory } from "./reel-script.service";
 import { DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
 import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
 import { captionStylePlain } from "../utils/caption-style.utils";
+import { captionBurnFailed } from "./ffmpeg-capability.service";
 import type { ICaptionStyle } from "../models";
 
 // ============================================
@@ -418,7 +419,6 @@ function composite(
     `[0:v]${ass}[base]`,
     `[base][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`,
   ];
-  const cardOnlyFilters = [`[0:v][2:v]overlay=${x}:${cardY}:enable='lt(t,${en})'[vtitle]`];
   let outputLabel = "vtitle";
   if (outro?.card && outro.start !== undefined) {
     const outroStart = finiteSeconds(outro.start, "outro start").toFixed(2);
@@ -426,26 +426,18 @@ function composite(
     const outroY = Math.round((H - outro.card.height) / 2);
     const outroFilter = `[vtitle][3:v]overlay=${outroX}:${outroY}:enable='gte(t,${outroStart})'[vout]`;
     fullFilters.push(outroFilter);
-    cardOnlyFilters.push(outroFilter);
     outputLabel = "vout";
   }
 
   return runComposite(bg, narr, card, out, fullFilters, outputLabel, outro?.card).catch(
     async (firstError) => {
-      console.warn(firstError.message);
       await unlink(out).catch(() => {});
-      return runComposite(bg, narr, card, out, cardOnlyFilters, outputLabel, outro?.card).catch(
-        async (secondError) => {
-          console.warn(secondError.message);
-          await unlink(out).catch(() => {});
-          return runComposite(bg, narr, card, out, [], "0:v", outro?.card).catch((thirdError) => {
-            throw new Error(
-              `Gameplay composite failed after full/card/bare attempts.\n` +
-                `Full: ${firstError.message}\nCard-only: ${secondError.message}\nBare: ${thirdError.message}`
-            );
-          });
-        }
+      const message =
+        firstError instanceof Error ? firstError.message : String(firstError);
+      console.error(
+        `❌ Gameplay caption composite failed — stopping produce so TTS/assets are not wasted. Cause: ${message}`
       );
+      captionBurnFailed(message, "Gameplay composite.");
     }
   );
 }

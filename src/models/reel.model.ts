@@ -327,6 +327,9 @@ export interface IReel extends Document {
   progress: number;
   outputUrl?: string;
   subtitlesUrl?: string;
+  /** False when FFmpeg caption burn soft-failed (MP4 has no burned-in text). */
+  captionsBurned?: boolean;
+  captionBurnError?: string;
   outroAudioUrl?: string; // cached outro narration — reused on render-only re-runs
   review?: IReelReviewPackage;
   costUsd?: number;
@@ -684,6 +687,8 @@ const reelSchema = new Schema<IReel>(
     progress: { type: Number, default: 0, min: 0, max: 100 },
     outputUrl: String,
     subtitlesUrl: String,
+    captionsBurned: { type: Boolean, default: true },
+    captionBurnError: String,
     outroAudioUrl: String,
     review: reelReviewSchema,
     costUsd: Number,

@@ -31,6 +31,7 @@ import { generateImage, generateNarration } from "./openrouter-media.service";
 import { renderImageKenBurns, applyEditEffects, hasEditEffects, type RenderScene } from "./reel-render.service";
 import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
 import { appendBrandedOutro } from "./reel-outro.service";
+import { assertFfmpegReady, isCaptionBurnError } from "./ffmpeg-capability.service";
 import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
 import {
@@ -136,6 +137,9 @@ export interface CreateReelResult {
 
 /** Create a reel and enqueue generation (BullMQ — survives restarts, retries on failure). */
 export async function createReel(options: CreateReelOptions): Promise<CreateReelResult> {
+  // Always require ffmpeg up front — even review-mode reels need it on approve/produce.
+  assertFfmpegReady("Create reel");
+
   const { niche, topic, tier = "cheap", parts = "off" } = options;
   const recipe = getRecipe(niche);
   if (options.horrorAudioKey && !/^horror-audio\/.+\.mp3$/i.test(options.horrorAudioKey)) {
@@ -508,6 +512,20 @@ async function updateStatus(
   });
 }
 
+async function failProduce(reelId: string, error: unknown): Promise<void> {
+  const message = getErrorMessage(error);
+  const patch: Record<string, unknown> = {
+    status: "failed",
+    progress: 0,
+    error: message,
+  };
+  if (isCaptionBurnError(error)) {
+    patch.captionsBurned = false;
+    patch.captionBurnError = message;
+  }
+  await Reel.findByIdAndUpdate(reelId, { $set: patch });
+}
+
 async function downloadGeneratedAsset(url: string, filename: string): Promise<string> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Could not reuse generated asset (${res.status}): ${url}`);
@@ -552,7 +570,7 @@ export async function processReel(reelId: string): Promise<void> {
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
     await cleanupRenderScratch(reelId);
-    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
+    await failProduce(reelId, error);
     throw error;
   }
 }
@@ -598,7 +616,7 @@ export async function processReelProduce(reelId: string): Promise<void> {
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
     await cleanupRenderScratch(reelId);
-    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
+    await failProduce(reelId, error);
     throw error;
   }
 }
@@ -758,6 +776,9 @@ async function produceImageReel(
   measuredCosts: MeasuredCostInput[],
   localFiles: string[]
 ): Promise<void> {
+  // Gate BEFORE any OpenRouter spend — missing ffmpeg must not burn image/TTS credits.
+  assertFfmpegReady("Produce", { fresh: true });
+
   const reelId = reel._id.toString();
   const isHybrid = recipe.strategy === "hybrid_scene";
   const models = resolveModels(reel.tier as Tier); // tts/video from reel tier
@@ -924,6 +945,7 @@ async function produceImageReel(
           ),
           {
             heroVideoModel: models.video,
+            captionStyle: reel.captionStyle,
             onHeroGenerated: async (heroVideoPath) => {
               const heroIndex = reel.scenes.findIndex((scene) => scene.isHero && !scene.assetUrl);
               if (heroIndex < 0) return;
@@ -997,8 +1019,10 @@ async function produceImageReel(
       reel.scenes[i].startTime = t.startTime;
       reel.scenes[i].duration = t.duration;
     });
-    // 5. Upload
+    // 5. Upload — caption burn hard-fails above, so success always means burned-in.
     await updateStatus(reelId, "uploading", 92);
+    reel.captionsBurned = true;
+    reel.captionBurnError = undefined;
     const videoBuffer = await readFile(result.videoPath);
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     const assContent = await readFile(result.assPath, "utf-8");
@@ -1057,6 +1081,9 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
   const models = resolveModels(reel.tier as Tier);
 
   try {
+    // Gate before TTS — gameplay re-narrates on every produce.
+    assertFfmpegReady("Gameplay produce", { fresh: true });
+
     await ensureDir(config.processingPath);
 
     // Ensure a plan exists (auto pipeline may skip plan_review).
@@ -1139,6 +1166,8 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
     if (reel.scenes[0]) reel.scenes[0].duration = result.totalDuration;
 
     await updateStatus(reelId, "uploading", 90);
+    reel.captionsBurned = true;
+    reel.captionBurnError = undefined;
     const videoBuffer = await readFile(result.videoPath);
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     const assContent = await readFile(result.assPath, "utf-8");
@@ -1179,7 +1208,7 @@ async function processGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<vo
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
     await cleanupRenderScratch(reelId);
-    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
+    await failProduce(reelId, error);
     throw error;
   }
 }
