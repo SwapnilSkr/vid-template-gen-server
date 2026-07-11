@@ -147,7 +147,11 @@ export async function saveThumbnailDraft(reelId: string): Promise<IReel> {
   }
 
   const current = reel.review ?? (await buildReelReviewPackage(reel));
-  await replaceReviewThumbnail(reel, current, draft.imagePath);
+  await replaceReviewThumbnail(
+    reel,
+    { ...current, thumbnailEditorState: draft.input ? { ...draft.input } : current.thumbnailEditorState },
+    draft.imagePath,
+  );
   await cleanupThumbnailDraft(reel);
   await reel.save();
   return reel;

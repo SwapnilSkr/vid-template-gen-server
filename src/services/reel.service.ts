@@ -20,6 +20,7 @@ import {
   toSentences,
   getPartOutroText,
   DEFAULT_BOUNCE_CAPTION_STYLE,
+  type GameplayRenderOpts,
 } from "./reel-gameplay.service";
 import {
   generateStory,
@@ -239,9 +240,16 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
   const { niche, topic, tier = "cheap" } = options;
   const autoTopic = !topic?.trim() || topic.trim().toLowerCase() === "auto";
   const source = options.source ?? (autoTopic ? (config.storyMode as StorySource) : "llm");
+  const startedAt = Date.now();
+  console.log(
+    `📝 Creating Reddit reel (sync story) source=${source} genre=${options.genre ?? "any"} topic=${autoTopic ? "auto" : topic}`
+  );
   const story = autoTopic
     ? await generateStory(source, { genre: options.genre, tier: tier as Tier })
     : await generateStory("llm", { genre: options.genre, tier: tier as Tier });
+  console.log(
+    `📝 Reddit story ready in ${((Date.now() - startedAt) / 1000).toFixed(1)}s: "${story.title.slice(0, 60)}"`
+  );
   const pipelineMode = options.pipelineMode ?? "review";
 
   const reel = new Reel({
@@ -279,12 +287,19 @@ async function createGameplayReelSeries(
   const { niche, topic, tier = "cheap", parts } = options;
   const autoTopic = !topic?.trim() || topic.trim().toLowerCase() === "auto";
   const source = options.source ?? (autoTopic ? (config.storyMode as StorySource) : "llm");
+  const seriesStartedAt = Date.now();
+  console.log(
+    `📝 Creating Reddit series (sync story) source=${source} parts=${String(parts)} genre=${options.genre ?? "any"}`
+  );
   const plannedParts = await generateStorySeries(source, {
     topic: autoTopic ? undefined : topic,
     genre: options.genre,
     tier: tier as Tier,
     parts: parts === "off" ? "auto" : parts,
   });
+  console.log(
+    `📝 Reddit series ready in ${((Date.now() - seriesStartedAt) / 1000).toFixed(1)}s: ${plannedParts.length} part(s)`
+  );
 
   const seriesId = plannedParts.length > 1 ? randomUUID() : undefined;
   const reels: IReel[] = [];
@@ -345,6 +360,8 @@ async function createHorrorReelSeries(
     options.motionMode ?? preset?.motionMode ?? (isHorror(niche) ? "parallax" : undefined);
   const voiceOverride = toVoiceOverride(options) ?? preset?.voice;
   const pipelineMode = options.pipelineMode ?? "review";
+  const seriesStartedAt = Date.now();
+  console.log(`📚 Planning horror series (${partCount} parts) niche=${niche} genre=${genre}`);
   const planned = await planHorrorSeries(
     niche,
     options.providedScript?.trim() || topic,
@@ -353,6 +370,9 @@ async function createHorrorReelSeries(
     partCount,
     undefined,
     options.horrorReferenceId
+  );
+  console.log(
+    `📚 Horror series plan ready in ${((Date.now() - seriesStartedAt) / 1000).toFixed(1)}s: ${planned.parts.length} part(s)`
   );
   const seriesId = randomUUID();
   const reels: IReel[] = [];
@@ -501,31 +521,73 @@ export function syncRedditBodyFromScenes(reel: IReel): void {
   if (body) reel.redditStory.body = body;
 }
 
+function logReelProgress(
+  id: string,
+  status: IReel["status"],
+  progress: number,
+  currentStep?: string
+): void {
+  console.log(
+    `📡 Reel ${id}: ${status} ${progress}%${currentStep ? ` — ${currentStep}` : ""}`
+  );
+}
+
 async function updateStatus(
   id: string,
   status: IReel["status"],
   progress: number,
-  error?: string
+  options?: { error?: string; currentStep?: string | null }
 ): Promise<void> {
-  await Reel.findByIdAndUpdate(id, {
+  const clamped = Math.min(100, Math.max(0, progress));
+  const $set: Record<string, unknown> = { status, progress: clamped };
+  if (options?.error) $set.error = options.error;
+
+  const update: Record<string, unknown> = { $set };
+  if (options?.currentStep === null) {
+    update.$unset = { currentStep: "" };
+  } else if (options?.currentStep !== undefined) {
+    $set.currentStep = options.currentStep;
+  }
+
+  logReelProgress(
+    id,
     status,
-    progress: Math.min(100, Math.max(0, progress)),
-    ...(error ? { error } : {}),
-  });
+    clamped,
+    options?.currentStep === null ? undefined : options?.currentStep
+  );
+  await Reel.findByIdAndUpdate(id, update);
+}
+
+/** Persist in-memory scene asset/audio changes + status so polling clients see
+ *  each still/narration as soon as it lands on S3 (not only after the full batch). */
+async function persistProduceProgress(
+  reel: IReel,
+  status: IReel["status"],
+  progress: number,
+  currentStep: string
+): Promise<void> {
+  const clamped = Math.min(100, Math.max(0, progress));
+  reel.status = status;
+  reel.progress = clamped;
+  reel.currentStep = currentStep;
+  reel.markModified("scenes");
+  logReelProgress(String(reel._id), status, clamped, currentStep);
+  await reel.save();
 }
 
 async function failProduce(reelId: string, error: unknown): Promise<void> {
   const message = getErrorMessage(error);
-  const patch: Record<string, unknown> = {
+  const $set: Record<string, unknown> = {
     status: "failed",
     progress: 0,
     error: message,
   };
   if (isCaptionBurnError(error)) {
-    patch.captionsBurned = false;
-    patch.captionBurnError = message;
+    $set.captionsBurned = false;
+    $set.captionBurnError = message;
   }
-  await Reel.findByIdAndUpdate(reelId, { $set: patch });
+  console.error(`💥 Reel ${reelId} produce failed: ${message}`);
+  await Reel.findByIdAndUpdate(reelId, { $set, $unset: { currentStep: "" } });
 }
 
 async function downloadGeneratedAsset(url: string, filename: string): Promise<string> {
@@ -594,10 +656,14 @@ export async function processReelPlan(reelId: string): Promise<void> {
     }
     reel.status = "plan_review";
     reel.progress = 15;
+    reel.currentStep = "Awaiting your review";
     await reel.save();
     console.log(`⏸️  Reel ${reelId} planned — awaiting review`);
   } catch (error: unknown) {
-    await updateStatus(reelId, "failed", 0, getErrorMessage(error));
+    await updateStatus(reelId, "failed", 0, {
+      error: getErrorMessage(error),
+      currentStep: null,
+    });
     throw error;
   }
 }
@@ -753,7 +819,7 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
   try {
     assertFfmpegReady("Composite-only produce", { fresh: true });
     await ensureDir(config.processingPath);
-    await updateStatus(reelId, "rendering", 45);
+    await updateStatus(reelId, "rendering", 45, { currentStep: "Composite-only re-render" });
 
     const assemblyPath = await downloadGeneratedAsset(
       reel.assemblyVideoUrl,
@@ -811,7 +877,7 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
       }
     }
 
-    await updateStatus(reelId, "uploading", 90);
+    await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
     reel.captionsBurned = true;
     reel.captionBurnError = undefined;
     const prevOutput = reel.outputUrl;
@@ -832,6 +898,7 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
     reel.costUsd = reel.costBreakdown.totalUsd;
     reel.status = "completed";
     reel.progress = 100;
+    reel.currentStep = undefined;
     reel.error = undefined;
     await reel.save();
 
@@ -873,7 +940,7 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
   try {
     assertFfmpegReady("Outro-only produce", { fresh: true });
     await ensureDir(config.processingPath);
-    await updateStatus(reelId, "rendering", 50);
+    await updateStatus(reelId, "rendering", 50, { currentStep: "Outro-only re-render" });
 
     const bodyPath = await downloadGeneratedAsset(reel.bodyVideoUrl, `${reelId}_body_reused.mp4`);
     localFiles.push(bodyPath);
@@ -937,7 +1004,7 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
       }
     }
 
-    await updateStatus(reelId, "uploading", 90);
+    await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
     const videoBuffer = await readFile(finalPath);
     const prevOutput = reel.outputUrl;
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
@@ -964,6 +1031,7 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
     reel.costUsd = reel.costBreakdown.totalUsd;
     reel.status = "completed";
     reel.progress = 100;
+    reel.currentStep = undefined;
     reel.error = undefined;
     await reel.save();
 
@@ -985,7 +1053,7 @@ async function planGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void>
   const reelId = reel._id.toString();
   const models = resolveModels(reel.tier as Tier);
   await ensureDir(config.processingPath);
-  await updateStatus(reelId, "planning", 5);
+  await updateStatus(reelId, "planning", 5, { currentStep: "Writing Reddit script" });
 
   const canReusePlan =
     reel.scenes.length > 0 && Boolean(reel.redditStory?.title && reel.redditStory?.body);
@@ -1071,7 +1139,7 @@ async function planImageReel(
   const motionMode = resolveMotionMode(reel);
 
   await ensureDir(config.processingPath);
-  await updateStatus(reelId, "planning", 5);
+  await updateStatus(reelId, "planning", 5, { currentStep: "Writing horror scenes" });
   reel.narrationVoice = tts;
 
   const canReusePlan = reel.scenes.length > 0 && Boolean(reel.title && reel.hook);
@@ -1158,11 +1226,18 @@ async function produceImageReel(
 
     // 2. Images — skip the hero scene; its visual comes from generateHeroVideo
     // at render time instead (no point paying for a still that's discarded).
-    await updateStatus(reelId, "generating_assets", 20);
+    // Persist each still to Mongo as soon as it uploads so Studio/dashboard
+    // polling can stream thumbnails instead of waiting for the full batch.
+    const sceneCount = reel.scenes.length;
+    await updateStatus(reelId, "generating_assets", 20, {
+      currentStep: `Generating images (0/${sceneCount})`,
+    });
     const imagePaths: (string | undefined)[] = [];
     const heroVideoPaths: (string | undefined)[] = [];
-    for (let i = 0; i < reel.scenes.length; i++) {
+    for (let i = 0; i < sceneCount; i++) {
       const scene = reel.scenes[i];
+      const progress = 20 + Math.round(((i + 1) / sceneCount) * 25);
+      const step = `Image ${i + 1}/${sceneCount}`;
       if (scene.isHero) {
         if (scene.assetUrl) {
           const heroVideoPath = await downloadGeneratedAsset(scene.assetUrl, `${reelId}_${i}_hero_reused.mp4`);
@@ -1170,19 +1245,17 @@ async function produceImageReel(
           localFiles.push(heroVideoPath);
         }
         imagePaths.push(undefined);
+        await persistProduceProgress(reel, "generating_assets", progress, `${step} (hero video)`);
         continue;
       }
       if (scene.assetUrl) {
         const imagePath = await downloadGeneratedAsset(scene.assetUrl, `${reelId}_${i}_reused.png`);
         imagePaths.push(imagePath);
         localFiles.push(imagePath);
-        await updateStatus(
-          reelId,
-          "generating_assets",
-          20 + Math.round(((i + 1) / reel.scenes.length) * 25)
-        );
+        await persistProduceProgress(reel, "generating_assets", progress, `${step} (cached)`);
         continue;
       }
+      console.log(`🖼️  Reel ${reelId}: generating ${step}`);
       const imagePath = await generateImage(scene.visualPrompt, reel.style, {
         model: imageModel,
         referenceImageUrls,
@@ -1200,30 +1273,26 @@ async function produceImageReel(
 
       const buffer = await readFile(imagePath);
       scene.assetUrl = await uploadImage(buffer, "compositions", `${reelId}_${i}.png`);
-      await updateStatus(
-        reelId,
-        "generating_assets",
-        20 + Math.round(((i + 1) / reel.scenes.length) * 25)
-      );
+      await persistProduceProgress(reel, "generating_assets", progress, step);
     }
-    await reel.save();
 
-    // 3. Narration (silence-trimmed per scene)
-    await updateStatus(reelId, "generating_audio", 50);
+    // 3. Narration (silence-trimmed per scene) — stream each audioUrl the same way.
+    await updateStatus(reelId, "generating_audio", 50, {
+      currentStep: `Generating narration (0/${sceneCount})`,
+    });
     const audioPaths: string[] = [];
-    for (let i = 0; i < reel.scenes.length; i++) {
+    for (let i = 0; i < sceneCount; i++) {
       const scene = reel.scenes[i];
+      const progress = 50 + Math.round(((i + 1) / sceneCount) * 20);
+      const step = `Narration ${i + 1}/${sceneCount}`;
       if (scene.audioUrl) {
         const audioPath = await downloadGeneratedAsset(scene.audioUrl, `${reelId}_${i}_reused.mp3`);
         audioPaths.push(audioPath);
         localFiles.push(audioPath);
-        await updateStatus(
-          reelId,
-          "generating_audio",
-          50 + Math.round(((i + 1) / reel.scenes.length) * 20)
-        );
+        await persistProduceProgress(reel, "generating_audio", progress, `${step} (cached)`);
         continue;
       }
+      console.log(`🎙️  Reel ${reelId}: generating ${step}`);
       const { audioPath } = await generateNarration(narrationForTts(scene.narration, reel.niche), {
         model: tts.model,
         voice: tts.voice,
@@ -1243,16 +1312,11 @@ async function produceImageReel(
 
       const buffer = await readFile(audioPath);
       scene.audioUrl = await uploadAudio(buffer, `${reelId}_${i}.mp3`);
-      await updateStatus(
-        reelId,
-        "generating_audio",
-        50 + Math.round(((i + 1) / reel.scenes.length) * 20)
-      );
+      await persistProduceProgress(reel, "generating_audio", progress, step);
     }
-    await reel.save();
 
     // 4. Render (align happens inside, from actual durations)
-    await updateStatus(reelId, "rendering", 75);
+    await updateStatus(reelId, "rendering", 75, { currentStep: "Assembling video" });
     // Motion engine handles any reel whose scenes use parallax or real
     // image-to-video; it reuses the same crossfade/caption/horror-mix assembly.
     const useMotion = reel.scenes.some(
@@ -1387,7 +1451,7 @@ async function produceImageReel(
       reel.scenes[i].duration = t.duration;
     });
     // 5. Upload — caption burn hard-fails above, so success always means burned-in.
-    await updateStatus(reelId, "uploading", 92);
+    await updateStatus(reelId, "uploading", 92, { currentStep: "Uploading video" });
     reel.captionsBurned = true;
     reel.captionBurnError = undefined;
     const videoBuffer = await readFile(result.videoPath);
@@ -1425,6 +1489,7 @@ async function produceImageReel(
 
     reel.status = "completed";
     reel.progress = 100;
+    reel.currentStep = undefined;
     // Mark publish pending in the same write as completed so studio polling
     // doesn't stop between "done" and the auto-publish enqueue.
     if (config.autoPublishYoutube) {
@@ -1488,9 +1553,12 @@ async function processGameplayReel(
     const partOutroText = getPartOutroText(story);
     const cachedSegmentPaths: (string | undefined)[] = [];
     let shortsCoverPath: string | undefined;
+    let shortsCoverBackground: GameplayRenderOpts["shortsCoverBackground"];
     if (reel.shortsCover?.imageUrl && reel.shortsCover.placement === "opening") {
       shortsCoverPath = await downloadGeneratedAsset(reel.shortsCover.imageUrl, `${reelId}_shorts_cover.png`);
       localFiles.push(shortsCoverPath);
+      const editorState = reel.shortsCover.editorState as { background?: GameplayRenderOpts["shortsCoverBackground"] } | undefined;
+      shortsCoverBackground = editorState?.background;
     }
     if (reel.titleAudioUrl) {
       const titlePath = await downloadGeneratedAsset(reel.titleAudioUrl, `${reelId}_title_reused.mp3`);
@@ -1523,7 +1591,9 @@ async function processGameplayReel(
       }
     }
 
-    await updateStatus(reelId, "rendering", 45);
+    await updateStatus(reelId, "generating_audio", 25, {
+      currentStep: "Generating narration",
+    });
     const gameplayMeasuredCosts: MeasuredCostInput[] = [];
     const hadPriorOutput = Boolean(reel.outputUrl);
     let narrationSpendUsd = 0;
@@ -1534,9 +1604,21 @@ async function processGameplayReel(
       captionStyle: reel.captionStyle,
       cachedSegmentPaths,
       shortsCoverPath,
+      shortsCoverBackground,
       onNarrationUsage: (usage) => {
         narrationCalls += 1;
         if (usage.costUsd !== undefined) narrationSpendUsd += usage.costUsd;
+      },
+      onNarrationProgress: async ({ index, total, label, generated }) => {
+        const progress = 25 + Math.round(((index + 1) / total) * 20);
+        await updateStatus(reelId, "generating_audio", progress, {
+          currentStep: generated ? label : `${label} (cached)`,
+        });
+      },
+      onNarrationComplete: async () => {
+        await updateStatus(reelId, "rendering", 45, {
+          currentStep: "Compositing gameplay",
+        });
       },
     });
 
@@ -1603,7 +1685,7 @@ async function processGameplayReel(
     localFiles.push(result.videoPath, result.assPath);
     if (reel.scenes[0]) reel.scenes[0].duration = result.totalDuration;
 
-    await updateStatus(reelId, "uploading", 90);
+    await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
     reel.captionsBurned = true;
     reel.captionBurnError = undefined;
     const videoBuffer = await readFile(result.videoPath);
@@ -1637,6 +1719,7 @@ async function processGameplayReel(
 
     reel.status = "completed";
     reel.progress = 100;
+    reel.currentStep = undefined;
     if (config.autoPublishYoutube) {
       if (reel.youtube) reel.youtube.status = "pending";
       else reel.youtube = { status: "pending" };

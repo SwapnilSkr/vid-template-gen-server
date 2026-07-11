@@ -229,6 +229,8 @@ export interface IReelReviewPackage {
   tags: string[];
   thumbnailUrl?: string;
   thumbnailPrompt?: string;
+  /** Layered source document retained after the staged PNG is uploaded. */
+  thumbnailEditorState?: Record<string, unknown>;
   visibilityNotes?: string;
   status: "draft" | "ready" | "approved";
   updatedAt?: Date;
@@ -342,6 +344,8 @@ export interface IReel extends Document {
 
   status: ReelStatus;
   progress: number;
+  /** Human-readable pipeline step for UI polling (e.g. "Image 3/9"). */
+  currentStep?: string;
   outputUrl?: string;
   /** Pre-outro assembled body video — enables outro-only re-renders. */
   bodyVideoUrl?: string;
@@ -620,6 +624,7 @@ const reelReviewSchema = new Schema<IReelReviewPackage>(
     tags: { type: [String], default: [] },
     thumbnailUrl: String,
     thumbnailPrompt: String,
+    thumbnailEditorState: Schema.Types.Mixed,
     visibilityNotes: String,
     status: {
       type: String,
@@ -735,6 +740,7 @@ const reelSchema = new Schema<IReel>(
       default: "pending",
     },
     progress: { type: Number, default: 0, min: 0, max: 100 },
+    currentStep: String,
     outputUrl: String,
     bodyVideoUrl: String,
     assemblyVideoUrl: String,

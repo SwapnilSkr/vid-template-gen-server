@@ -46,6 +46,10 @@ export function startWorkers(): void {
     "reel-processing",
     async (job: Job<ReelJobData, void, "process">) => {
       const { reelId, stage, produceMode } = job.data;
+      console.log(
+        `▶️  [reel] job ${job.id} start reel=${reelId} stage=${stage ?? "full"}` +
+          (produceMode ? ` mode=${produceMode}` : "")
+      );
       if (stage === "plan") await processReelPlan(reelId);
       else if (stage === "produce") await processReelProduce(reelId, produceMode ?? "full");
       else await processReel(reelId);
@@ -117,9 +121,12 @@ export function startWorkers(): void {
     const reelId = job?.data.reelId;
     if (!reelId) return;
     await Reel.findByIdAndUpdate(reelId, {
-      status: "failed",
-      progress: 0,
-      error: getErrorMessage(error),
+      $set: {
+        status: "failed",
+        progress: 0,
+        error: getErrorMessage(error),
+      },
+      $unset: { currentStep: "" },
     }).catch((updateError: unknown) => {
       console.error(`Could not mark reel ${reelId} failed:`, getErrorMessage(updateError));
     });
