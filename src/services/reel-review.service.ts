@@ -202,16 +202,16 @@ async function buildThumbnailPrompt(reel: IReel, title: string): Promise<string>
   const trendBlock = digest ? ` Reference these winning thumbnail/title patterns from top-performing videos in this genre: ${digest.replace(/\n/g, " ")}` : "";
 
   if (reel.niche === "reddit") {
-    return `Bold Reddit Shorts thumbnail for a${genre} story: huge readable hook text, white Reddit post card, tense contrast, gameplay background, red-orange accent, no clutter. Title: "${title}".${trendBlock}`;
+    return `Clean cinematic background for a${genre} Reddit story: tense gameplay-inspired environment, red-orange accent, strong focal area and negative space. Image only: no text, lettering, captions, logos, badges, cards, borders, UI, collage, split-screen, or thumbnail graphics.${trendBlock}`;
   }
 
   if (isHorrorNiche(reel.niche)) {
     const medium = reel.niche === "horror_comic" ? "2D horror comic panel" : "dark cinematic photoreal scene";
-    return `Terrifying YouTube Shorts horror thumbnail for a${genre} story: ${medium}, single unsettling figure or silhouette half-lit, deep shadows, blood-red or sickly-green rim light, huge bold white hook text with black stroke, high contrast, unsettling composition, no clutter. Title: "${title}".${trendBlock}`;
+    return `Clean background image for a${genre} horror story: ${medium}, single unsettling figure or silhouette half-lit, deep shadows, blood-red or sickly-green rim light, high contrast, unsettling composition and negative space. Image only: no text, lettering, captions, logos, badges, borders, UI, collage, split-screen, or thumbnail graphics.${trendBlock}`;
   }
 
   const recipe = getRecipe(reel.niche);
-  return `Bold YouTube Shorts thumbnail for a "${recipe.displayName}"${genre} video: cinematic dramatic scene, huge readable hook text, high contrast, no clutter. Title: "${title}".${trendBlock}`;
+  return `Clean cinematic background for a "${recipe.displayName}"${genre} video: dramatic scene, strong focal point, high contrast and negative space. Image only: no text, lettering, captions, logos, badges, borders, UI, collage, split-screen, or thumbnail graphics.${trendBlock}`;
 }
 
 interface ThumbnailBrand {
@@ -382,7 +382,7 @@ async function renderThumbnailPng(
     const imageModel = resolveModels("cheap").image;
     const rawBgPath = await generateImage(
       thumbnailPrompt,
-      "dramatic wide shot, high contrast, cinematic, YouTube thumbnail composition",
+      "dramatic wide shot, high contrast, cinematic, clean image only, no text, lettering, logos, UI, borders, collage, or thumbnail graphics",
       { model: imageModel, outputDir: config.processingPath, onUsage: onImageUsage }
     );
     localFiles.push(rawBgPath);

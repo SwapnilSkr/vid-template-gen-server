@@ -300,6 +300,7 @@ export async function reorderScenes(reelId: string, order: number[]): Promise<IR
 export async function updateReelSettings(
   reelId: string,
   patch: {
+    thumbnailSceneIndex?: number;
     artStyleId?: string;
     motionMode?: ReelMotionMode;
     imageModel?: string;
@@ -318,6 +319,14 @@ export async function updateReelSettings(
   const prevArt = reel.artStyleId;
   const prevModel = reel.imageModelOverride;
   const prevVoiceProfile = reel.audioPost?.voiceProfile;
+
+  if (patch.thumbnailSceneIndex !== undefined) {
+    if (!reel.niche.startsWith("horror")) throw new Error("Scene cover selection is only available for horror reels");
+    if (!reel.scenes.some((scene) => scene.index === patch.thumbnailSceneIndex)) {
+      throw new Error("Thumbnail scene does not exist");
+    }
+    reel.thumbnailSceneIndex = patch.thumbnailSceneIndex;
+  }
 
   if (patch.artStyleId !== undefined) reel.artStyleId = patch.artStyleId;
   if (patch.imageModel !== undefined) reel.imageModelOverride = patch.imageModel;

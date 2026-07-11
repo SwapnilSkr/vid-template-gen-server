@@ -63,6 +63,8 @@ export interface PlannedReel {
   title: string;
   hook: string;
   scenes: PlannedScene[];
+  /** Zero-extra-call recommendation returned with the normal horror plan. */
+  thumbnailSceneIndex?: number;
   /** deep story materials — present for horror (two-pass planner) */
   storyBible?: IStoryBible;
   /** public-domain/reference story used as inspiration for horror planning */
@@ -342,9 +344,11 @@ OUTPUT JSON ONLY (no markdown):
 {
   "title": "catchy title",
   "hook": "on-screen hook text (<= 8 words)",
+  "thumbnailSceneIndex": 0,
   "scenes": [ { "narration": "spoken line", "visualPrompt": "image description" } ]
 }
-Exactly ${recipe.sceneCount} scenes. Scene 1's narration is the HOOK — grab attention in the first 3 seconds.`;
+Exactly ${recipe.sceneCount} scenes. Scene 1's narration is the HOOK — grab attention in the first 3 seconds.
+Choose thumbnailSceneIndex from the scenes using zero-based indexing. Prefer one clear focal subject, strong silhouette and contrast, story importance, and negative space. Reject scenes whose prompt implies text, signage, UI, captions, logos, borders, collage, split-screen, or thumbnail graphics. Do not add any of those elements to visualPrompt.`;
 
   try {
     const { text, usage } = await generateText({ model: openrouter(llm), prompt: scriptPrompt, temperature: 0.85 });
@@ -352,6 +356,9 @@ Exactly ${recipe.sceneCount} scenes. Scene 1's narration is the HOOK — grab at
     const parsed = extractJson<PlannedReel>(text);
     if (!parsed.scenes?.length) throw new Error("No scenes returned");
     const planned = tightenHorrorPlan(parsed);
+    if (!Number.isInteger(planned.thumbnailSceneIndex) || planned.thumbnailSceneIndex! < 0 || planned.thumbnailSceneIndex! >= planned.scenes.length) {
+      planned.thumbnailSceneIndex = Math.max(0, Math.min(planned.scenes.length - 1, Math.floor(planned.scenes.length / 2)));
+    }
     planned.storyBible = bible;
     if (reference) {
       planned.horrorReference = {

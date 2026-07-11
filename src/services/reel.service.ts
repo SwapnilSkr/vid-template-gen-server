@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import ffmpeg from "fluent-ffmpeg";
 import { join } from "node:path";
 import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion, type IRedditStoryPayload } from "../models";
 import { config } from "../config";
@@ -699,6 +700,33 @@ async function persistAssemblyVideo(
   await replaceCachedMediaUrl(reel, "assemblyVideoUrl", url);
 }
 
+/** Put the user-authored vertical cover into the video without touching any AI
+ * assets. A short hold makes mobile frame-picking reliable. */
+async function applyOpeningShortsCover(
+  reel: IReel,
+  inputPath: string,
+  localFiles: string[]
+): Promise<string> {
+  if (!reel.shortsCover?.imageUrl || reel.shortsCover.placement !== "opening") return inputPath;
+  const reelId = reel._id.toString();
+  const coverPath = await downloadGeneratedAsset(reel.shortsCover.imageUrl, `${reelId}_cover_reused.png`);
+  const outputPath = join(config.processingPath, `${reelId}_cover_applied.mp4`);
+  localFiles.push(coverPath, outputPath);
+  const hold = Math.min(5, Math.max(0.25, reel.shortsCover.holdSeconds ?? 0.75)).toFixed(2);
+  await new Promise<void>((resolve, reject) => {
+    ffmpeg()
+      .input(inputPath)
+      .input(coverPath)
+      .complexFilter(`[0:v][1:v]overlay=0:0:enable='lt(t,${hold})'[v]`, ["v"])
+      .outputOptions(["-map", "0:a?", "-c:v", "libx264", "-preset", config.ffmpegPreset, "-crf", "21", "-c:a", "copy", "-movflags", "+faststart"])
+      .output(outputPath)
+      .on("end", () => resolve())
+      .on("error", (error) => reject(new Error(`Shorts cover composite failed: ${error.message}`)))
+      .run();
+  });
+  return outputPath;
+}
+
 /** Caption/FX composite from cached assemblyVideoUrl (horror/image) — no Ken Burns. */
 async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Promise<void> {
   const reelId = reel._id.toString();
@@ -757,6 +785,7 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
       result = { ...result, videoPath: fxPath };
     }
 
+    result = { ...result, videoPath: await applyOpeningShortsCover(reel, result.videoPath, localFiles) };
     await persistBodyVideo(reel, result.videoPath, localFiles);
 
     const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
@@ -1074,6 +1103,7 @@ async function planImageReel(
 
   reel.title = plan.title;
   reel.hook = plan.hook;
+  reel.thumbnailSceneIndex = plan.thumbnailSceneIndex;
   reel.style = style.promptSuffix;
   if (plan.storyBible) reel.storyBible = plan.storyBible;
   if (plan.horrorReference) reel.horrorReference = plan.horrorReference;
@@ -1328,6 +1358,7 @@ async function produceImageReel(
       result.videoPath = fxPath;
     }
 
+    result.videoPath = await applyOpeningShortsCover(reel, result.videoPath, localFiles);
     // Cache body (pre-outro) so Studio outro edits can skip a full rebuild.
     await persistBodyVideo(reel, result.videoPath, localFiles);
 
@@ -1456,6 +1487,11 @@ async function processGameplayReel(
     // Download cached paced narration segments (title / sentences / part-outro).
     const partOutroText = getPartOutroText(story);
     const cachedSegmentPaths: (string | undefined)[] = [];
+    let shortsCoverPath: string | undefined;
+    if (reel.shortsCover?.imageUrl && reel.shortsCover.placement === "opening") {
+      shortsCoverPath = await downloadGeneratedAsset(reel.shortsCover.imageUrl, `${reelId}_shorts_cover.png`);
+      localFiles.push(shortsCoverPath);
+    }
     if (reel.titleAudioUrl) {
       const titlePath = await downloadGeneratedAsset(reel.titleAudioUrl, `${reelId}_title_reused.mp3`);
       cachedSegmentPaths[0] = titlePath;
@@ -1497,6 +1533,7 @@ async function processGameplayReel(
       bodySentences,
       captionStyle: reel.captionStyle,
       cachedSegmentPaths,
+      shortsCoverPath,
       onNarrationUsage: (usage) => {
         narrationCalls += 1;
         if (usage.costUsd !== undefined) narrationSpendUsd += usage.costUsd;
@@ -1651,6 +1688,7 @@ export async function deleteReel(id: string): Promise<boolean> {
     reel.partOutroAudioUrl,
     reel.outroAudioUrl,
     reel.review?.thumbnailUrl,
+    reel.shortsCover?.imageUrl,
     ...reel.scenes.flatMap((s) => [s.assetUrl, s.audioUrl]),
     ...reel.voiceVariants.map((v) => v.videoUrl),
   ].filter((url): url is string => Boolean(url));

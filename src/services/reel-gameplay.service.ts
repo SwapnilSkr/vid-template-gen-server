@@ -164,6 +164,8 @@ export interface GameplayRenderOpts {
   cachedSegmentPaths?: (string | undefined)[];
   /** Revoice / explicit full re-TTS — ignore cachedSegmentPaths. */
   forceFreshNarration?: boolean;
+  /** User-composed 9:16 Shorts cover. Render-only input; never generated here. */
+  shortsCoverPath?: string;
 }
 
 /** Spoken part-outro line for multi-part Reddit stories (undefined on final part). */
@@ -223,6 +225,7 @@ async function renderGameplayReelInner(
     onNarrationUsage,
     cachedSegmentPaths,
     forceFreshNarration,
+    shortsCoverPath,
     ...narrationOpts
   } = ttsOpts;
 
@@ -317,7 +320,7 @@ async function renderGameplayReelInner(
   await composite(bgPath, narrPath, assPath, card, 250, titleDur, finalPath, {
     card: outroCard,
     start: outroStart,
-  });
+  }, shortsCoverPath);
 
   const bodyPaths = audioPaths.slice(1, 1 + bodySentences.length);
   const partOutroPath = outroText ? audioPaths[audioPaths.length - 1] : undefined;
@@ -475,7 +478,8 @@ function composite(
   cardY: number,
   titleDur: number,
   out: string,
-  outro?: { card?: { path: string; width: number; height: number }; start?: number }
+  outro?: { card?: { path: string; width: number; height: number }; start?: number },
+  shortsCoverPath?: string
 ): Promise<string> {
   const ass = assFilenameFilter(assPath);
   const en = finiteSeconds(titleDur, "title duration").toFixed(2);
@@ -494,7 +498,13 @@ function composite(
     outputLabel = "vout";
   }
 
-  return runComposite(bg, narr, card, out, fullFilters, outputLabel, outro?.card).catch(
+  if (shortsCoverPath) {
+    const coverInput = outro?.card ? 4 : 3;
+    fullFilters.push(`[${outputLabel}][${coverInput}:v]overlay=0:0:enable='lt(t,${en})'[vcover]`);
+    outputLabel = "vcover";
+  }
+
+  return runComposite(bg, narr, card, out, fullFilters, outputLabel, outro?.card, shortsCoverPath).catch(
     async (firstError) => {
       await unlink(out).catch(() => {});
       const message =
@@ -519,7 +529,8 @@ function runComposite(
   out: string,
   filters: string[],
   outputLabel: string,
-  outroCard?: { path: string; width: number; height: number }
+  outroCard?: { path: string; width: number; height: number },
+  shortsCoverPath?: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     let commandLine = "";
@@ -529,6 +540,7 @@ function runComposite(
       .input(narr) // 1: narration
       .input(card.path); // 2: reddit card png
     if (outroCard) command.input(outroCard.path); // 3: outro card png
+    if (shortsCoverPath) command.input(shortsCoverPath); // final input: composed 1080x1920 cover
     if (filters.length > 0) {
       command.complexFilter(filters, [outputLabel]);
     } else {
