@@ -12,6 +12,7 @@ import {
   listFontsController,
   getFontFileController,
 } from "../controllers";
+import { checkFfmpegCapability } from "../services/ffmpeg-capability.service";
 
 // ============================================
 // Reference-data routes for the create/revoice UI: the gameplay clip pool
@@ -28,4 +29,13 @@ export const metaRoutes = new Elysia({ prefix: "/api" })
   .get("/image-models", listImageModelsController)
   .get("/reel-defaults", getReelDefaultsController, { query: ReelDefaultsQuery })
   .get("/tts-voices", listTtsVoicesController)
-  .get("/tts-voices/sample", getVoiceSampleController, { query: VoiceSampleQuery });
+  .get("/tts-voices/sample", getVoiceSampleController, { query: VoiceSampleQuery })
+  .get("/ffmpeg", () => {
+    const capability = checkFfmpegCapability({ fresh: true });
+    return {
+      success: capability.ok,
+      data: capability,
+      error: capability.ok ? undefined : capability.message,
+      code: capability.code,
+    };
+  });

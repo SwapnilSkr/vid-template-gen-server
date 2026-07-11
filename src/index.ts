@@ -23,6 +23,19 @@ import { cleanupLocalProcessingOnStartup } from "./services/local-cleanup.servic
 import { startStoryTopUpScheduler } from "./services/story-scheduler.service";
 import { startHygieneScheduler } from "./services/hygiene-scheduler.service";
 import { startWorkers } from "./queue/workers";
+import { checkFfmpegCapability } from "./services/ffmpeg-capability.service";
+
+function logCaptionCapability(): void {
+  const cap = checkFfmpegCapability({ fresh: true });
+  if (!cap.ok) {
+    console.warn(`⚠️  ${cap.message}`);
+    for (const hint of cap.fixHints) console.warn(`   → ${hint}`);
+    return;
+  }
+  console.log(
+    `🔤 ${cap.message} · ${cap.fontCount} font(s) in ${cap.fontsDir}`
+  );
+}
 
 // Initialize application
 async function initialize() {
@@ -30,6 +43,7 @@ async function initialize() {
 
   // Validate configuration
   validateConfig();
+  logCaptionCapability();
 
   // Connect to MongoDB
   await connectDatabase();

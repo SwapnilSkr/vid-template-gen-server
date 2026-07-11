@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
 import { cleanupLocalProcessingController, reconcileS3Controller, purgeFailedReelsController } from "../controllers";
+import { runCaptionSmokeController } from "../controllers/caption-smoke.controller";
 
 // ============================================
 // Cleanup/reconciliation routes — on-demand triggers for the same logic the
@@ -17,4 +18,16 @@ export const maintenanceRoutes = new Elysia({ prefix: "/api/maintenance" })
       olderThanHours: t.Optional(t.String()),
     }),
   })
-  .post("/reels/purge-failed", purgeFailedReelsController);
+  .post("/reels/purge-failed", purgeFailedReelsController)
+  .get("/caption-smoke", runCaptionSmokeController, {
+    query: t.Object({ keepOutput: t.Optional(t.String()) }),
+    detail: {
+      summary: "Caption burn smoke test",
+      description:
+        "Burns ASS captions onto a blue test clip (including a one-space path) " +
+        "and verifies white text pixels appear. Use from Studio or curl to " +
+        "validate ffmpeg/libass/fonts on this device.",
+      tags: ["Maintenance", "Captions"],
+    },
+  });
+

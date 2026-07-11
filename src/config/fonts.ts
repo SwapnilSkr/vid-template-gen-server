@@ -33,7 +33,12 @@ export function hasFontsDir(): boolean {
   return existsSync(FONTS_DIR);
 }
 
-/** @deprecated Use hasFontsDir() — kept for call sites that need a boolean at import time. */
+/** True only when at least one registered TTF is on disk (not merely an empty dir). */
+export function hasBundledFonts(): boolean {
+  return listFonts().length > 0;
+}
+
+/** @deprecated Use hasFontsDir() / hasBundledFonts() — import-time snapshot only. */
 export const HAS_FONTS_DIR = hasFontsDir();
 
 export const BUNDLED_FONTS: BundledFont[] = [
