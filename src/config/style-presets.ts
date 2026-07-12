@@ -44,7 +44,7 @@ export const DEFAULT_CAPTION_STYLE: Required<
 > & { animation: NonNullable<ICaptionStyle["animation"]> } = {
   // Bundled face (server/assets/fonts) — never rely on system Arial (missing on many Linux boxes).
   fontName: DEFAULT_BUNDLED_FONT_FAMILY,
-  fontSize: 64,
+  fontSize: 135,
   primaryColor: "#FFFFFF",
   activeColor: "#FFD700", // amber highlight (ASS &H0000D7FF)
   outlineColor: "#000000",
@@ -56,7 +56,7 @@ export const DEFAULT_CAPTION_STYLE: Required<
   marginR: 90,
   chunkSize: 4,
   bold: true,
-  uppercase: false,
+  uppercase: true,
   animation: "none",
   karaoke: false, // flat text colour by default; opt-in letter-by-letter fill
 };

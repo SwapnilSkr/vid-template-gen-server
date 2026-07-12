@@ -154,7 +154,7 @@ export function toSentences(text: string): string[] {
 export const DEFAULT_BOUNCE_CAPTION_STYLE = {
   ...DEFAULT_CAPTION_STYLE,
   fontName: DEFAULT_BUNDLED_FONT_FAMILY,
-  fontSize: 76,
+  fontSize: 135,
   primaryColor: "#FFFFFF",
   activeColor: "#FFD700",
   outlineColor: "#000000",
@@ -166,7 +166,7 @@ export const DEFAULT_BOUNCE_CAPTION_STYLE = {
   marginR: 130,
   chunkSize: 3,
   bold: true,
-  uppercase: false,
+  uppercase: true,
   animation: "none" as const,
   karaoke: false,
 };
