@@ -118,6 +118,22 @@ export async function uploadToS3(
   return url;
 }
 
+/** Download an object by CDN or direct S3 URL using AWS credentials.
+ *  Private buckets return 403 to unauthenticated HTTP — the SDK avoids that. */
+export async function downloadFromUrl(url: string): Promise<Buffer> {
+  const key = getS3KeyFromUrl(url);
+  if (!key) throw new Error(`Could not resolve S3 key from URL: ${url}`);
+  try {
+    const res = await s3Client.send(new GetObjectCommand({ Bucket: config.s3Bucket, Key: key }));
+    const bytes = await res.Body?.transformToByteArray();
+    if (!bytes?.length) throw new Error(`Empty S3 object: ${key}`);
+    return Buffer.from(bytes);
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not download S3 object ${key}: ${detail}`);
+  }
+}
+
 /** Read + parse a JSON object straight from S3 (bypasses CDN caching, so it's
  *  always current — use for server-side reads of files that change, e.g. the
  *  model-health report). Returns undefined if missing/unreadable. */

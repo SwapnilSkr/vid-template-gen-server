@@ -21,6 +21,7 @@ import {
 } from "./reel-cost.service";
 import {
   cdnUrlFor,
+  downloadFromUrl,
   uploadAudio,
   uploadImage,
   uploadSubtitles,
@@ -89,10 +90,12 @@ function localAssetUrl(draftId: string, filename: string): string {
 }
 
 async function downloadAsset(url: string, targetPath: string): Promise<void> {
-  const res = await fetch(url);
-  if (!res.ok)
-    throw new Error(`Could not reuse generated asset (${res.status}): ${url}`);
-  await writeFile(targetPath, Buffer.from(await res.arrayBuffer()));
+  try {
+    await writeFile(targetPath, await downloadFromUrl(url));
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not reuse generated asset: ${url} — ${message}`);
+  }
 }
 
 async function loadReel(reelId: string): Promise<IReel> {
