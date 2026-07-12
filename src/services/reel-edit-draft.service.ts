@@ -21,9 +21,9 @@ import {
   uploadImage,
   uploadSubtitles,
   uploadVideo,
-  deleteFromS3,
+  deleteS3Urls,
 } from "./s3.service";
-import { Reel, type ICaptionStyle, type IReel } from "../models";
+import { Reel, type ICaptionStyle, type IEditDraftBaseline, type IReel } from "../models";
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import {
   cleanupDirectory,
@@ -97,11 +97,83 @@ async function loadReel(reelId: string): Promise<IReel> {
   return reel;
 }
 
+function snapshotEditDraftBaseline(reel: IReel): IEditDraftBaseline {
+  return {
+    assemblyVideoUrl: reel.assemblyVideoUrl,
+    bodyVideoUrl: reel.bodyVideoUrl,
+    outroAudioUrl: reel.outroAudioUrl,
+    scenes: reel.scenes.map((scene) => ({
+      index: scene.index,
+      assetUrl: scene.assetUrl,
+      audioUrl: scene.audioUrl,
+    })),
+  };
+}
+
+/** Collect `from` when it differs from `to` (superseded object). */
+function pushReplaced(
+  out: (string | undefined)[],
+  from: string | undefined,
+  to: string | undefined,
+): void {
+  if (from && from !== to) out.push(from);
+}
+
+/** Discard: restore pre-draft media and delete preview-only S3 uploads. */
+async function restoreEditDraftBaseline(reel: IReel): Promise<void> {
+  const baseline = reel.editDraft?.baseline;
+  if (!baseline) return;
+
+  const superseded: (string | undefined)[] = [];
+  pushReplaced(superseded, reel.assemblyVideoUrl, baseline.assemblyVideoUrl);
+  pushReplaced(superseded, reel.bodyVideoUrl, baseline.bodyVideoUrl);
+  pushReplaced(superseded, reel.outroAudioUrl, baseline.outroAudioUrl);
+
+  const priorByIndex = new Map(baseline.scenes.map((scene) => [scene.index, scene]));
+  for (const scene of reel.scenes) {
+    const prior = priorByIndex.get(scene.index);
+    pushReplaced(superseded, scene.assetUrl, prior?.assetUrl);
+    pushReplaced(superseded, scene.audioUrl, prior?.audioUrl);
+    scene.assetUrl = prior?.assetUrl;
+    scene.audioUrl = prior?.audioUrl;
+  }
+
+  reel.assemblyVideoUrl = baseline.assemblyVideoUrl;
+  reel.bodyVideoUrl = baseline.bodyVideoUrl;
+  reel.outroAudioUrl = baseline.outroAudioUrl;
+  reel.markModified("scenes");
+  await deleteS3Urls(superseded);
+}
+
+/** Save: drop the pre-draft objects that preview replaced. */
+async function deleteEditDraftBaseline(reel: IReel): Promise<void> {
+  const baseline = reel.editDraft?.baseline;
+  if (!baseline) return;
+
+  const superseded: (string | undefined)[] = [];
+  pushReplaced(superseded, baseline.assemblyVideoUrl, reel.assemblyVideoUrl);
+  pushReplaced(superseded, baseline.bodyVideoUrl, reel.bodyVideoUrl);
+  pushReplaced(superseded, baseline.outroAudioUrl, reel.outroAudioUrl);
+
+  const currentByIndex = new Map(reel.scenes.map((scene) => [scene.index, scene]));
+  for (const prior of baseline.scenes) {
+    const scene = currentByIndex.get(prior.index);
+    pushReplaced(superseded, prior.assetUrl, scene?.assetUrl);
+    pushReplaced(superseded, prior.audioUrl, scene?.audioUrl);
+  }
+  await deleteS3Urls(superseded);
+}
+
 async function cleanupExistingDraft(
   reel: IReel,
-  opts: { strict?: boolean } = {},
+  opts: { strict?: boolean; restore?: boolean } = {},
 ): Promise<void> {
   if (!reel.editDraft?.rootDir) return;
+  // Default restore so Discard / replace-draft rolls back preview uploads.
+  // Save passes restore:false after committing + deleting the baseline.
+  if (opts.restore !== false) {
+    await restoreEditDraftBaseline(reel);
+  }
   const draftId = reel.editDraft.id;
   const rootDir = reel.editDraft.rootDir;
   try {
@@ -112,15 +184,6 @@ async function cleanupExistingDraft(
   }
   reel.editDraft = undefined;
   reel.markModified("editDraft");
-}
-
-async function deleteSupersededUrls(
-  urls: (string | undefined)[],
-): Promise<void> {
-  const unique = [
-    ...new Set(urls.filter((url): url is string => Boolean(url))),
-  ];
-  await Promise.all(unique.map((url) => deleteFromS3(url).catch(() => {})));
 }
 
 /** Upload staged draft outputs to S3, update the reel doc, and delete replaced
@@ -175,7 +238,7 @@ async function commitRenderOutputs(
   reel.status = "completed";
   reel.progress = 100;
   reel.markModified("scenes");
-  await deleteSupersededUrls(superseded);
+  await deleteS3Urls(superseded);
 }
 
 export async function getDraftAssetPath(
@@ -388,15 +451,12 @@ async function buildDraftPreview(
 
   if (result.assemblyPath) {
     localFiles.push(result.assemblyPath);
-    const prevAssembly = reel.assemblyVideoUrl;
+    // Keep the previous assembly until Save/Discard so Discard can restore it.
     reel.assemblyVideoUrl = await uploadVideo(
       await readFile(result.assemblyPath),
       "reels",
       `${reelKey}_assembly.mp4`,
     );
-    if (prevAssembly && prevAssembly !== reel.assemblyVideoUrl) {
-      await deleteFromS3(prevAssembly).catch(() => {});
-    }
   }
 
   let bodyPath = result.videoPath;
@@ -407,15 +467,11 @@ async function buildDraftPreview(
     bodyPath = fxPath;
   }
 
-  const prevBody = reel.bodyVideoUrl;
   reel.bodyVideoUrl = await uploadVideo(
     await readFile(bodyPath),
     "reels",
     `${reelKey}_body.mp4`,
   );
-  if (prevBody && prevBody !== reel.bodyVideoUrl) {
-    await deleteFromS3(prevBody).catch(() => {});
-  }
 
   const outroResult = await appendBrandedOutro(bodyPath, reel, tts);
   let finalVideoPath = bodyPath;
@@ -423,23 +479,18 @@ async function buildDraftPreview(
     localFiles.push(outroResult.videoPath);
     if (outroResult.outroAudioGenerated) {
       localFiles.push(outroResult.outroAudioPath);
-      const prevOutro = reel.outroAudioUrl;
       reel.outroAudioUrl = await uploadAudio(
         await readFile(outroResult.outroAudioPath),
         `${reelKey}_outro.mp3`,
       );
-      if (prevOutro && prevOutro !== reel.outroAudioUrl) {
-        await deleteFromS3(prevOutro).catch(() => {});
-      }
     }
     finalVideoPath = outroResult.videoPath;
     if (outroResult.subtitle) {
       await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
     }
   } else if (reel.skipBrandedOutro && reel.outroAudioUrl) {
-    const prevOutro = reel.outroAudioUrl;
+    // Baseline still holds the prior outro audio for Discard restore.
     reel.outroAudioUrl = undefined;
-    await deleteFromS3(prevOutro).catch(() => {});
   }
 
   const outputPath = join(rootDir, "preview.mp4");
@@ -477,6 +528,7 @@ export async function createSceneEditDraft(
     rootDir,
     createdAt: new Date(),
     sceneAssets: [],
+    baseline: snapshotEditDraftBaseline(reel),
   };
 
   const localFiles: string[] = [];
@@ -602,6 +654,7 @@ export async function createReelEditDraft(
     rootDir,
     createdAt: new Date(),
     sceneAssets: [],
+    baseline: snapshotEditDraftBaseline(reel),
   };
 
   const localFiles: string[] = [];
@@ -705,7 +758,8 @@ export async function saveEditDraft(reelId: string): Promise<IReel> {
     subtitlesPath: draft.subtitlesPath,
     sceneAssets: draft.sceneAssets,
   });
-  await cleanupExistingDraft(reel, { strict: true });
+  await deleteEditDraftBaseline(reel);
+  await cleanupExistingDraft(reel, { strict: true, restore: false });
   await cleanupRenderScratch(`draft_${draft.id}`);
   await reel.save();
   return reel;
@@ -726,8 +780,10 @@ export async function applyCaptionsAndRender(
   reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
   reel.markModified("captionStyle");
   // Captions are burned into body; assembly stays reusable.
+  const staleBody = reel.bodyVideoUrl;
   reel.bodyVideoUrl = undefined;
   await reel.save();
+  await deleteS3Urls([staleBody]);
 
   const { regenerateReel } = await import("./reel-edit.service");
   if (reel.strategy === "gameplay_overlay") {

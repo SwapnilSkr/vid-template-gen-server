@@ -161,6 +161,15 @@ export interface ISceneDraftAsset {
   audioPath?: string;
 }
 
+/** Snapshot of committed media before a draft preview mutates assembly/body/
+ *  recovered scene assets. Discard restores these; save deletes the superseded. */
+export interface IEditDraftBaseline {
+  assemblyVideoUrl?: string;
+  bodyVideoUrl?: string;
+  outroAudioUrl?: string;
+  scenes: { index: number; assetUrl?: string; audioUrl?: string }[];
+}
+
 export interface IReelEditDraft {
   id: string;
   kind: "scene_regen" | "render_only";
@@ -172,6 +181,8 @@ export interface IReelEditDraft {
   subtitlesPath?: string;
   rootDir: string;
   createdAt: Date;
+  /** Pre-draft committed media — used to roll back Discard without losing Save. */
+  baseline?: IEditDraftBaseline;
 }
 
 /** A locally staged thumbnail composition (Thumbnail Studio). The composed PNG
@@ -547,6 +558,25 @@ const sceneDraftAssetSchema = new Schema<ISceneDraftAsset>(
   { _id: false }
 );
 
+const editDraftBaselineSceneSchema = new Schema(
+  {
+    index: { type: Number, required: true },
+    assetUrl: String,
+    audioUrl: String,
+  },
+  { _id: false }
+);
+
+const editDraftBaselineSchema = new Schema<IEditDraftBaseline>(
+  {
+    assemblyVideoUrl: String,
+    bodyVideoUrl: String,
+    outroAudioUrl: String,
+    scenes: { type: [editDraftBaselineSceneSchema], default: [] },
+  },
+  { _id: false }
+);
+
 const reelEditDraftSchema = new Schema<IReelEditDraft>(
   {
     id: { type: String, required: true },
@@ -559,6 +589,7 @@ const reelEditDraftSchema = new Schema<IReelEditDraft>(
     subtitlesPath: String,
     rootDir: { type: String, required: true },
     createdAt: { type: Date, default: () => new Date() },
+    baseline: editDraftBaselineSchema,
   },
   { _id: false }
 );

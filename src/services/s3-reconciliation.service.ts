@@ -1,5 +1,5 @@
 import { Reel, Composition } from "../models";
-import { listKeysWithMeta, deleteKey, type S3Folder } from "./s3.service";
+import { listKeysWithMeta, deleteKey, getS3KeyFromUrl, type S3Folder } from "./s3.service";
 import { getErrorMessage } from "../types";
 
 // ============================================
@@ -20,17 +20,11 @@ import { getErrorMessage } from "../types";
 const SWEEP_FOLDERS: S3Folder[] = ["reels", "compositions", "audio", "subtitles"];
 const MIN_AGE_MS = 2 * 60 * 60 * 1000; // 2h — anything newer might belong to an in-flight render
 
-function keyFromUrl(url?: string): string | undefined {
-  if (!url) return undefined;
-  const parts = url.split(".amazonaws.com/");
-  return parts.length >= 2 ? parts[1] : undefined;
-}
-
 /** Every S3 key currently referenced by a live Reel or Composition document. */
 async function referencedKeys(): Promise<Set<string>> {
   const keys = new Set<string>();
   const addUrl = (url?: string) => {
-    const key = keyFromUrl(url);
+    const key = url ? getS3KeyFromUrl(url) : null;
     if (key) keys.add(key);
   };
 
@@ -45,6 +39,7 @@ async function referencedKeys(): Promise<Set<string>> {
       partOutroAudioUrl: 1,
       outroAudioUrl: 1,
       "review.thumbnailUrl": 1,
+      "shortsCover.imageUrl": 1,
       scenes: 1,
       voiceVariants: 1,
     }
@@ -58,6 +53,7 @@ async function referencedKeys(): Promise<Set<string>> {
     addUrl(reel.partOutroAudioUrl);
     addUrl(reel.outroAudioUrl);
     addUrl(reel.review?.thumbnailUrl);
+    addUrl(reel.shortsCover?.imageUrl);
     for (const scene of reel.scenes) {
       addUrl(scene.assetUrl);
       addUrl(scene.audioUrl);

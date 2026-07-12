@@ -251,6 +251,12 @@ export async function deleteFromS3(url: string): Promise<void> {
   await deleteKey(key);
 }
 
+/** Best-effort GC for superseded media URLs. Failures never block the caller. */
+export async function deleteS3Urls(urls: (string | undefined)[]): Promise<void> {
+  const unique = [...new Set(urls.filter((url): url is string => Boolean(url)))];
+  await Promise.all(unique.map((url) => deleteFromS3(url).catch(() => {})));
+}
+
 /**
  * Get S3 key from a full URL — direct S3 or CloudFront.
  */
