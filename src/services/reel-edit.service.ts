@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   Reel,
   type IReel,
@@ -9,11 +10,20 @@ import {
   type IRedditStoryPayload,
 } from "../models";
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
-import { enqueueReelPlan, enqueueReelProduce } from "../queue/queues";
-import { syncRedditBodyFromScenes, redditPayloadFromStoryDraft } from "./reel.service";
+import { enqueueReelPlan, enqueueReelProduce, removeReelJob } from "../queue/queues";
+import {
+  syncRedditBodyFromScenes,
+  redditPayloadFromStoryDraft,
+  redditPayloadFromStoryPart,
+  listReelsBySeries,
+  deleteReel,
+  collectReelS3AssetUrls,
+  cleanupReelLocalStaging,
+} from "./reel.service";
 import { assertFfmpegReady } from "./ffmpeg-capability.service";
 import { deleteS3Urls } from "./s3.service";
 import {
+  generateStorySeries,
   loadAndReserveBankStory,
   markStoryReel,
   materializeFromSeed,
@@ -577,6 +587,221 @@ export async function approvePlan(reelId: string): Promise<IReel> {
   return loadReel(reelId);
 }
 
+/** Wipe scenes/plan state before attaching a new story. Returns stale S3 URLs. */
+async function resetReelForReplan(reel: IReel): Promise<string[]> {
+  const staleMedia = collectReelS3AssetUrls(reel);
+  await cleanupReelLocalStaging(reel);
+
+  reel.scenes = [];
+  reel.title = undefined;
+  reel.hook = undefined;
+  reel.outputUrl = undefined;
+  reel.bodyVideoUrl = undefined;
+  reel.assemblyVideoUrl = undefined;
+  reel.subtitlesUrl = undefined;
+  reel.titleAudioUrl = undefined;
+  reel.partOutroAudioUrl = undefined;
+  reel.outroAudioUrl = undefined;
+  reel.voiceVariants = [];
+  reel.markModified("voiceVariants");
+  reel.editDraft = undefined;
+  reel.markModified("editDraft");
+  reel.thumbnailDraft = undefined;
+  reel.markModified("thumbnailDraft");
+  if (reel.review?.thumbnailUrl) {
+    reel.review.thumbnailUrl = undefined;
+    reel.markModified("review");
+  }
+  if (reel.shortsCover?.imageUrl) {
+    reel.shortsCover.imageUrl = undefined;
+    reel.markModified("shortsCover");
+  }
+  if (reel.strategy === "gameplay_overlay") {
+    reel.redditStory = undefined;
+    reel.markModified("redditStory");
+  }
+  reel.status = "planning";
+  reel.progress = 5;
+  reel.error = undefined;
+  return staleMedia;
+}
+
+function seriesPartsForGenerate(
+  parts: "off" | "auto" | number | undefined,
+  source: StorySource
+): number | "auto" | undefined {
+  if (parts === "off") {
+    return source === "verbatim" ? "auto" : undefined;
+  }
+  return parts;
+}
+
+function defaultSeriesParts(reel: IReel): "off" | "auto" | number {
+  if (reel.partCount && reel.partCount > 1) return reel.partCount;
+  return "auto";
+}
+
+function sortSeriesReels(reels: IReel[]): IReel[] {
+  return [...reels].sort(
+    (a, b) => (a.partNumber ?? 1) - (b.partNumber ?? 1) || a.createdAt.getTime() - b.createdAt.getTime()
+  );
+}
+
+function cloneSeriesReelFromAnchor(anchor: IReel, part: { partNumber?: number; partCount?: number }): IReel {
+  return new Reel({
+    niche: anchor.niche,
+    topic: anchor.topic,
+    tier: anchor.tier,
+    storySource: anchor.storySource,
+    genre: anchor.genre,
+    strategy: anchor.strategy,
+    gameplayKey: anchor.gameplayKey,
+    horrorAudioKey: anchor.horrorAudioKey,
+    outroChannelId: anchor.outroChannelId,
+    outro: anchor.outro,
+    thumbnailMode: anchor.thumbnailMode,
+    imageModelOverride: anchor.imageModelOverride,
+    voiceOverride: anchor.voiceOverride,
+    captionStyle: anchor.captionStyle,
+    pipelineMode: anchor.pipelineMode,
+    status: "planning",
+    progress: 5,
+    partNumber: part.partNumber,
+    partCount: part.partCount,
+  });
+}
+
+/** Discard plans for every reel in a series and re-plan from one selected story. */
+export async function replanReelSeries(
+  reelId: string,
+  patch: {
+    selectedStoryId?: string;
+    selectedSeedUrl?: string;
+    parts?: "off" | "auto" | number;
+  }
+): Promise<IReel> {
+  if (!patch.selectedStoryId && !patch.selectedSeedUrl) {
+    throw new Error("Select a story to re-plan the series");
+  }
+
+  const anchor = await loadReel(reelId);
+  assertEditable(anchor);
+  if (anchor.strategy !== "gameplay_overlay") {
+    throw new Error("Series re-plan is only supported for Reddit gameplay reels");
+  }
+
+  const source = (anchor.storySource ?? "hybrid") as StorySource;
+  const existingReels = anchor.seriesId
+    ? sortSeriesReels(await listReelsBySeries(anchor.seriesId))
+    : [anchor];
+  for (const reel of existingReels) assertEditable(reel);
+
+  const excludeReelIds = existingReels.map((reel) => reel._id.toString());
+  const partsSetting = patch.parts ?? defaultSeriesParts(anchor);
+  const generateParts = seriesPartsForGenerate(partsSetting, source);
+
+  if (generateParts === undefined) {
+    const target = existingReels.find((reel) => reel._id.toString() === reelId) ?? anchor;
+    for (const reel of existingReels) {
+      if (reel._id.toString() === target._id.toString()) continue;
+      await deleteReel(reel._id.toString());
+    }
+    const replanned = await replanReel(target._id.toString(), patch);
+    if (replanned.seriesId || (replanned.partCount ?? 1) > 1) {
+      replanned.seriesId = undefined;
+      replanned.partNumber = 1;
+      replanned.partCount = 1;
+      if (replanned.redditStory) {
+        replanned.redditStory.partNumber = 1;
+        replanned.redditStory.partCount = 1;
+        replanned.markModified("redditStory");
+      }
+      await replanned.save();
+    }
+    return loadReel(target._id.toString());
+  }
+
+  let reservedStoryId: string | undefined;
+  if (patch.selectedStoryId) {
+    const story = await loadAndReserveBankStory(patch.selectedStoryId);
+    reservedStoryId = story.storyId;
+  }
+
+  const plannedParts = await generateStorySeries(source, {
+    genre: anchor.genre,
+    tier: anchor.tier as Tier,
+    parts: generateParts,
+    selectedStoryId: patch.selectedStoryId,
+    selectedSeedUrl: patch.selectedSeedUrl,
+    excludeReelIds,
+  });
+
+  const nextSeriesId = plannedParts.length > 1 ? anchor.seriesId ?? randomUUID() : undefined;
+  const staleMedia: string[] = [];
+  const updatedReels: IReel[] = [];
+
+  for (let i = 0; i < plannedParts.length; i++) {
+    const part = plannedParts[i];
+    let reel =
+      existingReels.find((candidate) => (candidate.partNumber ?? 1) === (part.partNumber ?? i + 1)) ??
+      existingReels[i];
+
+    if (!reel) {
+      reel = cloneSeriesReelFromAnchor(anchor, {
+        partNumber: part.partNumber,
+        partCount: part.partCount,
+      });
+    } else {
+      staleMedia.push(...(await resetReelForReplan(reel)));
+    }
+
+    reel.title = part.title;
+    reel.hook = part.title;
+    reel.genre = part.genre ?? anchor.genre;
+    reel.redditStory = redditPayloadFromStoryPart(part);
+    reel.markModified("redditStory");
+    reel.seriesId = nextSeriesId;
+    reel.partNumber = part.partNumber;
+    reel.partCount = part.partCount;
+    reel.status = "planning";
+    reel.progress = 5;
+    reel.error = undefined;
+    await reel.save();
+    updatedReels.push(reel);
+    await removeReelJob(reel._id.toString());
+    await enqueueReelPlan(reel._id.toString());
+  }
+
+  const keepIds = new Set(updatedReels.map((reel) => reel._id.toString()));
+  for (const reel of existingReels) {
+    const id = reel._id.toString();
+    if (keepIds.has(id)) continue;
+    await deleteReel(id);
+  }
+
+  if (plannedParts.length === 1) {
+    const sole = updatedReels[0];
+    sole.seriesId = undefined;
+    sole.partNumber = 1;
+    sole.partCount = 1;
+    if (sole.redditStory) {
+      sole.redditStory.partNumber = 1;
+      sole.redditStory.partCount = 1;
+      sole.markModified("redditStory");
+    }
+    await sole.save();
+  }
+
+  if (reservedStoryId && updatedReels[0]) {
+    await markStoryReel(reservedStoryId, updatedReels[0]._id.toString());
+  }
+
+  await deleteS3Urls(staleMedia);
+
+  const returnId = keepIds.has(reelId) ? reelId : updatedReels[0]._id.toString();
+  return loadReel(returnId);
+}
+
 /** Discard the current plan and re-plan (new story / reference / pasted script). */
 export async function replanReel(
   reelId: string,
@@ -595,34 +820,7 @@ export async function replanReel(
   if (patch.horrorReferenceId !== undefined) reel.horrorReferenceId = patch.horrorReferenceId;
 
   // Drop prior render media before wiping the plan so S3 doesn't keep orphans.
-  const staleMedia = [
-    reel.outputUrl,
-    reel.bodyVideoUrl,
-    reel.assemblyVideoUrl,
-    reel.subtitlesUrl,
-    reel.titleAudioUrl,
-    reel.partOutroAudioUrl,
-    reel.outroAudioUrl,
-    ...sceneMediaUrls(reel),
-  ];
-
-  reel.scenes = [];
-  reel.title = undefined;
-  reel.hook = undefined;
-  reel.outputUrl = undefined;
-  reel.bodyVideoUrl = undefined;
-  reel.assemblyVideoUrl = undefined;
-  reel.subtitlesUrl = undefined;
-  reel.titleAudioUrl = undefined;
-  reel.partOutroAudioUrl = undefined;
-  reel.outroAudioUrl = undefined;
-  if (reel.strategy === "gameplay_overlay") {
-    reel.redditStory = undefined;
-    reel.markModified("redditStory");
-  }
-  reel.status = "planning";
-  reel.progress = 5;
-  reel.error = undefined;
+  const staleMedia = await resetReelForReplan(reel);
 
   if (reel.strategy === "gameplay_overlay") {
     const source = (reel.storySource ?? "llm") as StorySource;
@@ -668,6 +866,7 @@ export async function replanReel(
 
   await reel.save();
   await deleteS3Urls(staleMedia);
+  await removeReelJob(reelId);
   await enqueueReelPlan(reelId);
   return loadReel(reelId);
 }

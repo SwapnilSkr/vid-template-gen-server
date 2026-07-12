@@ -237,6 +237,13 @@ export const ReplanReelBody = t.Object({
 });
 export type TReplanReelBody = typeof ReplanReelBody.static;
 
+export const ReplanReelSeriesBody = t.Object({
+  selectedStoryId: t.Optional(t.String()),
+  selectedSeedUrl: t.Optional(t.String()),
+  parts: t.Optional(t.Union([t.Literal("off"), t.Literal("auto"), t.Number()])),
+});
+export type TReplanReelSeriesBody = typeof ReplanReelSeriesBody.static;
+
 export const RevoiceReelBody = t.Object({
   variants: t.Array(
     t.Object({

@@ -36,6 +36,7 @@ import {
   resumeFailedReel,
   approvePlan,
   replanReel,
+  replanReelSeries,
   updateRedditCard,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
@@ -63,6 +64,7 @@ import type {
   TUpdateRedditCardBody,
   TRegenerateReelBody,
   TReplanReelBody,
+  TReplanReelSeriesBody,
   TCustomThumbnailBody,
   TStageThumbnailDraftBody,
   TStageThumbnailImageBody,
@@ -649,6 +651,10 @@ interface ReplanContext extends Context {
   params: TIdParams;
   body: TReplanReelBody;
 }
+interface ReplanSeriesContext extends Context {
+  params: TIdParams;
+  body: TReplanReelSeriesBody;
+}
 interface DraftAssetContext extends Context {
   params: TDraftAssetParams;
 }
@@ -783,6 +789,15 @@ export async function replanReelController({
   set,
 }: ReplanContext) {
   return runEdit(set, () => replanReel(params.id, body));
+}
+
+/** Discard every episode's plan in a series and re-plan from one selected story. */
+export async function replanReelSeriesController({
+  params,
+  body,
+  set,
+}: ReplanSeriesContext) {
+  return runEdit(set, () => replanReelSeries(params.id, body));
 }
 
 export async function saveReelEditDraftController({

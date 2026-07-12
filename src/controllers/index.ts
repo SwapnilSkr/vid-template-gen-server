@@ -67,6 +67,7 @@ export {
   resumeFailedReelController,
   approvePlanController,
   replanReelController,
+  replanReelSeriesController,
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,

@@ -23,6 +23,7 @@ import {
   UpdateRedditCardBody,
   RegenerateReelBody,
   ReplanReelBody,
+  ReplanReelSeriesBody,
   DraftAssetParams,
   SaveShortsCoverBody,
 } from "../types/guards";
@@ -58,6 +59,7 @@ import {
   resumeFailedReelController,
   approvePlanController,
   replanReelController,
+  replanReelSeriesController,
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,
@@ -224,6 +226,12 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
 
   // Discard the plan and re-plan (new story / reference / pasted script)
   .post("/:id/replan", replanReelController, { params: IdParams, body: ReplanReelBody })
+
+  // Re-plan every episode in a Reddit series from one selected story
+  .post("/:id/replan-series", replanReelSeriesController, {
+    params: IdParams,
+    body: ReplanReelSeriesBody,
+  })
 
   // Reorder scenes (2-segment path — declared before the :index routes)
   .post("/:id/scenes/reorder", reorderScenesController, {

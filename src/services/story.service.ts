@@ -555,11 +555,26 @@ async function isDuplicate(title: string, seedUrl?: string, excludeStoryId?: str
   return !!(await Story.exists(premiseFilter));
 }
 
-async function isSeedUrlUsedByLiveReel(seedUrl?: string, excludeReelId?: string): Promise<boolean> {
+function reelSeedExclusionFilter(excludeReelIds?: string[]): Record<string, unknown> {
+  if (!excludeReelIds?.length) return {};
+  if (excludeReelIds.length === 1) return { _id: { $ne: excludeReelIds[0] } };
+  return { _id: { $nin: excludeReelIds } };
+}
+
+async function isSeedUrlUsedByLiveReel(
+  seedUrl?: string,
+  excludeReelId?: string | string[]
+): Promise<boolean> {
   if (!seedUrl) return false;
-  const filter = excludeReelId
-    ? { "redditStory.seedUrl": seedUrl, _id: { $ne: excludeReelId } }
-    : { "redditStory.seedUrl": seedUrl };
+  const excludeReelIds = Array.isArray(excludeReelId)
+    ? excludeReelId
+    : excludeReelId
+      ? [excludeReelId]
+      : undefined;
+  const filter = {
+    "redditStory.seedUrl": seedUrl,
+    ...reelSeedExclusionFilter(excludeReelIds),
+  };
   return !!(await Reel.exists(filter));
 }
 
@@ -592,12 +607,13 @@ async function fetchPostByUrl(url: string): Promise<RedditPost | null> {
 export async function assertStoryAvailable(
   title: string,
   seedUrl?: string,
-  opts?: { excludeStoryId?: string; excludeReelId?: string }
+  opts?: { excludeStoryId?: string; excludeReelId?: string; excludeReelIds?: string[] }
 ): Promise<void> {
   if (await isDuplicate(title, seedUrl, opts?.excludeStoryId)) {
     throw new Error("This story is no longer available");
   }
-  if (seedUrl && (await isSeedUrlUsedByLiveReel(seedUrl, opts?.excludeReelId))) {
+  const excludeReelIds = opts?.excludeReelIds ?? (opts?.excludeReelId ? [opts.excludeReelId] : undefined);
+  if (seedUrl && (await isSeedUrlUsedByLiveReel(seedUrl, excludeReelIds))) {
     throw new Error("This Reddit post is already used by another reel");
   }
 }
@@ -727,7 +743,7 @@ function bankDocToPost(doc: IStory, genre: RedditGenre): RedditPost {
 
 async function resolvePostForSeries(
   genre: RedditGenre,
-  opts: { selectedSeedUrl?: string; selectedStoryId?: string }
+  opts: { selectedSeedUrl?: string; selectedStoryId?: string; excludeReelIds?: string[] }
 ): Promise<RedditPost> {
   if (opts.selectedSeedUrl) {
     let post = await fetchPostByUrl(opts.selectedSeedUrl);
@@ -737,14 +753,17 @@ async function resolvePostForSeries(
       post = posts.find((p) => normalizeRedditUrl(p.url) === target) ?? null;
     }
     if (!post) throw new Error(`Could not load Reddit post: ${opts.selectedSeedUrl}`);
-    await assertStoryAvailable(post.title, post.url);
+    await assertStoryAvailable(post.title, post.url, { excludeReelIds: opts.excludeReelIds });
     return post;
   }
 
   if (opts.selectedStoryId) {
     const doc = await Story.findById(opts.selectedStoryId);
     if (!doc) throw new Error("Story not found");
-    await assertStoryAvailable(doc.title, doc.seedUrl, { excludeStoryId: doc._id.toString() });
+    await assertStoryAvailable(doc.title, doc.seedUrl, {
+      excludeStoryId: doc._id.toString(),
+      excludeReelIds: opts.excludeReelIds,
+    });
     if (doc.seedUrl) {
       let post = await fetchPostByUrl(doc.seedUrl);
       if (!post) {
@@ -1107,6 +1126,7 @@ export async function generateStorySeries(
     parts?: number | "auto";
     selectedStoryId?: string;
     selectedSeedUrl?: string;
+    excludeReelIds?: string[];
   } = {}
 ): Promise<StoryPartDraft[]> {
   const tier = opts.tier ?? "value";
@@ -1133,6 +1153,7 @@ export async function generateStorySeries(
   const post = await resolvePostForSeries(genre, {
     selectedSeedUrl: opts.selectedSeedUrl,
     selectedStoryId: opts.selectedStoryId,
+    excludeReelIds: opts.excludeReelIds,
   });
 
   if (mode === "hybrid") {
