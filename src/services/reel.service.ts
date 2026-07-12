@@ -56,6 +56,7 @@ import {
   deleteFromS3,
   deleteS3Urls,
   cdnUrlFor,
+  downloadFromUrl,
 } from "./s3.service";
 import {
   enqueueReel,
@@ -685,11 +686,28 @@ async function failProduce(reelId: string, error: unknown): Promise<void> {
 }
 
 async function downloadGeneratedAsset(url: string, filename: string): Promise<string> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Could not reuse generated asset (${res.status}): ${url}`);
   const path = join(config.processingPath, filename);
-  await writeFile(path, Buffer.from(await res.arrayBuffer()));
-  return path;
+  try {
+    await writeFile(path, await downloadFromUrl(url));
+    return path;
+  } catch (error: unknown) {
+    throw new Error(`Could not reuse generated asset: ${url} — ${getErrorMessage(error)}`);
+  }
+}
+
+/** Best-effort cache reuse — returns undefined when the S3 object is gone so the
+ *  caller can regenerate instead of failing the whole produce job. */
+async function tryDownloadGeneratedAsset(
+  url: string | undefined,
+  filename: string
+): Promise<string | undefined> {
+  if (!url) return undefined;
+  try {
+    return await downloadGeneratedAsset(url, filename);
+  } catch (error: unknown) {
+    console.warn(`⚠️ Cached asset missing, will regenerate: ${url} — ${getErrorMessage(error)}`);
+    return undefined;
+  }
 }
 
 function narrationForTts(text: string, niche: string): string {
@@ -1385,20 +1403,27 @@ async function produceImageReel(
       const step = `Image ${i + 1}/${sceneCount}`;
       if (scene.isHero) {
         if (scene.assetUrl) {
-          const heroVideoPath = await downloadGeneratedAsset(scene.assetUrl, `${reelId}_${i}_hero_reused.mp4`);
-          heroVideoPaths[i] = heroVideoPath;
-          localFiles.push(heroVideoPath);
+          const heroVideoPath = await tryDownloadGeneratedAsset(
+            scene.assetUrl,
+            `${reelId}_${i}_hero_reused.mp4`
+          );
+          if (heroVideoPath) {
+            heroVideoPaths[i] = heroVideoPath;
+            localFiles.push(heroVideoPath);
+          }
         }
         imagePaths.push(undefined);
         await persistProduceProgress(reel, "generating_assets", progress, `${step} (hero video)`);
         continue;
       }
       if (scene.assetUrl) {
-        const imagePath = await downloadGeneratedAsset(scene.assetUrl, `${reelId}_${i}_reused.png`);
-        imagePaths.push(imagePath);
-        localFiles.push(imagePath);
-        await persistProduceProgress(reel, "generating_assets", progress, `${step} (cached)`);
-        continue;
+        const imagePath = await tryDownloadGeneratedAsset(scene.assetUrl, `${reelId}_${i}_reused.png`);
+        if (imagePath) {
+          imagePaths.push(imagePath);
+          localFiles.push(imagePath);
+          await persistProduceProgress(reel, "generating_assets", progress, `${step} (cached)`);
+          continue;
+        }
       }
       console.log(`🖼️  Reel ${reelId}: generating ${step}`);
       const imagePath = await generateImage(scene.visualPrompt, reel.style, {
@@ -1431,11 +1456,13 @@ async function produceImageReel(
       const progress = 50 + Math.round(((i + 1) / sceneCount) * 20);
       const step = `Narration ${i + 1}/${sceneCount}`;
       if (scene.audioUrl) {
-        const audioPath = await downloadGeneratedAsset(scene.audioUrl, `${reelId}_${i}_reused.mp3`);
-        audioPaths.push(audioPath);
-        localFiles.push(audioPath);
-        await persistProduceProgress(reel, "generating_audio", progress, `${step} (cached)`);
-        continue;
+        const audioPath = await tryDownloadGeneratedAsset(scene.audioUrl, `${reelId}_${i}_reused.mp3`);
+        if (audioPath) {
+          audioPaths.push(audioPath);
+          localFiles.push(audioPath);
+          await persistProduceProgress(reel, "generating_audio", progress, `${step} (cached)`);
+          continue;
+        }
       }
       console.log(`🎙️  Reel ${reelId}: generating ${step}`);
       const { audioPath } = await generateNarration(narrationForTts(scene.narration, reel.niche), {
@@ -1697,38 +1724,48 @@ async function processGameplayReel(
     let shortsCoverPath: string | undefined;
     let shortsCoverBackground: GameplayRenderOpts["shortsCoverBackground"];
     if (reel.shortsCover?.imageUrl && reel.shortsCover.placement === "opening") {
-      shortsCoverPath = await downloadGeneratedAsset(reel.shortsCover.imageUrl, `${reelId}_shorts_cover.png`);
-      localFiles.push(shortsCoverPath);
+      const coverPath = await tryDownloadGeneratedAsset(
+        reel.shortsCover.imageUrl,
+        `${reelId}_shorts_cover.png`
+      );
+      if (coverPath) {
+        shortsCoverPath = coverPath;
+        localFiles.push(coverPath);
+      }
       const editorState = reel.shortsCover.editorState as { background?: GameplayRenderOpts["shortsCoverBackground"] } | undefined;
       shortsCoverBackground = editorState?.background;
     }
-    if (reel.titleAudioUrl) {
-      const titlePath = await downloadGeneratedAsset(reel.titleAudioUrl, `${reelId}_title_reused.mp3`);
+    const titlePath = await tryDownloadGeneratedAsset(reel.titleAudioUrl, `${reelId}_title_reused.mp3`);
+    if (titlePath) {
       cachedSegmentPaths[0] = titlePath;
       localFiles.push(titlePath);
     }
     for (let i = 0; i < bodySentences.length; i++) {
-      const url = reel.scenes[i]?.audioUrl;
-      if (!url) continue;
-      const path = await downloadGeneratedAsset(url, `${reelId}_body_${i}_reused.mp3`);
+      const path = await tryDownloadGeneratedAsset(
+        reel.scenes[i]?.audioUrl,
+        `${reelId}_body_${i}_reused.mp3`
+      );
+      if (!path) continue;
       cachedSegmentPaths[i + 1] = path;
       localFiles.push(path);
     }
-    if (partOutroText && reel.partOutroAudioUrl) {
-      const path = await downloadGeneratedAsset(
+    if (partOutroText) {
+      const path = await tryDownloadGeneratedAsset(
         reel.partOutroAudioUrl,
         `${reelId}_part_outro_reused.mp3`
       );
-      cachedSegmentPaths[1 + bodySentences.length] = path;
-      localFiles.push(path);
+      if (path) {
+        cachedSegmentPaths[1 + bodySentences.length] = path;
+        localFiles.push(path);
+      }
     }
 
     if (options.requireCachedNarration) {
       const need = 1 + bodySentences.length + (partOutroText ? 1 : 0);
       const have = cachedSegmentPaths.filter(Boolean).length;
       if (have < need) {
-        throw new Error(
-          `Composite-only requires cached narration (${have}/${need} segments). Run a normal re-render once to populate the cache.`
+        console.warn(
+          `⚠️ Composite-only: narration cache incomplete (${have}/${need}) — regenerating missing segments`
         );
       }
     }
