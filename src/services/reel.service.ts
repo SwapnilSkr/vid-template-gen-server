@@ -167,21 +167,11 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
 
   if (recipe.strategy === "gameplay_overlay" && (parts !== "off" || options.source === "verbatim")) {
     return createGameplayReelSeries({
+      ...options,
       niche,
       topic,
       tier,
       parts: options.source === "verbatim" && parts === "off" ? "auto" : parts,
-      source: options.source,
-      genre: options.genre,
-      gameplayKey: options.gameplayKey,
-      horrorAudioKey: options.horrorAudioKey,
-      outroChannelId: options.outroChannelId,
-      outro: options.outro,
-      thumbnailMode: options.thumbnailMode,
-      imageModel: options.imageModel,
-      ttsModel: options.ttsModel,
-      ttsVoice: options.ttsVoice,
-      ttsFormat: options.ttsFormat,
     });
   }
 
@@ -292,9 +282,13 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
   } else if (autoTopic) {
     const startedAt = Date.now();
     console.log(
-      `📝 Creating Reddit reel (sync story) source=${source} genre=${options.genre ?? "any"} topic=auto`
+      `📝 Creating Reddit reel (bank/auto) source=${source} genre=${options.genre ?? "any"} topic=auto`
     );
-    const story = await generateStory(source, { genre: options.genre, tier: tier as Tier });
+    const story = await takeNextStory(source, tier as Tier, undefined, {
+      genre: options.genre,
+      source,
+    });
+    reservedStoryId = story.storyId;
     console.log(
       `📝 Reddit story ready in ${((Date.now() - startedAt) / 1000).toFixed(1)}s: "${story.title.slice(0, 60)}"`
     );
@@ -345,14 +339,23 @@ async function createGameplayReelSeries(
   const autoTopic = !topic?.trim() || topic.trim().toLowerCase() === "auto";
   const source = options.source ?? (autoTopic ? (config.storyMode as StorySource) : "llm");
   const seriesStartedAt = Date.now();
+  let reservedStoryId: string | undefined;
+
+  if (options.selectedStoryId) {
+    const story = await loadAndReserveBankStory(options.selectedStoryId);
+    reservedStoryId = story.storyId;
+  }
+
   console.log(
-    `📝 Creating Reddit series (sync story) source=${source} parts=${String(parts)} genre=${options.genre ?? "any"}`
+    `📝 Creating Reddit series (sync story) source=${source} parts=${String(parts)} genre=${options.genre ?? "any"}${options.selectedSeedUrl ? " seed=selected" : ""}${options.selectedStoryId ? " bank=selected" : ""}`
   );
   const plannedParts = await generateStorySeries(source, {
     topic: autoTopic ? undefined : topic,
     genre: options.genre,
     tier: tier as Tier,
     parts: parts === "off" ? "auto" : parts,
+    selectedStoryId: options.selectedStoryId,
+    selectedSeedUrl: options.selectedSeedUrl,
   });
   console.log(
     `📝 Reddit series ready in ${((Date.now() - seriesStartedAt) / 1000).toFixed(1)}s: ${plannedParts.length} part(s)`
@@ -392,6 +395,10 @@ async function createGameplayReelSeries(
     reels.push(reel);
     if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
     else await enqueueReel(reel._id.toString());
+  }
+
+  if (reservedStoryId && reels[0]) {
+    await markStoryReel(reservedStoryId, reels[0]._id.toString());
   }
 
   console.log(
@@ -1198,7 +1205,10 @@ async function planGameplayReel(
   };
   if (!reel.redditStory) {
     const drafted = auto
-      ? await takeNextStory(storySource, reel.tier as Tier, onStoryUsage)
+      ? await takeNextStory(storySource, reel.tier as Tier, onStoryUsage, {
+          genre: reel.genre,
+          source: storySource,
+        })
       : await planRedditStory(reel.topic, reel.tier as Tier, reel.genre, onStoryUsage);
     const meta = drafted as StoryDraft & { source?: StorySource; storyId?: string };
     story = redditPayloadFromStoryDraft({
