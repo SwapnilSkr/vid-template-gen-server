@@ -54,6 +54,7 @@ import {
   uploadVideo,
   uploadSubtitles,
   deleteFromS3,
+  deleteS3Urls,
   cdnUrlFor,
 } from "./s3.service";
 import {
@@ -537,6 +538,11 @@ function toSingleRedditStoryPayload(story: StoryDraft & { source: StorySource })
     partNumber: 1,
     partCount: 1,
   };
+}
+
+/** Build a stabilized redditStory subdoc from a multi-part story draft. */
+export function redditPayloadFromStoryPart(part: StoryPartDraft): NonNullable<IReel["redditStory"]> {
+  return stabilizeRedditCard(toRedditStoryPayload(part));
 }
 
 /** Build a stabilized redditStory subdoc from a story draft. */
@@ -1903,6 +1909,50 @@ export async function listReelsBySeries(seriesId: string): Promise<IReel[]> {
   return Reel.find({ seriesId }).sort({ partNumber: 1, createdAt: 1 });
 }
 
+/** Every S3 URL tied to a reel's renders, drafts, revoice variants, and review media. */
+export function collectReelS3AssetUrls(reel: IReel): string[] {
+  const urls: (string | undefined)[] = [
+    reel.outputUrl,
+    reel.bodyVideoUrl,
+    reel.assemblyVideoUrl,
+    reel.subtitlesUrl,
+    reel.titleAudioUrl,
+    reel.partOutroAudioUrl,
+    reel.outroAudioUrl,
+    reel.review?.thumbnailUrl,
+    reel.shortsCover?.imageUrl,
+    ...reel.scenes.flatMap((scene) => [scene.assetUrl, scene.audioUrl]),
+    ...reel.voiceVariants.map((variant) => variant.videoUrl),
+  ];
+
+  const draft = reel.editDraft;
+  if (draft) {
+    urls.push(draft.outputUrl, draft.subtitlesUrl);
+    for (const scene of draft.sceneAssets) {
+      urls.push(scene.assetUrl, scene.audioUrl);
+    }
+    if (draft.baseline) {
+      urls.push(
+        draft.baseline.assemblyVideoUrl,
+        draft.baseline.bodyVideoUrl,
+        draft.baseline.outroAudioUrl
+      );
+      for (const scene of draft.baseline.scenes) {
+        urls.push(scene.assetUrl, scene.audioUrl);
+      }
+    }
+  }
+
+  return [...new Set(urls.filter((url): url is string => Boolean(url)))];
+}
+
+/** Remove locally staged edit/thumbnail draft directories for a reel. */
+export async function cleanupReelLocalStaging(reel: IReel): Promise<void> {
+  for (const rootDir of [reel.editDraft?.rootDir, reel.thumbnailDraft?.rootDir]) {
+    if (rootDir) await cleanupDirectory(rootDir).catch(() => {});
+  }
+}
+
 /** Delete a reel's Mongo record, every S3 asset it produced (scene stills/audio,
  *  rendered video, subtitles, thumbnail, voice-variant re-renders), and its
  *  BullMQ job (in case it's stuck/stalled rather than settled). */
@@ -1913,26 +1963,10 @@ export async function deleteReel(id: string): Promise<boolean> {
     throw new Error(`Cannot delete reel while generation is active (current status: ${reel.status})`);
   }
 
-  const assetUrls = [
-    reel.outputUrl,
-    reel.bodyVideoUrl,
-    reel.assemblyVideoUrl,
-    reel.subtitlesUrl,
-    reel.titleAudioUrl,
-    reel.partOutroAudioUrl,
-    reel.outroAudioUrl,
-    reel.review?.thumbnailUrl,
-    reel.shortsCover?.imageUrl,
-    ...reel.scenes.flatMap((s) => [s.assetUrl, s.audioUrl]),
-    ...reel.voiceVariants.map((v) => v.videoUrl),
-  ].filter((url): url is string => Boolean(url));
+  const assetUrls = collectReelS3AssetUrls(reel);
 
-  await Promise.all(assetUrls.map((url) => deleteFromS3(url).catch(() => {})));
-  // Locally staged drafts (edit previews, thumbnail studio) live only on this
-  // server's disk — wipe them too or they outlive the reel forever.
-  for (const rootDir of [reel.editDraft?.rootDir, reel.thumbnailDraft?.rootDir]) {
-    if (rootDir) await cleanupDirectory(rootDir).catch(() => {});
-  }
+  await deleteS3Urls(assetUrls);
+  await cleanupReelLocalStaging(reel);
   await removeReelJob(id).catch(() => {});
   await Reel.findByIdAndDelete(id);
   console.log(`🗑️  Deleted reel ${id} + ${assetUrls.length} S3 asset(s)`);
