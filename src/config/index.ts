@@ -112,6 +112,12 @@ export const config = {
   instagramRedirectUri:
     process.env.INSTAGRAM_REDIRECT_URI || "http://localhost:3000/api/instagram/connect/callback",
   instagramApiVersion: process.env.INSTAGRAM_API_VERSION || "v25.0",
+  // Meta fetches and transcodes the public MP4 asynchronously.  Short Reels
+  // often finish quickly, but busy periods and slower S3 fetches can take
+  // several minutes. Keep this below the publishing worker's one-hour lock.
+  instagramProcessingTimeoutMs: parseInt(
+    process.env.INSTAGRAM_PROCESSING_TIMEOUT_MS || String(10 * 60 * 1000)
+  ),
 
   // YouTube Data API v3 *read* access (search/videos.list) for the trend
   // scout — a plain API key from Google Cloud Console, separate from the

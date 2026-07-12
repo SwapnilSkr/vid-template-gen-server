@@ -45,6 +45,7 @@ export const CreateReelBody = t.Object({
   horrorAudioKey: t.Optional(t.String()),
   /** connected YouTube channel id used for rendered outro branding */
   outroChannelId: t.Optional(t.String()),
+  outroInstagramChannelId: t.Optional(t.String()),
   /** rendered outro copy/brand overrides */
   outro: t.Optional(OutroSettingsBody),
   /** thumbnail generation policy: pick a video frame later, or generate AI thumbnail during render */
@@ -154,6 +155,7 @@ export const UpdateReelSettingsBody = t.Object({
   horrorReferenceId: t.Optional(t.String()),
   gameplayKey: t.Optional(t.String()),
   outroChannelId: t.Optional(t.String()),
+  outroInstagramChannelId: t.Optional(t.String()),
   outro: t.Optional(OutroSettingsBody),
   skipPartOutro: t.Optional(t.Boolean()),
   skipBrandedOutro: t.Optional(t.Boolean()),
@@ -286,6 +288,7 @@ export type TPublishReelBody = typeof PublishReelBody.static;
 export const DistributeReelBody = t.Object({
   youtubeChannelIds: t.Optional(t.Array(t.String(), { maxItems: 20 })),
   instagramChannelIds: t.Optional(t.Array(t.String(), { maxItems: 20 })),
+  forceRepublish: t.Optional(t.Boolean()),
 });
 export type TDistributeReelBody = typeof DistributeReelBody.static;
 

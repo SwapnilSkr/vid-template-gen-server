@@ -239,9 +239,13 @@ export interface IInstagramPublish {
   channelId: string;
   channelLabel?: string;
   status: "pending" | "uploading" | "published" | "failed";
+  /** Meta media-container ID, retained so a timeout can resume safely. */
+  containerId?: string;
   mediaId?: string;
   url?: string;
   error?: string;
+  message?: string;
+  updatedAt?: Date;
   publishedAt?: Date;
 }
 export interface IInstagramPublishSettings { caption?: string; shareToFeed: boolean; }
@@ -353,6 +357,8 @@ export interface IReel extends Document {
   horrorAudioKey?: string;
   /** Connected YouTube channel id used for rendered outro branding. */
   outroChannelId?: string;
+  /** Connected Instagram account used for rendered outro branding. */
+  outroInstagramChannelId?: string;
   outro?: IOutroSettings;
   /** When true, skip the multi-part "Stay tuned for part N" segment (Reddit). */
   skipPartOutro?: boolean;
@@ -671,9 +677,12 @@ const instagramPublishSchema = new Schema<IInstagramPublish>(
     channelId: { type: String, required: true },
     channelLabel: String,
     status: { type: String, enum: ["pending", "uploading", "published", "failed"], default: "pending" },
+    containerId: String,
     mediaId: String,
     url: String,
     error: String,
+    message: String,
+    updatedAt: Date,
     publishedAt: Date,
   },
   { _id: false }
@@ -776,6 +785,7 @@ const reelSchema = new Schema<IReel>(
     gameplayKey: String,
     horrorAudioKey: String,
     outroChannelId: String,
+    outroInstagramChannelId: String,
     outro: outroSettingsSchema,
     skipPartOutro: { type: Boolean, default: false },
     skipBrandedOutro: { type: Boolean, default: false },

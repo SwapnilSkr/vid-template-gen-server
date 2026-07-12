@@ -264,9 +264,15 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       captionsBurned: reel.captionsBurned,
       captionBurnError: reel.captionBurnError,
       youtube: reel.youtube,
+      // Studio polls this endpoint while publishing. Omitting these fields
+      // erased the queued Instagram state on every poll, making the UI look
+      // idle even though the worker was processing a Reel.
+      instagram: reel.instagram,
+      instagramSettings: reel.instagramSettings,
       gameplayKey: reel.gameplayKey,
       horrorAudioKey: reel.horrorAudioKey,
       outroChannelId: reel.outroChannelId,
+      outroInstagramChannelId: reel.outroInstagramChannelId,
       outro: reel.outro,
       skipPartOutro: reel.skipPartOutro,
       skipBrandedOutro: reel.skipBrandedOutro,
@@ -413,16 +419,53 @@ export async function distributeReelController({ params, body, set }: PublishRee
   const [youtube, instagram] = await Promise.all([listAllYouTubePublishChannels(), listInstagramChannels()]);
   const unknown = [...youtubeIds.filter((id) => !youtube.some((c) => c.id === id)), ...instagramIds.filter((id) => !instagram.some((c) => c.id === id))];
   if (unknown.length) { set.status = 400; return { success: false, error: `Unknown distribution account(s): ${unknown.join(", ")}` }; }
+  const active = instagramIds.filter((id) => {
+    const state = reel.instagram.find((publish) => publish.channelId === id)?.status;
+    return state === "pending" || state === "uploading";
+  });
+  if (active.length) {
+    set.status = 409;
+    return { success: false, error: `These Instagram destinations are already publishing: ${active.join(", ")}. Wait for them to settle before trying again.` };
+  }
+  const alreadyPublished = instagramIds.filter((id) => reel.instagram.find((publish) => publish.channelId === id)?.status === "published");
+  if (alreadyPublished.length && !body.forceRepublish) {
+    set.status = 409;
+    return { success: false, error: `These Instagram destinations have already published: ${alreadyPublished.join(", ")}. Confirm republish to send another Reel.` };
+  }
   reel.instagram = [
     ...reel.instagram.filter((p) => !instagramIds.includes(p.channelId)),
-    ...instagramIds.map((id) => ({ channelId: id, channelLabel: instagram.find((c) => c.id === id)?.label, status: "pending" as const })),
+    ...instagramIds.map((id) => {
+      const previous = reel.instagram.find((publish) => publish.channelId === id);
+      // A processing timeout means Meta accepted the container but did not
+      // finish within our wait window. Retain it so the next publish action
+      // resumes that container instead of uploading a duplicate Reel.
+      const resumeTimedOutContainer =
+        previous?.status === "failed" &&
+        Boolean(previous.containerId) &&
+        previous.error === "Instagram media processing timed out";
+      return resumeTimedOutContainer
+        ? {
+            ...previous,
+            status: "pending" as const,
+            error: undefined,
+            message: "Queued to resume Instagram processing…",
+            updatedAt: new Date(),
+          }
+        : {
+            channelId: id,
+            channelLabel: instagram.find((c) => c.id === id)?.label,
+            status: "pending" as const,
+            message: "Queued for Instagram publishing…",
+            updatedAt: new Date(),
+          };
+    }),
   ];
   await reel.save();
   await Promise.all([
     ...youtubeIds.map((id) => enqueuePublish(params.id, "youtube", id)),
     ...instagramIds.map((id) => enqueuePublish(params.id, "instagram", id)),
   ]);
-  return { success: true, data: { youtubeChannelIds: youtubeIds, instagramChannelIds: instagramIds }, message: `Queued ${youtubeIds.length + instagramIds.length} distribution target(s)` };
+  return { success: true, data: reel, message: `Queued ${youtubeIds.length + instagramIds.length} distribution target(s)` };
 }
 
 /** Download completed reel (returns the S3/CDN URL). */

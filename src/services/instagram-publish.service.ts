@@ -96,18 +96,68 @@ async function accessTokenFor(channel: InstanceType<typeof InstagramChannel>): P
 }
 export async function publishReelToInstagram(reelId: string, channelId?: string): Promise<void> {
   const reel = await Reel.findById(reelId); if (!reel?.outputUrl) throw new Error("Reel has no rendered video yet");
-  const channel = await resolveInstagramChannel(channelId); const current = reel.instagram.find((p) => p.channelId === channel.channelKey);
-  const setStatus = async (status: "pending" | "uploading" | "published" | "failed", patch: Record<string, unknown> = {}) => { reel.instagram = [...reel.instagram.filter((p) => p.channelId !== channel.channelKey), { channelId: channel.channelKey, channelLabel: channel.label, ...current, ...patch, status }]; await reel.save(); };
-  await setStatus("uploading");
+  const channel = await resolveInstagramChannel(channelId);
+  const priorPublish = reel.instagram.find((publish) => publish.channelId === channel.channelKey);
+  // Atomic positional updates are essential here: review metadata and multiple
+  // destination workers can update the same reel concurrently. Saving the
+  // original document after Meta's processing wait caused VersionError races.
+  const setStatus = async (status: "pending" | "uploading" | "published" | "failed", patch: Record<string, unknown> = {}) => {
+    const fields: Record<string, unknown> = {
+      "instagram.$.status": status,
+      "instagram.$.channelLabel": channel.label,
+      "instagram.$.updatedAt": new Date(),
+      ...Object.fromEntries(Object.entries(patch).map(([key, value]) => [`instagram.$.${key}`, value])),
+    };
+    const result = await Reel.updateOne({ _id: reelId, "instagram.channelId": channel.channelKey }, { $set: fields });
+    if (!result.matchedCount) {
+      await Reel.updateOne({ _id: reelId }, { $push: { instagram: { channelId: channel.channelKey, channelLabel: channel.label, status, updatedAt: new Date(), ...patch } } });
+    }
+  };
+  await setStatus("uploading", { message: "Preparing Reel for Instagram…", error: undefined });
   try {
     const review = await ensureReelReviewPackage(reelId); const caption = (reel.instagramSettings?.caption ?? review.description ?? review.title ?? reel.title ?? reel.hook ?? "").slice(0, 2200);
     const token = await accessTokenFor(channel);
-    const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media_type: "REELS", video_url: reel.outputUrl, caption, share_to_feed: reel.instagramSettings?.shareToFeed ?? true, ...(reel.shortsCover?.imageUrl ? { cover_url: reel.shortsCover.imageUrl } : {}) }) });
+    let containerId = priorPublish?.containerId;
+    if (containerId) {
+      await setStatus("uploading", { message: "Resuming Instagram media processing…", containerId });
+    } else {
+      await setStatus("uploading", { message: "Sending Reel to Instagram…" });
+      // The current Vertical Cover is an overlay asset, not guaranteed to be a
+      // flattened 9:16 image. Sending it as Meta's native cover can produce a
+      // text-only cover, so let Instagram choose from the final MP4 for now.
+      const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media_type: "REELS", video_url: reel.outputUrl, caption, share_to_feed: reel.instagramSettings?.shareToFeed ?? true }) });
+      containerId = create.id;
+      // Persist this before polling. A worker restart or timeout can now
+      // continue the accepted container without creating a duplicate post.
+      await setStatus("uploading", { message: "Instagram accepted the Reel — processing…", containerId });
+    }
     let ready = false;
-    for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 2000)); const status = await graph<{ status_code?: string }>(`/${create.id}?fields=status_code`, token); if (status.status_code === "FINISHED") { ready = true; break; } if (status.status_code === "ERROR" || status.status_code === "EXPIRED") throw new Error(`Instagram media container ${status.status_code.toLowerCase()}`); }
+    // Poll steadily for up to ten minutes by default. The worker lock is one
+    // hour, so slower Meta transcoding is safe without making the queue stall.
+    const deadline = Date.now() + config.instagramProcessingTimeoutMs;
+    let checks = 0;
+    while (Date.now() < deadline) {
+      const waitMs = Math.min(checks === 0 ? 5_000 : 30_000, Math.max(0, deadline - Date.now()));
+      if (waitMs <= 0) break;
+      checks += 1;
+      const remainingMinutes = Math.max(0, Math.ceil((deadline - Date.now()) / 60_000));
+      await setStatus("uploading", { message: `Instagram is processing the video… (check ${checks}; up to ${remainingMinutes} min remaining)`, containerId });
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      const status = await graph<{ status_code?: string }>(`/${containerId}?fields=status_code`, token);
+      if (status.status_code === "FINISHED") { ready = true; break; }
+      if (status.status_code === "ERROR" || status.status_code === "EXPIRED") throw new Error(`Instagram media container ${status.status_code.toLowerCase()}`);
+    }
     if (!ready) throw new Error("Instagram media processing timed out");
-    const published = await graph<{ id: string }>(`/${channel.instagramUserId}/media_publish`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ creation_id: create.id }) });
-    const media = await graph<{ permalink?: string }>(`/${published.id}?fields=permalink`, token);
-    await setStatus("published", { mediaId: published.id, url: media.permalink, error: undefined, publishedAt: new Date() }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
-  } catch (error) { const message = getErrorMessage(error); await setStatus("failed", { error: message }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastError: message, status: /token|access/i.test(message) ? "needs_reauth" : channel.status } }); throw error; }
+    await setStatus("uploading", { message: "Instagram finished processing — publishing Reel…" });
+    const published = await graph<{ id: string }>(`/${channel.instagramUserId}/media_publish`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ creation_id: containerId }) });
+    // Publishing has succeeded even if Meta needs another moment to expose its
+    // permalink. Do not incorrectly report a duplicate-risking failure here.
+    let permalink: string | undefined;
+    try {
+      permalink = (await graph<{ permalink?: string }>(`/${published.id}?fields=permalink`, token)).permalink;
+    } catch (error) {
+      console.warn(`Instagram Reel ${published.id} published before permalink was available: ${getErrorMessage(error)}`);
+    }
+    await setStatus("published", { containerId, mediaId: published.id, url: permalink, error: undefined, message: permalink ? "Published." : "Published — Instagram permalink is still becoming available.", publishedAt: new Date() }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
+  } catch (error) { const message = getErrorMessage(error); await setStatus("failed", { error: message, message: `Failed: ${message}` }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastError: message, status: /token|access/i.test(message) ? "needs_reauth" : channel.status } }); throw error; }
 }

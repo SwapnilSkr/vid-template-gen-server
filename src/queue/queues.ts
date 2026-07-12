@@ -165,7 +165,12 @@ export async function enqueuePublish(
   await publishQueue.add(
     "publish",
     { reelId, platform, channelId },
-    { jobId: `${reelId}-publish-${platform}-${channelId ?? "default"}-${Date.now()}` }
+    {
+      jobId: `${reelId}-publish-${platform}-${channelId ?? "default"}-${Date.now()}`,
+      // Retrying a failed Instagram container automatically can create a
+      // duplicate post. Surface the failure and require an explicit resend.
+      ...(platform === "instagram" ? { attempts: 1 } : {}),
+    }
   );
 }
 
