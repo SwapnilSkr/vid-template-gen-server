@@ -6,6 +6,7 @@ import { getRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
 import { cleanupFiles } from "../utils";
 import { pickGameplay, renderGameplayReel } from "./reel-gameplay.service";
+import { recordReelMeasuredCosts, type MeasuredCostInput } from "./reel-cost.service";
 import { deleteS3Urls, uploadVideo } from "./s3.service";
 import { enqueueRevoice } from "../queue/queues";
 
@@ -75,6 +76,7 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
     await reel.save();
   }
   const recipe = getRecipe(reel.niche);
+  const batchCosts: MeasuredCostInput[] = [];
 
   for (const variantId of variantIds) {
     const localFiles: string[] = [];
@@ -92,6 +94,14 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
         captionStyle: reel.captionStyle,
         forceFreshNarration: true,
         skipPartOutro: reel.skipPartOutro,
+        onNarrationUsage: (usage) => {
+          batchCosts.push({
+            label: `Revoice narration (${variant.label || `${variant.model}/${variant.voice}`})`,
+            model: `${variant.model}/${variant.voice}`,
+            costUsd: usage.costUsd,
+            source: usage.costUsd !== undefined ? "actual" : "estimated",
+          });
+        },
       });
       localFiles.push(result.videoPath, result.assPath);
       localFiles.push(
@@ -119,6 +129,7 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
   // Same clip served every variant above — drop the local cache now that this
   // batch is done. S3 stays the source of truth (pickGameplay re-downloads on demand).
   await unlink(gameplayPath).catch(() => {});
+  await recordReelMeasuredCosts(reelId, batchCosts, "Revoice");
 }
 
 /** Promote a ready voice variant to be the reel's primary output. Also adopts

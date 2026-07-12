@@ -16,6 +16,10 @@ import {
 import { appendBrandedOutro } from "./reel-outro.service";
 import { generateImage, generateNarration } from "./openrouter-media.service";
 import {
+  applyMeasuredCostsToReel,
+  type MeasuredCostInput,
+} from "./reel-cost.service";
+import {
   cdnUrlFor,
   uploadAudio,
   uploadImage,
@@ -299,6 +303,7 @@ async function buildDraftPreview(
   draftId: string,
   rootDir: string,
   localFiles: string[],
+  measuredCosts: MeasuredCostInput[] = [],
 ): Promise<{
   outputPath: string;
   subtitlesPath: string;
@@ -337,10 +342,21 @@ async function buildDraftPreview(
         // recovery, not a draft experiment; persisting means later renders reuse
         // it instead of regenerating the whole reel on every pass.
         imageGen ??= await resolveDraftImageGen(reel);
+        const resolvedImageGen = imageGen;
         const raw = await generateImage(
           scene.visualPrompt,
           reel.style,
-          imageGen,
+          {
+            ...resolvedImageGen,
+            onUsage: (usage) => {
+              measuredCosts.push({
+                label: `Draft image ${i + 1}`,
+                model: resolvedImageGen.model,
+                costUsd: usage.costUsd,
+                source: usage.costUsd !== undefined ? "actual" : "estimated",
+              });
+            },
+          },
         );
         imagePath = await stageGeneratedFile(
           raw,
@@ -368,6 +384,14 @@ async function buildDraftPreview(
             voice: tts.voice,
             format: tts.format,
             profile: narrationProfileFor(reel),
+            onUsage: (usage) => {
+              measuredCosts.push({
+                label: `Draft narration ${i + 1}`,
+                model: `${tts.model}/${tts.voice}`,
+                costUsd: usage.costUsd,
+                source: usage.costUsd !== undefined ? "actual" : "estimated",
+              });
+            },
           },
         );
         audioPath = await stageGeneratedFile(
@@ -532,6 +556,7 @@ export async function createSceneEditDraft(
   };
 
   const localFiles: string[] = [];
+  const measuredCosts: MeasuredCostInput[] = [];
   try {
     const recipe = getRecipe(reel.niche);
     const models = resolveModels(reel.tier as Tier);
@@ -555,6 +580,14 @@ export async function createSceneEditDraft(
       const imagePath = await generateImage(scene.visualPrompt, reel.style, {
         model: imageModel,
         referenceImageUrls,
+        onUsage: (usage) => {
+          measuredCosts.push({
+            label: `Draft image ${index + 1}`,
+            model: imageModel,
+            costUsd: usage.costUsd,
+            source: usage.costUsd !== undefined ? "actual" : "estimated",
+          });
+        },
       });
       localFiles.push(imagePath);
       const stagedPath = join(rootDir, `scene_${index}_image.png`);
@@ -572,6 +605,14 @@ export async function createSceneEditDraft(
           voice: tts.voice,
           format: tts.format,
           profile: narrationProfileFor(reel),
+          onUsage: (usage) => {
+            measuredCosts.push({
+              label: `Draft narration ${index + 1}`,
+              model: `${tts.model}/${tts.voice}`,
+              costUsd: usage.costUsd,
+              source: usage.costUsd !== undefined ? "actual" : "estimated",
+            });
+          },
         },
       );
       localFiles.push(audioPath);
@@ -583,7 +624,7 @@ export async function createSceneEditDraft(
     }
 
     reel.editDraft.sceneAssets = [draftScene];
-    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
+    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles, measuredCosts);
     reel.editDraft.sceneAssets = preview.sceneAssets.filter(
       (item) => item.assetPath || item.audioPath,
     );
@@ -597,6 +638,7 @@ export async function createSceneEditDraft(
       draftId,
       basename(preview.subtitlesPath),
     );
+    applyMeasuredCostsToReel(reel, measuredCosts, "Studio draft");
     await reel.save();
     await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
     await cleanupRenderScratch(`draft_${draftId}`);
@@ -658,6 +700,7 @@ export async function createReelEditDraft(
   };
 
   const localFiles: string[] = [];
+  const measuredCosts: MeasuredCostInput[] = [];
   try {
     if (mode === "assets") {
       const recipe = getRecipe(reel.niche);
@@ -687,6 +730,14 @@ export async function createReelEditDraft(
             {
               model: imageModel,
               referenceImageUrls,
+              onUsage: (usage) => {
+                measuredCosts.push({
+                  label: `Draft image ${i + 1}`,
+                  model: imageModel,
+                  costUsd: usage.costUsd,
+                  source: usage.costUsd !== undefined ? "actual" : "estimated",
+                });
+              },
             },
           );
           localFiles.push(imagePath);
@@ -707,6 +758,14 @@ export async function createReelEditDraft(
             voice: tts.voice,
             format: tts.format,
             profile: narrationProfileFor(reel),
+            onUsage: (usage) => {
+              measuredCosts.push({
+                label: `Draft narration ${i + 1}`,
+                model: `${tts.model}/${tts.voice}`,
+                costUsd: usage.costUsd,
+                source: usage.costUsd !== undefined ? "actual" : "estimated",
+              });
+            },
           },
         );
         localFiles.push(audioPath);
@@ -719,7 +778,7 @@ export async function createReelEditDraft(
       }
     }
 
-    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
+    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles, measuredCosts);
     reel.editDraft.sceneAssets = preview.sceneAssets.filter(
       (item) => item.assetPath || item.audioPath,
     );
@@ -733,6 +792,7 @@ export async function createReelEditDraft(
       draftId,
       basename(preview.subtitlesPath),
     );
+    applyMeasuredCostsToReel(reel, measuredCosts, "Studio draft");
     await reel.save();
     await cleanupFiles(localFiles.filter((path) => !path.startsWith(rootDir)));
     await cleanupRenderScratch(`draft_${draftId}`);
@@ -807,9 +867,11 @@ export async function applyCaptionsAndRender(
   await ensureDir(rootDir);
 
   const localFiles: string[] = [];
+  const measuredCosts: MeasuredCostInput[] = [];
   try {
-    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles);
+    const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles, measuredCosts);
     await commitRenderOutputs(reel, preview);
+    applyMeasuredCostsToReel(reel, measuredCosts, "Studio draft");
     await reel.save();
     return reel;
   } finally {

@@ -10,6 +10,11 @@ import { ensureDir, escapeFilterPath, applyOutputOptions, generateFilename } fro
 import { generateText } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { generateImage, type MediaUsageCallback } from "./openrouter-media.service";
+import { type LlmUsageCallback, reportLlmUsage } from "./reel-script.service";
+import {
+  applyMeasuredCostsToReel,
+  type MeasuredCostInput,
+} from "./reel-cost.service";
 import { deleteFromS3, uploadImage } from "./s3.service";
 import { listTrendReferences } from "./trend-reference.service";
 import { getTrendDigest } from "./trend-insight.service";
@@ -136,9 +141,58 @@ function cleanTitle(title: string): string {
     .slice(0, 100);
 }
 
-async function buildReviewCopy(reel: IReel, tags: string[]): Promise<{ title: string; description: string }> {
-  const fallbackTitle = buildTitle(reel).slice(0, 100);
-  const fallbackDescription = buildDescription(reel, fallbackTitle, tags);
+const HASHTAG_LINE_PATTERN = /^(?:\s*#[\p{L}\p{N}_]+\s*)+$/u;
+const TRAILING_HASHTAGS_PATTERN = /(?:\s+#[\p{L}\p{N}_]+)+\s*$/u;
+
+function formatHashtags(tags: string[]): string[] {
+  return tags
+    .map((tag) => tag.trim().replace(/^#/, ""))
+    .filter(Boolean)
+    .map((tag) => `#${tag}`);
+}
+
+function stripHashtagsFromText(value: string): string {
+  const withoutBlock = value
+    .trimEnd()
+    .split("\n")
+    .filter((line, index, lines) => {
+      if (index !== lines.length - 1) return true;
+      return !HASHTAG_LINE_PATTERN.test(line);
+    })
+    .join("\n")
+    .trimEnd();
+  return withoutBlock.replace(TRAILING_HASHTAGS_PATTERN, "").trim();
+}
+
+function withTitleHashtags(baseTitle: string, hashtags: string[], maxLength = 100): string {
+  const base = stripHashtagsFromText(baseTitle).trim();
+  let result = base;
+  for (const tag of hashtags) {
+    const next = result ? `${result} ${tag}` : tag;
+    if (next.length <= maxLength) {
+      result = next;
+    } else {
+      break;
+    }
+  }
+  return result.slice(0, maxLength);
+}
+
+function withDescriptionHashtags(description: string, hashtags: string[]): string {
+  const managed = hashtags.length ? hashtags.join(" ") : "";
+  const body = stripHashtagsFromText(description);
+  return managed ? `${body}${body ? "\n\n" : ""}${managed}` : body;
+}
+
+async function buildReviewCopy(
+  reel: IReel,
+  tags: string[],
+  onLlmUsage?: LlmUsageCallback,
+): Promise<{ title: string; description: string }> {
+  const hashtagStrings = formatHashtags(tags);
+  const baseFallbackTitle = buildTitle(reel).slice(0, 100);
+  const fallbackTitle = withTitleHashtags(baseFallbackTitle, hashtagStrings);
+  const fallbackDescription = buildDescription(reel, baseFallbackTitle, tags);
   const source = storySeed(reel).slice(0, 2600);
   if (!source || !config.openRouterApiKey) {
     return { title: fallbackTitle, description: fallbackDescription };
@@ -152,7 +206,7 @@ async function buildReviewCopy(reel: IReel, tags: string[]): Promise<{ title: st
         : getRecipe(reel.niche).displayName;
 
   try {
-    const { text } = await generateText({
+    const { text, usage } = await generateText({
       model: openrouter(config.openRouterModel),
       prompt: `Write YouTube Shorts review copy for this ${nicheLabel}.
 
@@ -161,18 +215,26 @@ ${source}
 
 Rules:
 - Output JSON only: {"title":"...","description":"..."}.
-- Title must be specific to the conflict/twist, 55-90 characters, curiosity-gap style.
+- Title must be specific to the conflict/twist, 50-80 characters, curiosity-gap style.
+- Do not include hashtags in the title or description — those are appended separately.
 - Avoid generic format words such as gameplay, AI, video generation, horror video, short-form, content, captions, or thumbnail.
 - Do not invent facts not present in the source.
-- Description should be 1-2 natural sentences plus relevant hashtags.
+- Description should be 1-2 natural sentences only.
 - Keep description under 500 characters.
 - Include part info if the source says this is one part of a series.
 - Make it punchy, human, and platform-ready, not templated slop.`,
     });
+    reportLlmUsage(onLlmUsage, "Review copy", config.openRouterModel, usage);
 
     const parsed = extractReviewJson(text);
-    const title = parsed.title ? cleanTitle(parsed.title) : fallbackTitle;
-    const description = parsed.description?.trim().slice(0, 500) || fallbackDescription;
+    const baseTitle = parsed.title ? stripHashtagsFromText(cleanTitle(parsed.title)) : baseFallbackTitle;
+    const baseDescription = parsed.description
+      ? stripHashtagsFromText(parsed.description.trim()).slice(0, 500)
+      : "";
+    const title = withTitleHashtags(baseTitle, hashtagStrings);
+    const description = baseDescription
+      ? withDescriptionHashtags(baseDescription, hashtagStrings)
+      : fallbackDescription;
     return { title, description };
   } catch (error: unknown) {
     console.warn(`Review copy generation failed, using fallback: ${getErrorMessage(error)}`);
@@ -407,10 +469,23 @@ async function renderThumbnailPng(
   }
 }
 
+export interface ReelReviewUsageCallbacks {
+  onReviewCopyUsage?: LlmUsageCallback;
+  onThumbnailImageUsage?: MediaUsageCallback;
+}
+
+function resolveReviewUsageCallbacks(
+  usage?: MediaUsageCallback | ReelReviewUsageCallbacks,
+): ReelReviewUsageCallbacks {
+  if (!usage) return {};
+  return typeof usage === "function" ? { onThumbnailImageUsage: usage } : usage;
+}
+
 export async function buildReelReviewPackage(
   reel: IReel,
-  onThumbnailImageUsage?: MediaUsageCallback
+  usage?: MediaUsageCallback | ReelReviewUsageCallbacks,
 ): Promise<IReelReviewPackage> {
+  const callbacks = resolveReviewUsageCallbacks(usage);
   const nicheTags = reel.niche === "reddit" ? DEFAULT_REDDIT_TAGS : isHorrorNiche(reel.niche) ? DEFAULT_HORROR_TAGS : [reel.niche];
   const tags = normalizeTags([
     reel.niche,
@@ -418,13 +493,13 @@ export async function buildReelReviewPackage(
     reel.redditStory?.subreddit?.replace(/^r\//i, "") ?? "",
     ...nicheTags,
   ]);
-  const { title, description } = await buildReviewCopy(reel, tags);
+  const { title, description } = await buildReviewCopy(reel, tags, callbacks.onReviewCopyUsage);
   const thumbnailPrompt = await buildThumbnailPrompt(reel, title);
   const visibilityNotes = await buildVisibilityNotes(reel);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
   const thumbnailUrl =
     reel.thumbnailMode === "ai"
-      ? await renderAndUploadThumbnail(reel, title, subtitle, thumbnailPrompt, onThumbnailImageUsage)
+      ? await renderAndUploadThumbnail(reel, title, subtitle, thumbnailPrompt, callbacks.onThumbnailImageUsage)
       : undefined;
 
   return {
@@ -464,7 +539,26 @@ export async function ensureReelReviewPackage(reelId: string): Promise<IReelRevi
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   if (!reel.review?.title || (reel.thumbnailMode === "ai" && !reel.review.thumbnailUrl)) {
-    reel.review = await buildReelReviewPackage(reel);
+    const measuredCosts: MeasuredCostInput[] = [];
+    reel.review = await buildReelReviewPackage(reel, {
+      onReviewCopyUsage: (usage) => {
+        measuredCosts.push({
+          label: usage.label,
+          model: usage.model,
+          costUsd: usage.costUsd,
+          source: "actual",
+        });
+      },
+      onThumbnailImageUsage: (usage) => {
+        measuredCosts.push({
+          label: "Thumbnail image",
+          model: resolveModels("cheap").image,
+          costUsd: usage.costUsd,
+          source: usage.costUsd !== undefined ? "actual" : "estimated",
+        });
+      },
+    });
+    applyMeasuredCostsToReel(reel, measuredCosts, "Review package");
     await reel.save();
   }
   return reel.review;
@@ -513,8 +607,23 @@ export async function regenerateReelThumbnail(
   const thumbnailPrompt = nextReview.thumbnailPrompt || (await buildThumbnailPrompt(reel, title));
   nextReview.title = title;
   nextReview.thumbnailPrompt = thumbnailPrompt;
-  const thumbnailPath = await renderThumbnailPng(title, subtitle, reel.niche, thumbnailPrompt);
+  const measuredCosts: MeasuredCostInput[] = [];
+  const thumbnailPath = await renderThumbnailPng(
+    title,
+    subtitle,
+    reel.niche,
+    thumbnailPrompt,
+    (usage) => {
+      measuredCosts.push({
+        label: "Thumbnail image",
+        model: resolveModels("cheap").image,
+        costUsd: usage.costUsd,
+        source: usage.costUsd !== undefined ? "actual" : "estimated",
+      });
+    },
+  );
   try {
+    applyMeasuredCostsToReel(reel, measuredCosts, "Thumbnail regen");
     return await replaceReviewThumbnail(reel, nextReview, thumbnailPath);
   } finally {
     await unlink(thumbnailPath).catch(() => {});

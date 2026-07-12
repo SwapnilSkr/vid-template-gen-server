@@ -41,7 +41,7 @@ export interface LlmUsageLine {
 
 export type LlmUsageCallback = (usage: LlmUsageLine) => void;
 
-function reportLlmUsage(
+export function reportLlmUsage(
   onUsage: LlmUsageCallback | undefined,
   label: string,
   model: string,
@@ -556,7 +556,8 @@ export interface RedditStory {
 export async function planRedditStory(
   topic: string,
   tier: Tier = "value",
-  genre?: string
+  genre?: string,
+  onLlmUsage?: LlmUsageCallback,
 ): Promise<RedditStory> {
   const llm = resolveModels(tier).llm;
   const recipe = getRecipe("reddit");
@@ -576,7 +577,8 @@ OUTPUT JSON ONLY (no markdown):
 { "title": "the post title / hook", "body": "the full story to narrate" }`;
 
   try {
-    const { text } = await generateText({ model: openrouter(llm), prompt });
+    const { text, usage } = await generateText({ model: openrouter(llm), prompt });
+    reportLlmUsage(onLlmUsage, "Reddit story", llm, usage);
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON in model response");
     const parsed = JSON.parse(jsonMatch[0]) as RedditStory;

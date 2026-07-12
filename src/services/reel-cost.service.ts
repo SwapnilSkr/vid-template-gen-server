@@ -1,6 +1,6 @@
 import { config } from "../config";
 import type { TtsChoice } from "../config/models";
-import type { ICostBreakdown, ICostLine, IReel } from "../models";
+import { Reel, type ICostBreakdown, ICostLine, IReel } from "../models";
 
 export interface MeasuredCostInput {
   label: string;
@@ -9,9 +9,14 @@ export interface MeasuredCostInput {
   source: "actual" | "estimated";
 }
 
+const COST_NOTE =
+  "Actual lines use OpenRouter response/generation usage when available. Estimated lines are marked explicitly; OpenRouter does not expose exact cost for every media endpoint response.";
+
 const TTS_PRICE_PER_1K_CHARS_USD = 0.00003;
 const LLM_PLANNING_ESTIMATE_USD = 0.002;
 const LOCAL_RENDER_STORAGE_ESTIMATE_USD = 0.001;
+const METERED_LLM_LABEL =
+  /^(Script planning|Story bible|Scene script|Horror series plan|Reddit story|Review copy|Structure script)/;
 
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
@@ -43,6 +48,43 @@ function measuredLine(input: MeasuredCostInput): ICostLine | undefined {
     roundUsd(input.costUsd),
     input.model
   );
+}
+
+/** Append metered OpenRouter lines to a reel without adding produce estimates. */
+export function applyMeasuredCostsToReel(
+  reel: IReel,
+  measuredCosts: MeasuredCostInput[],
+  runLabel?: string,
+): void {
+  if (!measuredCosts.length) return;
+  const newLines = measuredCosts
+    .map(measuredLine)
+    .filter((item): item is ICostLine => Boolean(item))
+    .map((item) => ({
+      ...item,
+      label: runLabel ? `[${runLabel}] ${item.label}` : item.label,
+    }));
+  const lines = [...(reel.costBreakdown?.lines ?? []), ...newLines];
+  reel.costBreakdown = {
+    currency: "USD",
+    totalUsd: roundUsd(lines.reduce((sum, item) => sum + item.costUsd, 0)),
+    lines,
+    note: reel.costBreakdown?.note ?? COST_NOTE,
+    generatedAt: new Date(),
+  };
+  reel.costUsd = reel.costBreakdown.totalUsd;
+}
+
+export async function recordReelMeasuredCosts(
+  reelId: string,
+  measuredCosts: MeasuredCostInput[],
+  runLabel?: string,
+): Promise<void> {
+  if (!measuredCosts.length) return;
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  applyMeasuredCostsToReel(reel, measuredCosts, runLabel);
+  await reel.save();
 }
 
 async function getVideoSkuPrice(model: string): Promise<number | undefined> {
@@ -81,7 +123,9 @@ export async function buildReelCostBreakdown(
   const measured = (opts.measuredCosts ?? []).map(measuredLine).filter((item): item is ICostLine => Boolean(item));
   // Prefer the metered LLM line(s) (real model + every pass) over the flat
   // estimate — that estimate is only a fallback when metering didn't report.
-  const hasMeteredLlm = measured.some((item) => /^(Script planning|Story bible|Scene script)/.test(item.label));
+  const hasMeteredLlm = (opts.measuredCosts ?? []).some((item) =>
+    METERED_LLM_LABEL.test(item.label),
+  );
   const lines: ICostLine[] = [
     ...(hasMeteredLlm ? [] : [line("Script planning (estimated)", 1, "plan", LLM_PLANNING_ESTIMATE_USD, opts.llmModel)]),
     ...measured,
@@ -118,8 +162,7 @@ export async function buildReelCostBreakdown(
     currency: "USD",
     totalUsd,
     lines,
-    note:
-      "Actual lines use OpenRouter response/generation usage when available. Estimated lines are marked explicitly; OpenRouter does not expose exact cost for every media endpoint response.",
+    note: COST_NOTE,
     generatedAt: new Date(),
   };
 }

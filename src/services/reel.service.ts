@@ -39,6 +39,7 @@ import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
 import {
   accumulateReelCostBreakdown,
+  applyMeasuredCostsToReel,
   buildReelCostBreakdown,
   type MeasuredCostInput,
 } from "./reel-cost.service";
@@ -362,13 +363,21 @@ async function createHorrorReelSeries(
   const pipelineMode = options.pipelineMode ?? "review";
   const seriesStartedAt = Date.now();
   console.log(`📚 Planning horror series (${partCount} parts) niche=${niche} genre=${genre}`);
+  const planCosts: MeasuredCostInput[] = [];
   const planned = await planHorrorSeries(
     niche,
     options.providedScript?.trim() || topic,
     tier as Tier,
     genre,
     partCount,
-    undefined,
+    (usage) => {
+      planCosts.push({
+        label: usage.label,
+        model: usage.model,
+        costUsd: usage.costUsd,
+        source: "actual",
+      });
+    },
     options.horrorReferenceId
   );
   console.log(
@@ -420,6 +429,11 @@ async function createHorrorReelSeries(
     reels.push(reel);
     if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
     else await enqueueReel(reel._id.toString());
+  }
+
+  if (planCosts.length && reels[0]) {
+    applyMeasuredCostsToReel(reels[0], planCosts, "Series plan");
+    await reels[0].save();
   }
 
   console.log(`🎬 Created horror series ${seriesId}: ${reels.map((r) => r._id).join(", ")}`);
@@ -650,10 +664,11 @@ export async function processReelPlan(reelId: string): Promise<void> {
   const measuredCosts: MeasuredCostInput[] = [];
   try {
     if (recipe.strategy === "gameplay_overlay") {
-      await planGameplayReel(reel, recipe);
+      await planGameplayReel(reel, recipe, measuredCosts);
     } else {
       await planImageReel(reel, recipe, measuredCosts);
     }
+    applyMeasuredCostsToReel(reel, measuredCosts, "Plan");
     reel.status = "plan_review";
     reel.progress = 15;
     reel.currentStep = "Awaiting your review";
@@ -1052,10 +1067,36 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
   }
 }
 
+/** Collect review-package OpenRouter spend into a produce/run ledger. */
+function reviewPackageUsageHandlers(measuredCosts: MeasuredCostInput[]) {
+  return {
+    onReviewCopyUsage: (usage: { label: string; model: string; costUsd: number }) => {
+      measuredCosts.push({
+        label: usage.label,
+        model: usage.model,
+        costUsd: usage.costUsd,
+        source: "actual",
+      });
+    },
+    onThumbnailImageUsage: (usage: { costUsd?: number }) => {
+      measuredCosts.push({
+        label: "Thumbnail image",
+        model: resolveModels("cheap").image,
+        costUsd: usage.costUsd,
+        source: usage.costUsd !== undefined ? "actual" : "estimated",
+      });
+    },
+  };
+}
+
 /** Plan stage body — LLM script/scene-graph (or structure a user-provided
  *  story), resolve the voice, and save the scene graph. Reuses an existing plan
  *  when scenes are already present (edited/approved plans re-run cheaply). */
-async function planGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void> {
+async function planGameplayReel(
+  reel: IReel,
+  recipe: NicheRecipe,
+  measuredCosts: MeasuredCostInput[] = [],
+): Promise<void> {
   const reelId = reel._id.toString();
   const models = resolveModels(reel.tier as Tier);
   await ensureDir(config.processingPath);
@@ -1080,10 +1121,18 @@ async function planGameplayReel(reel: IReel, recipe: NicheRecipe): Promise<void>
   const auto = !reel.topic?.trim() || reel.topic.trim().toLowerCase() === "auto";
   const storySource = (reel.storySource ?? config.storyMode) as StorySource;
   let story: IRedditStoryPayload;
+  const onStoryUsage = (usage: { label: string; model: string; costUsd: number }) => {
+    measuredCosts.push({
+      label: usage.label,
+      model: usage.model,
+      costUsd: usage.costUsd,
+      source: "actual",
+    });
+  };
   if (!reel.redditStory) {
     const drafted = auto
-      ? await takeNextStory(storySource, reel.tier as Tier)
-      : await planRedditStory(reel.topic, reel.tier as Tier, reel.genre);
+      ? await takeNextStory(storySource, reel.tier as Tier, onStoryUsage)
+      : await planRedditStory(reel.topic, reel.tier as Tier, reel.genre, onStoryUsage);
     const meta = drafted as StoryDraft & { source?: StorySource; storyId?: string };
     story = stabilizeRedditCard(
       toSingleRedditStoryPayload({
@@ -1474,14 +1523,7 @@ async function produceImageReel(
     // possibly user-edited, review so we never re-spend on a thumbnail. The
     // Studio's "Generate AI Thumbnail" button regenerates it on demand.
     if (!reel.review) {
-      reel.review = await buildReelReviewPackage(reel, (usage) => {
-        measuredCosts.push({
-          label: "Thumbnail image",
-          model: resolveModels("cheap").image,
-          costUsd: usage.costUsd,
-          source: usage.costUsd !== undefined ? "actual" : "estimated",
-        });
-      });
+      reel.review = await buildReelReviewPackage(reel, reviewPackageUsageHandlers(measuredCosts));
     }
     const heroScene = isHybrid ? result.scenes.find((_, i) => reel.scenes[i]?.isHero) : undefined;
     const runBreakdown = await buildReelCostBreakdown(reel, {
@@ -1708,14 +1750,10 @@ async function processGameplayReel(
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
     if (!reel.review) {
-      reel.review = await buildReelReviewPackage(reel, (usage) => {
-        gameplayMeasuredCosts.push({
-          label: "Thumbnail image",
-          model: resolveModels("cheap").image,
-          costUsd: usage.costUsd,
-          source: usage.costUsd !== undefined ? "actual" : "estimated",
-        });
-      });
+      reel.review = await buildReelReviewPackage(
+        reel,
+        reviewPackageUsageHandlers(gameplayMeasuredCosts),
+      );
     }
     const runBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,

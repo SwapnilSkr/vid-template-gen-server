@@ -6,6 +6,7 @@ import { Story, type IStory, type StorySource } from "../models/story.model";
 import { Reel } from "../models/reel.model";
 import { getErrorMessage } from "../types";
 import { getTrendDigest } from "./trend-insight.service";
+import { reportLlmUsage, type LlmUsageCallback } from "./reel-script.service";
 
 const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
 
@@ -668,7 +669,8 @@ async function llmStory(
   angle: string,
   tier: Tier,
   genreId?: string,
-  seed?: RedditPost
+  seed?: RedditPost,
+  onLlmUsage?: LlmUsageCallback,
 ): Promise<StoryDraft> {
   const llm = resolveModels(tier).llm;
   const seedBlock = seed
@@ -688,7 +690,8 @@ RULES:
 
 OUTPUT JSON ONLY: { "title": "...", "body": "..." }`;
 
-  const { text } = await generateText({ model: openrouter(llm), prompt });
+  const { text, usage } = await generateText({ model: openrouter(llm), prompt });
+  reportLlmUsage(onLlmUsage, "Reddit story", llm, usage);
   const parsed = extractJson<{ title: string; body: string }>(text);
   if (!parsed.title || !parsed.body) throw new Error("LLM story missing title/body");
   return parsed;
@@ -914,14 +917,15 @@ function buildVerbatimParts(
  */
 export async function generateStory(
   mode: StorySource = "llm",
-  opts: { themeId?: string; genre?: string; tier?: Tier } = {}
+  opts: { themeId?: string; genre?: string; tier?: Tier; onLlmUsage?: LlmUsageCallback } = {}
 ): Promise<StoryDraft & { source: StorySource }> {
   const tier = opts.tier ?? "value";
+  const onLlmUsage = opts.onLlmUsage;
   const theme = opts.themeId ? THEMES.find((t) => t.id === opts.themeId)! : undefined;
   const genre = theme ? themeToGenre(theme) : pickGenre(opts.genre);
 
   if (mode === "llm") {
-    const s = await llmStory(genre.angle, tier, genre.id);
+    const s = await llmStory(genre.angle, tier, genre.id, undefined, onLlmUsage);
     return { ...s, source: "llm", theme: theme?.id, genre: genre.id, subreddit: genre.subreddits[0] };
   }
 
@@ -947,7 +951,7 @@ export async function generateStory(
   }
 
   // hybrid
-  const s = await llmStory(genre.angle, tier, genre.id, post);
+  const s = await llmStory(genre.angle, tier, genre.id, post, onLlmUsage);
   return {
     ...s,
     source: "hybrid",
@@ -1105,7 +1109,8 @@ export async function topUpStoryBank(
  */
 export async function takeNextStory(
   mode: StorySource = "llm",
-  tier: Tier = "value"
+  tier: Tier = "value",
+  onLlmUsage?: LlmUsageCallback,
 ): Promise<StoryDraft & { source: StorySource; storyId?: string }> {
   const candidates = await Story.find({ used: false }).sort({ createdAt: 1 }).limit(25);
   let doc: IStory | null = null;
@@ -1134,7 +1139,7 @@ export async function takeNextStory(
     };
   }
   // bank empty → generate now
-  const draft = await generateStory(mode, { tier });
+  const draft = await generateStory(mode, { tier, onLlmUsage });
   const created = await Story.create({
     ...draft,
     premiseKey: premiseKey(draft.title),
