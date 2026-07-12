@@ -1,6 +1,5 @@
-import { config } from "../config";
 import type { TtsChoice } from "../config/models";
-import { Reel, type ICostBreakdown, ICostLine, IReel } from "../models";
+import { Reel, type ICostBreakdown, type ICostLine, type IReel } from "../models";
 
 export interface MeasuredCostInput {
   label: string;
@@ -10,13 +9,10 @@ export interface MeasuredCostInput {
 }
 
 const COST_NOTE =
-  "Actual lines use OpenRouter response/generation usage when available. Estimated lines are marked explicitly; OpenRouter does not expose exact cost for every media endpoint response.";
+  "OpenRouter AI spend only (LLM, image, TTS, video). Lines appear when OpenRouter reports usage for that step.";
 
-const TTS_PRICE_PER_1K_CHARS_USD = 0.00003;
-const LLM_PLANNING_ESTIMATE_USD = 0.002;
-const LOCAL_RENDER_STORAGE_ESTIMATE_USD = 0.001;
-const METERED_LLM_LABEL =
-  /^(Script planning|Story bible|Scene script|Horror series plan|Reddit story|Review copy|Structure script)/;
+/** Legacy infra lines that should never appear in the AI ledger. */
+const NON_AI_COST_LABEL = /Render \+ storage/i;
 
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
@@ -27,7 +23,7 @@ function line(
   units: number,
   unit: string,
   unitCostUsd: number,
-  model?: string
+  model?: string,
 ): ICostLine {
   return {
     label,
@@ -46,8 +42,23 @@ function measuredLine(input: MeasuredCostInput): ICostLine | undefined {
     1,
     "request",
     roundUsd(input.costUsd),
-    input.model
+    input.model,
   );
+}
+
+/** Drop non-AI ledger lines and recompute the total. */
+export function sanitizeAiCostBreakdown(
+  breakdown?: ICostBreakdown,
+): ICostBreakdown | undefined {
+  if (!breakdown?.lines?.length) return breakdown;
+  const lines = breakdown.lines.filter((item) => !NON_AI_COST_LABEL.test(item.label));
+  if (!lines.length) return undefined;
+  return {
+    ...breakdown,
+    lines,
+    totalUsd: roundUsd(lines.reduce((sum, item) => sum + item.costUsd, 0)),
+    note: COST_NOTE,
+  };
 }
 
 /** Append metered OpenRouter lines to a reel without adding produce estimates. */
@@ -64,12 +75,13 @@ export function applyMeasuredCostsToReel(
       ...item,
       label: runLabel ? `[${runLabel}] ${item.label}` : item.label,
     }));
-  const lines = [...(reel.costBreakdown?.lines ?? []), ...newLines];
+  const previous = sanitizeAiCostBreakdown(reel.costBreakdown);
+  const lines = [...(previous?.lines ?? []), ...newLines];
   reel.costBreakdown = {
     currency: "USD",
     totalUsd: roundUsd(lines.reduce((sum, item) => sum + item.costUsd, 0)),
     lines,
-    note: reel.costBreakdown?.note ?? COST_NOTE,
+    note: COST_NOTE,
     generatedAt: new Date(),
   };
   reel.costUsd = reel.costBreakdown.totalUsd;
@@ -87,84 +99,34 @@ export async function recordReelMeasuredCosts(
   await reel.save();
 }
 
-async function getVideoSkuPrice(model: string): Promise<number | undefined> {
-  try {
-    const res = await fetch(`${config.openRouterBaseUrl}/videos/models`);
-    if (!res.ok) return undefined;
-    const data = (await res.json()) as {
-      data?: { id: string; pricing_skus?: Record<string, string | number> }[];
-    };
-    const match = data.data?.find((item) => item.id === model);
-    const skus = match?.pricing_skus;
-    if (!skus) return undefined;
-    const raw =
-      skus.duration_seconds_without_audio_720p ??
-      skus.duration_seconds_without_audio ??
-      skus.duration_seconds_720p ??
-      skus.duration_seconds ??
-      skus.text_to_video_duration_seconds_720p;
-    const parsed = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
-    return Number.isFinite(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function buildReelCostBreakdown(
-  reel: IReel,
+  _reel: IReel,
   opts: {
     llmModel: string;
     tts: TtsChoice;
     measuredCosts?: MeasuredCostInput[];
     heroVideoModel?: string;
     heroDurationSec?: number;
-  }
+  },
 ): Promise<ICostBreakdown> {
-  const measured = (opts.measuredCosts ?? []).map(measuredLine).filter((item): item is ICostLine => Boolean(item));
-  // Prefer the metered LLM line(s) (real model + every pass) over the flat
-  // estimate — that estimate is only a fallback when metering didn't report.
-  const hasMeteredLlm = (opts.measuredCosts ?? []).some((item) =>
-    METERED_LLM_LABEL.test(item.label),
-  );
-  const lines: ICostLine[] = [
-    ...(hasMeteredLlm ? [] : [line("Script planning (estimated)", 1, "plan", LLM_PLANNING_ESTIMATE_USD, opts.llmModel)]),
-    ...measured,
-  ];
-
-  const hasMeasuredTts = measured.some((item) => item.label.startsWith("Narration"));
-  const ttsChars = reel.scenes.reduce((sum, scene) => sum + scene.narration.length, 0);
-  if (!hasMeasuredTts && ttsChars > 0) {
-    lines.push(
-      line(
-        "Narration (estimated)",
-        Math.ceil(ttsChars / 1000),
-        "1k chars",
-        TTS_PRICE_PER_1K_CHARS_USD,
-        `${opts.tts.model}/${opts.tts.voice}`
-      )
-    );
-  }
-
-  const hasMeasuredHero = measured.some((item) => item.label.startsWith("Hero video"));
-  if (!hasMeasuredHero && opts.heroVideoModel && opts.heroDurationSec && opts.heroDurationSec > 0) {
-    const perSecond = await getVideoSkuPrice(opts.heroVideoModel);
-    if (perSecond !== undefined) {
-      lines.push(line("Hero video (live SKU estimate)", opts.heroDurationSec, "second", perSecond, opts.heroVideoModel));
-    } else {
-      lines.push(line("Hero video (price not reported)", 1, "request", 0, opts.heroVideoModel));
+  const lines = (opts.measuredCosts ?? [])
+    .map(measuredLine)
+    .filter((item): item is ICostLine => Boolean(item));
+  return (
+    sanitizeAiCostBreakdown({
+      currency: "USD",
+      totalUsd: roundUsd(lines.reduce((sum, item) => sum + item.costUsd, 0)),
+      lines,
+      note: COST_NOTE,
+      generatedAt: new Date(),
+    }) ?? {
+      currency: "USD",
+      totalUsd: 0,
+      lines: [],
+      note: COST_NOTE,
+      generatedAt: new Date(),
     }
-  }
-
-  lines.push(line("Render + storage (estimated)", 1, "video", LOCAL_RENDER_STORAGE_ESTIMATE_USD));
-
-  const totalUsd = roundUsd(lines.reduce((sum, item) => sum + item.costUsd, 0));
-  return {
-    currency: "USD",
-    totalUsd,
-    lines,
-    note: COST_NOTE,
-    generatedAt: new Date(),
-  };
+  );
 }
 
 /**
@@ -175,20 +137,25 @@ export async function buildReelCostBreakdown(
 export function accumulateReelCostBreakdown(
   previous: ICostBreakdown | undefined,
   next: ICostBreakdown,
-  runLabel = "Re-render"
+  runLabel = "Re-render",
 ): ICostBreakdown {
-  if (!previous?.lines?.length) return next;
+  const prev = sanitizeAiCostBreakdown(previous);
+  const sanitizedNext = sanitizeAiCostBreakdown(next);
+  if (!sanitizedNext?.lines?.length) {
+    return prev ?? sanitizedNext ?? next;
+  }
+  if (!prev?.lines?.length) return sanitizedNext;
 
-  const stampedNext = next.lines.map((item) => ({
+  const stampedNext = sanitizedNext.lines.map((item) => ({
     ...item,
     label: item.label.startsWith("[") ? item.label : `[${runLabel}] ${item.label}`,
   }));
-  const lines = [...previous.lines, ...stampedNext];
+  const lines = [...prev.lines, ...stampedNext];
   return {
     currency: "USD",
     totalUsd: roundUsd(lines.reduce((sum, item) => sum + item.costUsd, 0)),
     lines,
-    note: next.note ?? previous.note,
+    note: COST_NOTE,
     generatedAt: new Date(),
   };
 }

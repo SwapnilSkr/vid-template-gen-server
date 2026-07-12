@@ -41,6 +41,7 @@ import {
   accumulateReelCostBreakdown,
   applyMeasuredCostsToReel,
   buildReelCostBreakdown,
+  sanitizeAiCostBreakdown,
   type MeasuredCostInput,
 } from "./reel-cost.service";
 import { markHorrorReferenceUsed } from "./horror-reference.service";
@@ -1790,7 +1791,25 @@ async function processGameplayReel(
 }
 
 export async function getReel(id: string): Promise<IReel | null> {
-  return Reel.findById(id);
+  const reel = await Reel.findById(id);
+  if (!reel?.costBreakdown?.lines?.length) return reel;
+
+  const sanitized = sanitizeAiCostBreakdown(reel.costBreakdown);
+  const changed =
+    !sanitized
+    || sanitized.totalUsd !== reel.costBreakdown.totalUsd
+    || sanitized.lines.length !== reel.costBreakdown.lines.length;
+  if (!changed) return reel;
+
+  if (sanitized) {
+    reel.costBreakdown = sanitized;
+    reel.costUsd = sanitized.totalUsd;
+  } else {
+    reel.costBreakdown = undefined;
+    reel.costUsd = 0;
+  }
+  await reel.save();
+  return reel;
 }
 
 export async function listReels(limit = 50): Promise<IReel[]> {
