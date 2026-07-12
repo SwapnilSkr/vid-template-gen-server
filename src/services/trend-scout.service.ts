@@ -231,6 +231,7 @@ export async function scoutAllGenres(opts: ScoutOptions, niche?: string): Promis
 
 export interface TrendTopPerformer {
   title?: string;
+  description?: string;
   thumbnailUrl?: string;
   channelTitle?: string;
   sourceUrl: string;
@@ -284,6 +285,7 @@ export async function getTrendSummary(
 
     const topPerformers: TrendTopPerformer[] = leaderboardRefs.slice(0, 5).map((r) => ({
       title: r.title,
+      description: r.description,
       thumbnailUrl: r.thumbnailUrl,
       channelTitle: r.channelTitle,
       sourceUrl: r.sourceUrl,
