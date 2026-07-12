@@ -27,6 +27,8 @@ import {
   generateStorySeries,
   markStoryReel,
   takeNextStory,
+  loadAndReserveBankStory,
+  materializeFromSeed,
   type StoryDraft,
   type StoryPartDraft,
 } from "./story.service";
@@ -84,6 +86,8 @@ interface CreateReelOptions {
   ttsModel?: string;
   ttsVoice?: string;
   ttsFormat?: "mp3" | "pcm";
+  selectedStoryId?: string;
+  selectedSeedUrl?: string;
 }
 
 /** Default per-scene motion type for a reel's motion mode. */
@@ -181,7 +185,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     });
   }
 
-  if (recipe.strategy === "gameplay_overlay" && (options.source || options.genre)) {
+  if (recipe.strategy === "gameplay_overlay" && (options.source || options.genre || options.selectedStoryId || options.selectedSeedUrl)) {
     return createGameplayReelFromStory(options);
   }
 
@@ -242,24 +246,74 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
   const { niche, topic, tier = "cheap" } = options;
   const autoTopic = !topic?.trim() || topic.trim().toLowerCase() === "auto";
   const source = options.source ?? (autoTopic ? (config.storyMode as StorySource) : "llm");
-  const startedAt = Date.now();
-  console.log(
-    `📝 Creating Reddit reel (sync story) source=${source} genre=${options.genre ?? "any"} topic=${autoTopic ? "auto" : topic}`
-  );
-  const story = autoTopic
-    ? await generateStory(source, { genre: options.genre, tier: tier as Tier })
-    : await generateStory("llm", { genre: options.genre, tier: tier as Tier });
-  console.log(
-    `📝 Reddit story ready in ${((Date.now() - startedAt) / 1000).toFixed(1)}s: "${story.title.slice(0, 60)}"`
-  );
   const pipelineMode = options.pipelineMode ?? "review";
+  let genre = options.genre;
+  let title: string | undefined;
+  let hook: string | undefined;
+  let redditStory: IRedditStoryPayload | undefined;
+  let reservedStoryId: string | undefined;
+
+  if (options.selectedStoryId) {
+    console.log(`📝 Creating Reddit reel from bank story=${options.selectedStoryId}`);
+    const story = await loadAndReserveBankStory(options.selectedStoryId);
+    reservedStoryId = story.storyId;
+    redditStory = redditPayloadFromStoryDraft(story);
+    genre = story.genre ?? genre;
+    title = story.title;
+    hook = story.title;
+  } else if (options.selectedSeedUrl) {
+    console.log(`📝 Creating Reddit reel from seed source=${source} url=${options.selectedSeedUrl}`);
+    const deferHybrid = source === "hybrid";
+    const story = await materializeFromSeed(options.selectedSeedUrl, source, genre, tier as Tier, {
+      seedOnly: deferHybrid,
+    });
+    redditStory = deferHybrid
+      ? {
+          title: story.seedTitle ?? story.title,
+          body: "",
+          source: story.source,
+          genre: story.genre ?? genre,
+          subreddit: story.subreddit,
+          author: story.author,
+          upvotes: story.upvotes,
+          comments: story.comments,
+          ageHours: story.ageHours,
+          seedTitle: story.seedTitle,
+          seedUrl: story.seedUrl,
+          partNumber: 1,
+          partCount: 1,
+        }
+      : redditPayloadFromStoryDraft(story);
+    genre = story.genre ?? genre;
+    if (!deferHybrid) {
+      title = story.title;
+      hook = story.title;
+    }
+  } else if (autoTopic) {
+    const startedAt = Date.now();
+    console.log(
+      `📝 Creating Reddit reel (sync story) source=${source} genre=${options.genre ?? "any"} topic=auto`
+    );
+    const story = await generateStory(source, { genre: options.genre, tier: tier as Tier });
+    console.log(
+      `📝 Reddit story ready in ${((Date.now() - startedAt) / 1000).toFixed(1)}s: "${story.title.slice(0, 60)}"`
+    );
+    redditStory = redditPayloadFromStoryDraft(story);
+    genre = story.genre ?? genre;
+    title = story.title;
+    hook = story.title;
+  } else {
+    console.log(
+      `📝 Creating Reddit reel (deferred plan) source=${source} genre=${options.genre ?? "any"} topic=${topic}`
+    );
+  }
 
   const reel = new Reel({
     niche,
     topic,
     tier,
     storySource: source,
-    genre: story.genre ?? options.genre,
+    genre,
     strategy: "gameplay_overlay",
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
@@ -272,11 +326,12 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     pipelineMode,
     status: "pending",
     progress: 0,
-    title: story.title,
-    hook: story.title,
-    redditStory: stabilizeRedditCard(toSingleRedditStoryPayload(story)),
+    title,
+    hook,
+    redditStory,
   });
   await reel.save();
+  if (reservedStoryId) await markStoryReel(reservedStoryId, reel._id.toString());
   if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
   else await enqueueReel(reel._id.toString());
 
@@ -475,6 +530,17 @@ function toSingleRedditStoryPayload(story: StoryDraft & { source: StorySource })
     partNumber: 1,
     partCount: 1,
   };
+}
+
+/** Build a stabilized redditStory subdoc from a story draft. */
+export function redditPayloadFromStoryDraft(
+  story: StoryDraft & { source: StorySource }
+): NonNullable<IReel["redditStory"]> {
+  return stabilizeRedditCard(toSingleRedditStoryPayload(story));
+}
+
+function isPendingSeedStory(story: IRedditStoryPayload | undefined): boolean {
+  return Boolean(story?.seedUrl && !story.body?.trim());
 }
 
 const CARD_NAME_PARTS = [
@@ -1135,24 +1201,31 @@ async function planGameplayReel(
       ? await takeNextStory(storySource, reel.tier as Tier, onStoryUsage)
       : await planRedditStory(reel.topic, reel.tier as Tier, reel.genre, onStoryUsage);
     const meta = drafted as StoryDraft & { source?: StorySource; storyId?: string };
-    story = stabilizeRedditCard(
-      toSingleRedditStoryPayload({
-        title: drafted.title,
-        body: drafted.body,
-        source: drafted.source ?? storySource,
-        genre: meta.genre ?? reel.genre,
-        subreddit: meta.subreddit,
-        author: meta.author,
-        upvotes: meta.upvotes,
-        comments: meta.comments,
-        ageHours: meta.ageHours,
-        seedTitle: meta.seedTitle,
-        seedUrl: meta.seedUrl,
-      })
-    );
+    story = redditPayloadFromStoryDraft({
+      title: drafted.title,
+      body: drafted.body,
+      source: drafted.source ?? storySource,
+      genre: meta.genre ?? reel.genre,
+      subreddit: meta.subreddit,
+      author: meta.author,
+      upvotes: meta.upvotes,
+      comments: meta.comments,
+      ageHours: meta.ageHours,
+      seedTitle: meta.seedTitle,
+      seedUrl: meta.seedUrl,
+    });
     story.partNumber = reel.partNumber ?? story.partNumber ?? 1;
     story.partCount = reel.partCount ?? story.partCount ?? 1;
     await markStoryReel(meta.storyId, reelId);
+  } else if (isPendingSeedStory(reel.redditStory)) {
+    const seedUrl = reel.redditStory!.seedUrl!;
+    const drafted = await materializeFromSeed(seedUrl, storySource, reel.genre, reel.tier as Tier, {
+      onLlmUsage: onStoryUsage,
+      excludeReelId: reelId,
+    });
+    story = redditPayloadFromStoryDraft(drafted);
+    story.partNumber = reel.partNumber ?? story.partNumber ?? 1;
+    story.partCount = reel.partCount ?? story.partCount ?? 1;
   } else {
     const existing = plainRedditStory(reel.redditStory);
     story = stabilizeRedditCard({

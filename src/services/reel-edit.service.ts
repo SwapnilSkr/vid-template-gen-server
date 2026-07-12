@@ -10,9 +10,16 @@ import {
 } from "../models";
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce } from "../queue/queues";
-import { syncRedditBodyFromScenes } from "./reel.service";
+import { syncRedditBodyFromScenes, redditPayloadFromStoryDraft } from "./reel.service";
 import { assertFfmpegReady } from "./ffmpeg-capability.service";
 import { deleteS3Urls } from "./s3.service";
+import {
+  loadAndReserveBankStory,
+  markStoryReel,
+  materializeFromSeed,
+} from "./story.service";
+import type { StorySource } from "../models";
+import type { Tier } from "../config/models";
 
 // ============================================
 // Studio editing — human-in-the-loop scene/settings/caption edits + surgical
@@ -573,7 +580,13 @@ export async function approvePlan(reelId: string): Promise<IReel> {
 /** Discard the current plan and re-plan (new story / reference / pasted script). */
 export async function replanReel(
   reelId: string,
-  patch: { topic?: string; providedScript?: string; horrorReferenceId?: string }
+  patch: {
+    topic?: string;
+    providedScript?: string;
+    horrorReferenceId?: string;
+    selectedStoryId?: string;
+    selectedSeedUrl?: string;
+  }
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
@@ -610,6 +623,49 @@ export async function replanReel(
   reel.status = "planning";
   reel.progress = 5;
   reel.error = undefined;
+
+  if (reel.strategy === "gameplay_overlay") {
+    const source = (reel.storySource ?? "llm") as StorySource;
+    if (patch.selectedStoryId) {
+      const story = await loadAndReserveBankStory(patch.selectedStoryId);
+      reel.redditStory = redditPayloadFromStoryDraft(story);
+      reel.title = story.title;
+      reel.hook = story.title;
+      reel.genre = story.genre ?? reel.genre;
+      reel.markModified("redditStory");
+      await markStoryReel(story.storyId, reelId);
+    } else if (patch.selectedSeedUrl) {
+      const deferHybrid = source === "hybrid";
+      const story = await materializeFromSeed(patch.selectedSeedUrl, source, reel.genre, reel.tier as Tier, {
+        seedOnly: deferHybrid,
+        excludeReelId: reelId,
+      });
+      if (deferHybrid) {
+        reel.redditStory = {
+          title: story.seedTitle ?? story.title,
+          body: "",
+          source: story.source,
+          genre: story.genre ?? reel.genre,
+          subreddit: story.subreddit,
+          author: story.author,
+          upvotes: story.upvotes,
+          comments: story.comments,
+          ageHours: story.ageHours,
+          seedTitle: story.seedTitle,
+          seedUrl: story.seedUrl,
+          partNumber: reel.partNumber ?? 1,
+          partCount: reel.partCount ?? 1,
+        };
+      } else {
+        reel.redditStory = redditPayloadFromStoryDraft(story);
+        reel.title = story.title;
+        reel.hook = story.title;
+      }
+      reel.genre = story.genre ?? reel.genre;
+      reel.markModified("redditStory");
+    }
+  }
+
   await reel.save();
   await deleteS3Urls(staleMedia);
   await enqueueReelPlan(reelId);

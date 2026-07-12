@@ -76,6 +76,10 @@ export const CreateReelBody = t.Object({
   horrorReferenceId: t.Optional(t.String()),
   /** cinematic edit FX applied as a final render pass (rain/grain/vignette/letterbox) */
   editEffects: t.Optional(EditEffectsBody),
+  /** pre-selected bank story id (browse/select flow) */
+  selectedStoryId: t.Optional(t.String()),
+  /** pre-selected Reddit permalink (browse/select flow) */
+  selectedSeedUrl: t.Optional(t.String()),
 });
 
 export type TCreateReelBody = typeof CreateReelBody.static;
@@ -228,6 +232,8 @@ export const ReplanReelBody = t.Object({
   topic: t.Optional(t.String()),
   providedScript: t.Optional(t.String()),
   horrorReferenceId: t.Optional(t.String()),
+  selectedStoryId: t.Optional(t.String()),
+  selectedSeedUrl: t.Optional(t.String()),
 });
 export type TReplanReelBody = typeof ReplanReelBody.static;
 

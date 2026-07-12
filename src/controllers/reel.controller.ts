@@ -172,6 +172,8 @@ export async function createReelController({ body, set }: CreateReelContext) {
       ttsModel: body.ttsModel,
       ttsVoice: body.ttsVoice,
       ttsFormat: body.ttsFormat,
+      selectedStoryId: body.selectedStoryId,
+      selectedSeedUrl: body.selectedSeedUrl,
     });
     const primary = reel.reel;
     return {
