@@ -5,3 +5,4 @@ export * from "./composition";
 export * from "./reel";
 export * from "./trend";
 export * from "./yt-import";
+export * from "./story";

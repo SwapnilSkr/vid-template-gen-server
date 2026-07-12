@@ -128,6 +128,13 @@ export {
   deleteYouTubeChannelController,
 } from "./youtube.controller";
 
+// Story browse/select controllers
+export {
+  listStoryCandidatesController,
+  listStoryBankController,
+  listStoryGenresController,
+} from "./story.controller";
+
 // Audio Test controllers
 export {
   runAudioTestController,

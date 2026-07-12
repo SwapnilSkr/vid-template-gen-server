@@ -16,6 +16,7 @@ import {
   maintenanceRoutes,
   youtubeRoutes,
   ytImportRoutes,
+  storyRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
 import { ensureYtImportsStorage } from "./services/yt-import.service";
@@ -130,6 +131,7 @@ const app = new Elysia({
   .use(trendRoutes)
   .use(youtubeRoutes)
   .use(ytImportRoutes)
+  .use(storyRoutes)
   .use(maintenanceRoutes);
 
 // Start server

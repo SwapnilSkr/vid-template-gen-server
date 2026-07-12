@@ -544,14 +544,62 @@ function premiseKey(title: string): string {
     .join("-");
 }
 
-async function isDuplicate(title: string, seedUrl?: string): Promise<boolean> {
-  if (seedUrl && ((await Story.exists({ seedUrl })) || (await isSeedUrlUsedByLiveReel(seedUrl)))) return true;
-  return !!(await Story.exists({ premiseKey: premiseKey(title) }));
+async function isDuplicate(title: string, seedUrl?: string, excludeStoryId?: string): Promise<boolean> {
+  if (seedUrl) {
+    const seedFilter = excludeStoryId ? { seedUrl, _id: { $ne: excludeStoryId } } : { seedUrl };
+    if ((await Story.exists(seedFilter)) || (await isSeedUrlUsedByLiveReel(seedUrl))) return true;
+  }
+  const premiseFilter = excludeStoryId
+    ? { premiseKey: premiseKey(title), _id: { $ne: excludeStoryId } }
+    : { premiseKey: premiseKey(title) };
+  return !!(await Story.exists(premiseFilter));
 }
 
-async function isSeedUrlUsedByLiveReel(seedUrl?: string): Promise<boolean> {
+async function isSeedUrlUsedByLiveReel(seedUrl?: string, excludeReelId?: string): Promise<boolean> {
   if (!seedUrl) return false;
-  return !!(await Reel.exists({ "redditStory.seedUrl": seedUrl }));
+  const filter = excludeReelId
+    ? { "redditStory.seedUrl": seedUrl, _id: { $ne: excludeReelId } }
+    : { "redditStory.seedUrl": seedUrl };
+  return !!(await Reel.exists(filter));
+}
+
+function normalizeRedditUrl(url: string): string {
+  return url.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function parseRedditPostId(url: string): string | null {
+  const match = url.trim().match(/\/comments\/([a-z0-9]+)/i);
+  return match?.[1] ?? null;
+}
+
+async function fetchPostByUrl(url: string): Promise<RedditPost | null> {
+  const postId = parseRedditPostId(url);
+  if (!postId) return null;
+  try {
+    const json = (await redditFetchJson(`/comments/${postId}?limit=1&raw_json=1`)) as [
+      RedditListingJson,
+      unknown,
+    ];
+    const posts = parseRedditListing(json[0], "");
+    return posts[0] ?? null;
+  } catch (error: unknown) {
+    console.warn(`  reddit post fetch failed for ${url}: ${getErrorMessage(error)}`);
+    return null;
+  }
+}
+
+/** Re-check dedupe guards before reserving or materializing a story. */
+export async function assertStoryAvailable(
+  title: string,
+  seedUrl?: string,
+  opts?: { excludeStoryId?: string; excludeReelId?: string }
+): Promise<void> {
+  if (await isDuplicate(title, seedUrl, opts?.excludeStoryId)) {
+    throw new Error("This story is no longer available");
+  }
+  if (seedUrl && (await isSeedUrlUsedByLiveReel(seedUrl, opts?.excludeReelId))) {
+    throw new Error("This Reddit post is already used by another reel");
+  }
 }
 
 // ---- LLM helpers ----
@@ -1161,4 +1209,223 @@ export async function storyBankStats(): Promise<{ ready: number; used: number }>
     Story.countDocuments({ used: true }),
   ]);
   return { ready, used };
+}
+
+export interface RedditCandidate {
+  title: string;
+  seedUrl: string;
+  subreddit: string;
+  author: string;
+  upvotes: number;
+  comments: number;
+  ageHours: number;
+  excerpt: string;
+  score: number;
+  wordCount: number;
+}
+
+/** Live Reddit posts scored for browse/select — excludes duplicates and used seeds. */
+export async function listRedditCandidates(
+  genreId: string | undefined,
+  source: StorySource,
+  opts: { limit?: number; excludeUrls?: string[] } = {}
+): Promise<{ items: RedditCandidate[]; hasMore: boolean }> {
+  if (source === "llm") {
+    return { items: [], hasMore: false };
+  }
+  const limit = Math.min(Math.max(opts.limit ?? 20, 1), 50);
+  const exclude = new Set((opts.excludeUrls ?? []).map(normalizeRedditUrl));
+  const genre = pickGenre(genreId);
+  const posts = await fetchGenrePosts(genre, 35);
+  const fresh: RedditCandidate[] = [];
+
+  for (const post of posts) {
+    if (exclude.has(normalizeRedditUrl(post.url))) continue;
+    if (await isDuplicate(post.title, post.url)) continue;
+    fresh.push({
+      title: post.title,
+      seedUrl: post.url,
+      subreddit: post.subreddit,
+      author: post.author,
+      upvotes: post.ups,
+      comments: post.comments,
+      ageHours: post.ageHours,
+      excerpt: post.body.slice(0, 280),
+      score: scorePost(post, genre),
+      wordCount: wordCount(post.body),
+    });
+    if (fresh.length >= limit + 1) break;
+  }
+
+  const hasMore = fresh.length > limit;
+  return { items: fresh.slice(0, limit), hasMore };
+}
+
+export interface StoryBankItem {
+  id: string;
+  title: string;
+  body: string;
+  source: StorySource;
+  genre?: string;
+  subreddit?: string;
+  author?: string;
+  upvotes?: number;
+  comments?: number;
+  ageHours?: number;
+  seedTitle?: string;
+  seedUrl?: string;
+  createdAt: Date;
+}
+
+/** Unused banked stories, excluding seeds already on live reels. */
+export async function listStoryBank(
+  opts: {
+    genre?: string;
+    source?: StorySource;
+    limit?: number;
+    offset?: number;
+    sort?: "newest" | "oldest";
+  } = {}
+): Promise<{ items: StoryBankItem[]; total: number; hasMore: boolean }> {
+  const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
+  const offset = Math.max(opts.offset ?? 0, 0);
+  const filter: Record<string, unknown> = { used: false };
+  if (opts.genre) filter.genre = opts.genre;
+  if (opts.source) filter.source = opts.source;
+
+  const sortDir = opts.sort === "oldest" ? 1 : -1;
+  const docs = await Story.find(filter).sort({ createdAt: sortDir }).skip(offset).limit(limit + 25);
+  const items: StoryBankItem[] = [];
+
+  for (const doc of docs) {
+    if (await isSeedUrlUsedByLiveReel(doc.seedUrl)) continue;
+    items.push({
+      id: doc._id.toString(),
+      title: doc.title,
+      body: doc.body,
+      source: doc.source,
+      genre: doc.genre,
+      subreddit: doc.subreddit,
+      author: doc.author,
+      upvotes: doc.upvotes,
+      comments: doc.comments,
+      ageHours: doc.ageHours,
+      seedTitle: doc.seedTitle,
+      seedUrl: doc.seedUrl,
+      createdAt: doc.createdAt,
+    });
+    if (items.length >= limit + 1) break;
+  }
+
+  const hasMore = items.length > limit || docs.length > limit;
+  const total = await Story.countDocuments(filter);
+  return { items: items.slice(0, limit), total, hasMore };
+}
+
+/** Atomically reserve one unused bank story (re-checks live-reel seed guard). */
+export async function loadAndReserveBankStory(
+  storyId: string
+): Promise<StoryDraft & { source: StorySource; storyId: string }> {
+  const doc = await Story.findOneAndUpdate(
+    { _id: storyId, used: false },
+    { used: true, usedAt: new Date() },
+    { new: true }
+  );
+  if (!doc) throw new Error("Story not found or already used");
+  try {
+    await assertStoryAvailable(doc.title, doc.seedUrl, { excludeStoryId: doc._id.toString() });
+  } catch (error: unknown) {
+    await Story.findByIdAndUpdate(doc._id, { used: false, $unset: { usedAt: "" } });
+    throw error;
+  }
+  return {
+    title: doc.title,
+    body: doc.body,
+    source: doc.source,
+    genre: doc.genre,
+    subreddit: doc.subreddit,
+    author: doc.author,
+    upvotes: doc.upvotes,
+    comments: doc.comments,
+    ageHours: doc.ageHours,
+    seedTitle: doc.seedTitle,
+    seedUrl: doc.seedUrl,
+    storyId: doc._id.toString(),
+  };
+}
+
+/**
+ * Materialize a story from a Reddit permalink.
+ * `seedOnly` (hybrid) returns metadata without LLM rewrite — defer to plan time.
+ */
+export async function materializeFromSeed(
+  seedUrl: string,
+  source: StorySource,
+  genre?: string,
+  tier: Tier = "value",
+  opts: { seedOnly?: boolean; onLlmUsage?: LlmUsageCallback; excludeReelId?: string } = {}
+): Promise<StoryDraft & { source: StorySource }> {
+  if (source === "llm") {
+    throw new Error("Cannot materialize a Reddit seed with llm source");
+  }
+
+  let post = await fetchPostByUrl(seedUrl);
+  const resolvedGenre = pickGenre(genre);
+  if (!post) {
+    const posts = await fetchGenrePosts(resolvedGenre, 50);
+    const target = normalizeRedditUrl(seedUrl);
+    post = posts.find((p) => normalizeRedditUrl(p.url) === target) ?? null;
+  }
+  if (!post) throw new Error(`Could not load Reddit post: ${seedUrl}`);
+
+  if (opts.seedOnly && source === "hybrid") {
+    await assertStoryAvailable(post.title, post.url, { excludeReelId: opts.excludeReelId });
+    return {
+      title: post.title,
+      body: "",
+      source: "hybrid",
+      genre: resolvedGenre.id,
+      subreddit: post.subreddit,
+      author: post.author,
+      upvotes: post.ups,
+      comments: post.comments,
+      ageHours: post.ageHours,
+      seedTitle: post.title,
+      seedUrl: post.url,
+    };
+  }
+
+  await assertStoryAvailable(post.title, post.url, { excludeReelId: opts.excludeReelId });
+
+  if (source === "verbatim") {
+    const threadedPost = await resolveRedditStoryThread(post);
+    return {
+      title: threadedPost.title,
+      body: trimBody(threadedPost.body),
+      source: "verbatim",
+      genre: resolvedGenre.id,
+      subreddit: threadedPost.subreddit,
+      author: threadedPost.author,
+      upvotes: threadedPost.ups,
+      comments: threadedPost.comments,
+      ageHours: threadedPost.ageHours,
+      seedTitle: post.title,
+      seedUrl: post.url,
+    };
+  }
+
+  const threadedPost = await resolveRedditStoryThread(post).catch(() => post);
+  const rewritten = await llmStory(resolvedGenre.angle, tier, resolvedGenre.id, threadedPost, opts.onLlmUsage);
+  return {
+    ...rewritten,
+    source: "hybrid",
+    genre: resolvedGenre.id,
+    subreddit: post.subreddit,
+    author: post.author,
+    upvotes: post.ups,
+    comments: post.comments,
+    ageHours: post.ageHours,
+    seedTitle: post.title,
+    seedUrl: post.url,
+  };
 }
