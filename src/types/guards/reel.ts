@@ -76,6 +76,7 @@ export const CreateReelBody = t.Object({
   horrorReferenceId: t.Optional(t.String()),
   /** cinematic edit FX applied as a final render pass (rain/grain/vignette/letterbox) */
   editEffects: t.Optional(EditEffectsBody),
+  instagram: t.Optional(t.Object({ caption: t.Optional(t.String({ maxLength: 2200 })), shareToFeed: t.Optional(t.Boolean()) })),
   /** pre-selected bank story id (browse/select flow) */
   selectedStoryId: t.Optional(t.String()),
   /** pre-selected Reddit permalink (browse/select flow) */
@@ -427,6 +428,13 @@ export const ConnectYouTubeBody = t.Object({
 });
 
 export type TConnectYouTubeBody = typeof ConnectYouTubeBody.static;
+export const UpdateYouTubeChannelBody = t.Object({
+  label: t.Optional(t.String({ minLength: 1, maxLength: 100 })),
+  privacyStatus: t.Optional(t.Union([t.Literal("private"), t.Literal("unlisted"), t.Literal("public")])),
+  categoryId: t.Optional(t.String({ maxLength: 10 })),
+  niches: t.Optional(t.Array(t.String({ maxLength: 64 }), { maxItems: 20 })),
+});
+export type TUpdateYouTubeChannelBody = typeof UpdateYouTubeChannelBody.static;
 
 export const YouTubeCallbackQuery = t.Object({
   code: t.Optional(t.String()),

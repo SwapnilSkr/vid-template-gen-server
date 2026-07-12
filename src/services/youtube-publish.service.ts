@@ -305,8 +305,56 @@ export function listYouTubePublishChannels(): PublicYouTubePublishChannel[] {
   }));
 }
 
+/** Environment-configured channels historically contained only an internal
+ * label + refresh token. Resolve their real channel identity for account UI
+ * parity with channels connected through our OAuth flow. A failed metadata
+ * lookup is intentionally non-fatal: publishing can still work with the
+ * narrower legacy `youtube.upload` token scope. */
+async function enrichEnvChannel(
+  channel: YouTubePublishChannel,
+  index: number
+): Promise<PublicYouTubePublishChannel> {
+  const fallback: PublicYouTubePublishChannel = {
+    id: channel.id,
+    label: channel.label,
+    privacyStatus: channel.privacyStatus ?? config.youtubePrivacyStatus,
+    categoryId: channel.categoryId ?? config.youtubeCategoryId,
+    niches: channel.niches,
+    isDefault: index === 0,
+    source: "env",
+  };
+  try {
+    const auth = getYouTubeOAuthClientForRefreshToken(
+      channel.refreshToken,
+      channel.clientId,
+      channel.clientSecret,
+      channel.redirectUri
+    );
+    const youtube = google.youtube({ version: "v3", auth });
+    const response = await youtube.channels.list({ part: ["snippet"], mine: true });
+    const profile = response.data.items?.[0];
+    if (!profile) return fallback;
+    return {
+      ...fallback,
+      googleChannelId: profile.id ?? undefined,
+      googleChannelTitle: profile.snippet?.title ?? undefined,
+      googleChannelHandle: profile.snippet?.customUrl ?? undefined,
+      logoUrl:
+        profile.snippet?.thumbnails?.high?.url ??
+        profile.snippet?.thumbnails?.medium?.url ??
+        profile.snippet?.thumbnails?.default?.url ??
+        undefined,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export async function listAllYouTubePublishChannels(): Promise<PublicYouTubePublishChannel[]> {
-  const envChannels = listYouTubePublishChannels();
+  const envConfiguredChannels = parseYouTubeChannels();
+  const envChannels = await Promise.all(
+    envConfiguredChannels.map((channel, index) => enrichEnvChannel(channel, index))
+  );
   const dbChannels = await YouTubeChannel.find({ status: { $ne: "disabled" } })
     .sort({ createdAt: 1 })
     .lean();
@@ -446,6 +494,20 @@ export async function disableYouTubeChannel(channelId: string): Promise<void> {
     { channelKey: channelId },
     { $set: { status: "disabled" } }
   );
+}
+
+export async function updateYouTubeChannel(
+  channelId: string,
+  input: Partial<Pick<StartYouTubeConnectInput, "label" | "privacyStatus" | "categoryId" | "niches">>
+) {
+  const channel = await YouTubeChannel.findOne({ channelKey: channelId, status: { $ne: "disabled" } });
+  if (!channel) throw new Error("This YouTube channel is environment-configured and must be edited in YOUTUBE_CHANNELS_JSON");
+  if (input.label !== undefined) { if (!input.label.trim()) throw new Error("Channel label cannot be empty"); channel.label = input.label.trim(); }
+  if (input.privacyStatus) channel.privacyStatus = input.privacyStatus;
+  if (input.categoryId !== undefined) channel.categoryId = input.categoryId;
+  if (input.niches !== undefined) channel.niches = input.niches;
+  await channel.save();
+  return channel;
 }
 
 /** Publish an already-rendered reel to YouTube as a Short. Updates `reel.youtube`. */

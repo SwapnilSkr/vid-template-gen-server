@@ -5,11 +5,13 @@ import {
   disableYouTubeChannel,
   listAllYouTubePublishChannels,
   startYouTubeChannelConnect,
+  updateYouTubeChannel,
 } from "../services";
 import type {
   TConnectYouTubeBody,
   TIdParams,
   TYouTubeCallbackQuery,
+  TUpdateYouTubeChannelBody,
 } from "../types/guards";
 
 interface ConnectYouTubeContext extends Context {
@@ -65,6 +67,7 @@ export async function deleteYouTubeChannelController({
   await disableYouTubeChannel(params.id);
   return { success: true, data: { id: params.id } };
 }
+export async function updateYouTubeChannelController({ params, body }: Context & { params: TIdParams; body: TUpdateYouTubeChannelBody }) { return { success: true, data: await updateYouTubeChannel(params.id, body) }; }
 
 function getOAuthErrorMessage(error: string, description?: string) {
   if (error === "access_denied") {

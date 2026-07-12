@@ -20,6 +20,7 @@ export {
   type ReelStatus,
   type IYouTubePublish,
   type IInstagramPublish,
+  type IInstagramPublishSettings,
   type IReelReviewPackage,
   type ICostBreakdown,
   type ICostLine,

@@ -244,6 +244,7 @@ export interface IInstagramPublish {
   error?: string;
   publishedAt?: Date;
 }
+export interface IInstagramPublishSettings { caption?: string; shareToFeed: boolean; }
 
 export interface IReelReviewPackage {
   title?: string;
@@ -396,6 +397,7 @@ export interface IReel extends Document {
   error?: string;
   youtube?: IYouTubePublish;
   instagram: IInstagramPublish[];
+  instagramSettings?: IInstagramPublishSettings;
 
   createdAt: Date;
   updatedAt: Date;
@@ -676,6 +678,7 @@ const instagramPublishSchema = new Schema<IInstagramPublish>(
   },
   { _id: false }
 );
+const instagramSettingsSchema = new Schema<IInstagramPublishSettings>({ caption: String, shareToFeed: { type: Boolean, default: true } }, { _id: false });
 
 const reelReviewSchema = new Schema<IReelReviewPackage>(
   {
@@ -818,6 +821,7 @@ const reelSchema = new Schema<IReel>(
     error: String,
     youtube: youtubePublishSchema,
     instagram: { type: [instagramPublishSchema], default: [] },
+    instagramSettings: instagramSettingsSchema,
   },
   { timestamps: true }
 );

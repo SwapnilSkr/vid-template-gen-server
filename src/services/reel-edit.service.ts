@@ -374,6 +374,7 @@ export async function updateReelSettings(
     voice?: { model?: string; voice?: string; format?: "mp3" | "pcm" };
     audioPost?: IAudioPost;
     editEffects?: IEditEffects;
+    instagram?: { caption?: string; shareToFeed?: boolean };
   }
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
@@ -420,6 +421,10 @@ export async function updateReelSettings(
   if (patch.editEffects !== undefined) {
     reel.editEffects = patch.editEffects;
     reel.markModified("editEffects");
+  }
+  if (patch.instagram !== undefined) {
+    reel.instagramSettings = { caption: patch.instagram.caption, shareToFeed: patch.instagram.shareToFeed ?? reel.instagramSettings?.shareToFeed ?? true };
+    reel.markModified("instagramSettings");
   }
   if (patch.motionMode !== undefined) {
     reel.motionMode = patch.motionMode;

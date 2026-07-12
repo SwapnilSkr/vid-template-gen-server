@@ -3,7 +3,7 @@
 //
 // Prereqs (Google Cloud Console):
 //   1. Enable "YouTube Data API v3" on your project.
-//   2. OAuth consent screen: External, add the youtube.upload scope, add the
+//   2. OAuth consent screen: External, add youtube.upload + youtube.readonly, add the
 //      Google account that owns the target channel as a test user.
 //   3. Credentials -> Create OAuth client ID -> Application type "Desktop app".
 //   4. Put the client ID/secret in .env.local as YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET.
@@ -17,7 +17,10 @@ import { google } from "googleapis";
 import { config } from "../src/config";
 
 const PORT = 53682;
-const SCOPES = ["https://www.googleapis.com/auth/youtube.upload"];
+const SCOPES = [
+  "https://www.googleapis.com/auth/youtube.upload",
+  "https://www.googleapis.com/auth/youtube.readonly",
+];
 
 if (!config.youtubeClientId || !config.youtubeClientSecret) {
   console.error(

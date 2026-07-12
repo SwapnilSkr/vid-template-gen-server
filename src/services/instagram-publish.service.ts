@@ -70,6 +70,14 @@ export async function completeInstagramChannelConnect(code: string, state: strin
 }
 export async function cancelInstagramChannelConnect(state?: string) { if (state) await OAuthState.deleteOne({ state, provider: "instagram" }); }
 export async function disableInstagramChannel(id: string) { await InstagramChannel.updateOne({ channelKey: id }, { $set: { status: "disabled" } }); }
+export async function updateInstagramChannel(id: string, input: { label?: string; niches?: string[] }) {
+  const channel = await InstagramChannel.findOne({ channelKey: id, status: { $ne: "disabled" } });
+  if (!channel) throw new Error(`Unknown Instagram channel: ${id}`);
+  if (input.label !== undefined) { if (!input.label.trim()) throw new Error("Account label cannot be empty"); channel.label = input.label.trim(); }
+  if (input.niches !== undefined) channel.niches = input.niches;
+  await channel.save();
+  return channel;
+}
 async function resolveInstagramChannel(id?: string) { if (!id) throw new Error("An Instagram channel is required"); const channel = await InstagramChannel.findOne({ channelKey: id, status: "active" }); if (!channel) throw new Error(`Unknown or inactive Instagram channel: ${id}`); return channel; }
 async function accessTokenFor(channel: InstanceType<typeof InstagramChannel>): Promise<string> {
   let token = decryptToken(channel.encryptedAccessToken);
@@ -92,9 +100,9 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
   const setStatus = async (status: "pending" | "uploading" | "published" | "failed", patch: Record<string, unknown> = {}) => { reel.instagram = [...reel.instagram.filter((p) => p.channelId !== channel.channelKey), { channelId: channel.channelKey, channelLabel: channel.label, ...current, ...patch, status }]; await reel.save(); };
   await setStatus("uploading");
   try {
-    const review = await ensureReelReviewPackage(reelId); const caption = [review.title ?? reel.title ?? reel.hook, review.description].filter(Boolean).join("\n\n").slice(0, 2200);
+    const review = await ensureReelReviewPackage(reelId); const caption = (reel.instagramSettings?.caption ?? review.description ?? review.title ?? reel.title ?? reel.hook ?? "").slice(0, 2200);
     const token = await accessTokenFor(channel);
-    const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media_type: "REELS", video_url: reel.outputUrl, caption, share_to_feed: true }) });
+    const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media_type: "REELS", video_url: reel.outputUrl, caption, share_to_feed: reel.instagramSettings?.shareToFeed ?? true, ...(reel.shortsCover?.imageUrl ? { cover_url: reel.shortsCover.imageUrl } : {}) }) });
     let ready = false;
     for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 2000)); const status = await graph<{ status_code?: string }>(`/${create.id}?fields=status_code`, token); if (status.status_code === "FINISHED") { ready = true; break; } if (status.status_code === "ERROR" || status.status_code === "EXPIRED") throw new Error(`Instagram media container ${status.status_code.toLowerCase()}`); }
     if (!ready) throw new Error("Instagram media processing timed out");

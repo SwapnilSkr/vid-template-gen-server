@@ -1,10 +1,11 @@
 import { Elysia } from "elysia";
-import { ConnectYouTubeBody, IdParams, YouTubeCallbackQuery } from "../types/guards";
+import { ConnectYouTubeBody, IdParams, UpdateYouTubeChannelBody, YouTubeCallbackQuery } from "../types/guards";
 import {
   completeYouTubeConnectController,
   deleteYouTubeChannelController,
   listYouTubePublishChannelsController,
   startYouTubeConnectController,
+  updateYouTubeChannelController,
 } from "../controllers";
 
 export const youtubeRoutes = new Elysia({ prefix: "/api/youtube" })
@@ -17,4 +18,5 @@ export const youtubeRoutes = new Elysia({ prefix: "/api/youtube" })
   })
   .delete("/channels/:id", deleteYouTubeChannelController, {
     params: IdParams,
-  });
+  })
+  .put("/channels/:id", updateYouTubeChannelController, { params: IdParams, body: UpdateYouTubeChannelBody });

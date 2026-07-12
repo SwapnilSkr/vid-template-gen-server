@@ -128,8 +128,9 @@ export {
   startYouTubeConnectController,
   completeYouTubeConnectController,
   deleteYouTubeChannelController,
+  updateYouTubeChannelController,
 } from "./youtube.controller";
-export { listInstagramChannelsController, startInstagramConnectController, completeInstagramConnectController, deleteInstagramChannelController } from "./instagram.controller";
+export { listInstagramChannelsController, startInstagramConnectController, completeInstagramConnectController, deleteInstagramChannelController, updateInstagramChannelController } from "./instagram.controller";
 
 // Story browse/select controllers
 export {
