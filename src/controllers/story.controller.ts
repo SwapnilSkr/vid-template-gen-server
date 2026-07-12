@@ -33,6 +33,13 @@ function parseExcludeUrls(raw?: string): string[] | undefined {
     .filter(Boolean);
 }
 
+function parseBrowseParts(raw?: string): number | "auto" | undefined {
+  if (!raw || raw === "off") return undefined;
+  if (raw === "auto") return "auto";
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /** Live Reddit posts for browse/select (hybrid/verbatim modes). */
 export async function listStoryCandidatesController({ query, set }: ListCandidatesContext) {
   try {
@@ -44,6 +51,7 @@ export async function listStoryCandidatesController({ query, set }: ListCandidat
     const result = await listRedditCandidates(query.genre, source, {
       limit: query.limit ? parseInt(query.limit, 10) : undefined,
       excludeUrls,
+      parts: parseBrowseParts(query.parts),
     });
     return { success: true, data: result };
   } catch (error: unknown) {
@@ -63,6 +71,7 @@ export async function listStoryBankController({ query, set }: ListBankContext) {
       limit: query.limit ? parseInt(query.limit, 10) : undefined,
       offset: query.offset ? parseInt(query.offset, 10) : undefined,
       sort,
+      parts: parseBrowseParts(query.parts),
     });
     return {
       success: true,
@@ -80,6 +89,9 @@ export async function listStoryBankController({ query, set }: ListBankContext) {
           comments: item.comments,
           seedUrl: item.seedUrl,
           wordCount: item.body.trim().split(/\s+/).filter(Boolean).length,
+          estimatedParts: item.estimatedParts,
+          unavailable: item.unavailable,
+          unavailableReason: item.unavailableReason,
           createdAt: item.createdAt.toISOString(),
         })),
       },

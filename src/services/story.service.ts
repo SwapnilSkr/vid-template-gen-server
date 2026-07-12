@@ -697,6 +697,84 @@ async function fetchGenrePosts(genre: RedditGenre, limitPerSubreddit = 35): Prom
   return all.sort((a, b) => scorePost(b, genre) - scorePost(a, genre));
 }
 
+async function storyUnavailableReason(title: string, seedUrl?: string): Promise<string | undefined> {
+  if (seedUrl && (await isSeedUrlUsedByLiveReel(seedUrl))) {
+    return "Already used on another reel";
+  }
+  if (seedUrl && (await Story.exists({ seedUrl }))) {
+    return "Already in story bank";
+  }
+  if (await Story.exists({ premiseKey: premiseKey(title) })) {
+    return "Similar story already banked";
+  }
+  return undefined;
+}
+
+function bankDocToPost(doc: IStory, genre: RedditGenre): RedditPost {
+  return {
+    id: doc._id.toString(),
+    title: doc.title,
+    body: doc.body,
+    url: doc.seedUrl ?? `bank://${doc._id}`,
+    subreddit: doc.subreddit ?? genre.subreddits[0] ?? "r/unknown",
+    author: doc.author ?? "anonymous",
+    ups: doc.upvotes ?? 0,
+    comments: doc.comments ?? 0,
+    ageHours: doc.ageHours ?? 0,
+    createdUtc: Math.floor(doc.createdAt.getTime() / 1000),
+  };
+}
+
+async function resolvePostForSeries(
+  genre: RedditGenre,
+  opts: { selectedSeedUrl?: string; selectedStoryId?: string }
+): Promise<RedditPost> {
+  if (opts.selectedSeedUrl) {
+    let post = await fetchPostByUrl(opts.selectedSeedUrl);
+    if (!post) {
+      const posts = await fetchGenrePosts(genre, 50);
+      const target = normalizeRedditUrl(opts.selectedSeedUrl);
+      post = posts.find((p) => normalizeRedditUrl(p.url) === target) ?? null;
+    }
+    if (!post) throw new Error(`Could not load Reddit post: ${opts.selectedSeedUrl}`);
+    await assertStoryAvailable(post.title, post.url);
+    return post;
+  }
+
+  if (opts.selectedStoryId) {
+    const doc = await Story.findById(opts.selectedStoryId);
+    if (!doc) throw new Error("Story not found");
+    await assertStoryAvailable(doc.title, doc.seedUrl, { excludeStoryId: doc._id.toString() });
+    if (doc.seedUrl) {
+      let post = await fetchPostByUrl(doc.seedUrl);
+      if (!post) {
+        const posts = await fetchGenrePosts(genre, 50);
+        const target = normalizeRedditUrl(doc.seedUrl);
+        post = posts.find((p) => normalizeRedditUrl(p.url) === target) ?? null;
+      }
+      if (post) return post;
+    }
+    return bankDocToPost(doc, genre);
+  }
+
+  return pickRedditPost(genre);
+}
+
+function parseSeriesParts(parts?: string): number | "auto" | undefined {
+  if (!parts || parts === "off") return undefined;
+  if (parts === "auto") return "auto";
+  const n = Number(parts);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function estimatePartsForWords(
+  parts: number | "auto" | undefined,
+  words: number
+): number | undefined {
+  if (parts === undefined) return undefined;
+  return resolvePartCount(parts, words);
+}
+
 async function pickRedditPost(genre: RedditGenre): Promise<RedditPost> {
   const posts = await fetchGenrePosts(genre);
   if (!posts.length) throw new Error(`No usable posts for reddit genre ${genre.id}`);
@@ -1021,7 +1099,15 @@ export async function generateStory(
  */
 export async function generateStorySeries(
   mode: StorySource = "llm",
-  opts: { topic?: string; themeId?: string; genre?: string; tier?: Tier; parts?: number | "auto" } = {}
+  opts: {
+    topic?: string;
+    themeId?: string;
+    genre?: string;
+    tier?: Tier;
+    parts?: number | "auto";
+    selectedStoryId?: string;
+    selectedSeedUrl?: string;
+  } = {}
 ): Promise<StoryPartDraft[]> {
   const tier = opts.tier ?? "value";
   const theme = opts.themeId ? THEMES.find((t) => t.id === opts.themeId)! : undefined;
@@ -1044,7 +1130,10 @@ export async function generateStorySeries(
     }));
   }
 
-  const post = await pickRedditPost(genre);
+  const post = await resolvePostForSeries(genre, {
+    selectedSeedUrl: opts.selectedSeedUrl,
+    selectedStoryId: opts.selectedStoryId,
+  });
 
   if (mode === "hybrid") {
     const partCount = typeof requestedParts === "number" ? resolvePartCount(requestedParts, 300) : 2;
@@ -1159,8 +1248,12 @@ export async function takeNextStory(
   mode: StorySource = "llm",
   tier: Tier = "value",
   onLlmUsage?: LlmUsageCallback,
+  opts: { genre?: string; source?: StorySource } = {}
 ): Promise<StoryDraft & { source: StorySource; storyId?: string }> {
-  const candidates = await Story.find({ used: false }).sort({ createdAt: 1 }).limit(25);
+  const filter: Record<string, unknown> = { used: false };
+  if (opts.genre) filter.genre = opts.genre;
+  if (opts.source) filter.source = opts.source;
+  const candidates = await Story.find(filter).sort({ createdAt: 1 }).limit(25);
   let doc: IStory | null = null;
   for (const candidate of candidates) {
     if (await isSeedUrlUsedByLiveReel(candidate.seedUrl)) continue;
@@ -1187,7 +1280,7 @@ export async function takeNextStory(
     };
   }
   // bank empty → generate now
-  const draft = await generateStory(mode, { tier, onLlmUsage });
+  const draft = await generateStory(mode, { genre: opts.genre, tier, onLlmUsage });
   const created = await Story.create({
     ...draft,
     premiseKey: premiseKey(draft.title),
@@ -1213,7 +1306,9 @@ export async function storyBankStats(): Promise<{ ready: number; used: number }>
 
 export interface RedditCandidate {
   title: string;
+  seedTitle: string;
   seedUrl: string;
+  body: string;
   subreddit: string;
   author: string;
   upvotes: number;
@@ -1222,13 +1317,20 @@ export interface RedditCandidate {
   excerpt: string;
   score: number;
   wordCount: number;
+  estimatedParts?: number;
+  unavailable?: boolean;
+  unavailableReason?: string;
 }
 
-/** Live Reddit posts scored for browse/select — excludes duplicates and used seeds. */
+/** Live Reddit posts scored for browse/select — includes unavailable seeds with reasons. */
 export async function listRedditCandidates(
   genreId: string | undefined,
   source: StorySource,
-  opts: { limit?: number; excludeUrls?: string[] } = {}
+  opts: {
+    limit?: number;
+    excludeUrls?: string[];
+    parts?: number | "auto";
+  } = {}
 ): Promise<{ items: RedditCandidate[]; hasMore: boolean }> {
   if (source === "llm") {
     return { items: [], hasMore: false };
@@ -1241,10 +1343,13 @@ export async function listRedditCandidates(
 
   for (const post of posts) {
     if (exclude.has(normalizeRedditUrl(post.url))) continue;
-    if (await isDuplicate(post.title, post.url)) continue;
+    const unavailableReason = await storyUnavailableReason(post.title, post.url);
+    const words = wordCount(post.body);
     fresh.push({
       title: post.title,
+      seedTitle: post.title,
       seedUrl: post.url,
+      body: post.body,
       subreddit: post.subreddit,
       author: post.author,
       upvotes: post.ups,
@@ -1252,7 +1357,10 @@ export async function listRedditCandidates(
       ageHours: post.ageHours,
       excerpt: post.body.slice(0, 280),
       score: scorePost(post, genre),
-      wordCount: wordCount(post.body),
+      wordCount: words,
+      estimatedParts: estimatePartsForWords(opts.parts, words),
+      unavailable: Boolean(unavailableReason),
+      unavailableReason,
     });
     if (fresh.length >= limit + 1) break;
   }
@@ -1261,7 +1369,7 @@ export async function listRedditCandidates(
   return { items: fresh.slice(0, limit), hasMore };
 }
 
-export interface StoryBankItem {
+export interface StoryBankBrowseItem {
   id: string;
   title: string;
   body: string;
@@ -1275,9 +1383,12 @@ export interface StoryBankItem {
   seedTitle?: string;
   seedUrl?: string;
   createdAt: Date;
+  estimatedParts?: number;
+  unavailable?: boolean;
+  unavailableReason?: string;
 }
 
-/** Unused banked stories, excluding seeds already on live reels. */
+/** Unused banked stories — includes entries blocked by live-reel seeds as unavailable. */
 export async function listStoryBank(
   opts: {
     genre?: string;
@@ -1285,8 +1396,9 @@ export async function listStoryBank(
     limit?: number;
     offset?: number;
     sort?: "newest" | "oldest";
+    parts?: number | "auto";
   } = {}
-): Promise<{ items: StoryBankItem[]; total: number; hasMore: boolean }> {
+): Promise<{ items: StoryBankBrowseItem[]; total: number; hasMore: boolean }> {
   const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
   const offset = Math.max(opts.offset ?? 0, 0);
   const filter: Record<string, unknown> = { used: false };
@@ -1295,10 +1407,11 @@ export async function listStoryBank(
 
   const sortDir = opts.sort === "oldest" ? 1 : -1;
   const docs = await Story.find(filter).sort({ createdAt: sortDir }).skip(offset).limit(limit + 25);
-  const items: StoryBankItem[] = [];
+  const items: StoryBankBrowseItem[] = [];
 
   for (const doc of docs) {
-    if (await isSeedUrlUsedByLiveReel(doc.seedUrl)) continue;
+    const onLiveReel = await isSeedUrlUsedByLiveReel(doc.seedUrl);
+    const words = wordCount(doc.body);
     items.push({
       id: doc._id.toString(),
       title: doc.title,
@@ -1313,6 +1426,9 @@ export async function listStoryBank(
       seedTitle: doc.seedTitle,
       seedUrl: doc.seedUrl,
       createdAt: doc.createdAt,
+      unavailable: onLiveReel,
+      unavailableReason: onLiveReel ? "Seed already on another reel" : undefined,
+      estimatedParts: estimatePartsForWords(opts.parts, words),
     });
     if (items.length >= limit + 1) break;
   }
