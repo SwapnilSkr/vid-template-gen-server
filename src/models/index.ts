@@ -19,6 +19,7 @@ export {
   type ReelStrategy,
   type ReelStatus,
   type IYouTubePublish,
+  type IInstagramPublish,
   type IReelReviewPackage,
   type ICostBreakdown,
   type ICostLine,
@@ -52,6 +53,7 @@ export {
 } from "./trend-reference.model";
 export { TrendInsight, type ITrendInsight } from "./trend-insight.model";
 export { YouTubeChannel, type IYouTubeChannel } from "./youtube-channel.model";
+export { InstagramChannel, type IInstagramChannel } from "./instagram-channel.model";
 export { OAuthState, type IOAuthState } from "./oauth-state.model";
 export {
   YtImport,

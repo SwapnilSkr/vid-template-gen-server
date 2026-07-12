@@ -2,7 +2,7 @@ import { Schema, model, type Document } from "mongoose";
 
 export interface IOAuthState extends Document {
   state: string;
-  provider: "youtube";
+  provider: "youtube" | "instagram";
   payload: {
     label: string;
     channelKey?: string;
@@ -18,7 +18,7 @@ export interface IOAuthState extends Document {
 const oauthStateSchema = new Schema<IOAuthState>(
   {
     state: { type: String, required: true, unique: true, index: true },
-    provider: { type: String, enum: ["youtube"], required: true },
+    provider: { type: String, enum: ["youtube", "instagram"], required: true },
     payload: {
       label: { type: String, required: true },
       channelKey: String,

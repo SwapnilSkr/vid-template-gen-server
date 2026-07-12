@@ -13,6 +13,7 @@ import {
   StageThumbnailImageBody,
   ThumbnailSourceBody,
   PublishReelBody,
+  DistributeReelBody,
   SceneIndexParams,
   UpdateSceneBody,
   RegenerateSceneBody,
@@ -35,6 +36,7 @@ import {
   downloadReelController,
   deleteReelController,
   publishReelController,
+  distributeReelController,
   getReelReviewController,
   updateReelReviewController,
   regenerateReelThumbnailController,
@@ -216,6 +218,7 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
     params: IdParams,
     body: PublishReelBody,
   })
+  .post("/:id/distribute", distributeReelController, { params: IdParams, body: DistributeReelBody })
 
   // ---- Studio editing (co-creation) ----
   // Approve a reviewed plan → start producing

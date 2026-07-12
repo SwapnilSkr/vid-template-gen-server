@@ -282,6 +282,12 @@ export const PublishReelBody = t.Object({
 
 export type TPublishReelBody = typeof PublishReelBody.static;
 
+export const DistributeReelBody = t.Object({
+  youtubeChannelIds: t.Optional(t.Array(t.String(), { maxItems: 20 })),
+  instagramChannelIds: t.Optional(t.Array(t.String(), { maxItems: 20 })),
+});
+export type TDistributeReelBody = typeof DistributeReelBody.static;
+
 const ThumbnailAspectRatio = t.Optional(t.Union([t.Literal("16:9"), t.Literal("9:16"), t.Literal("1:1")]));
 
 export const ThumbnailFrameBody = t.Object({

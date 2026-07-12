@@ -27,6 +27,7 @@ import {
   listHorrorAudioLibrary,
   listArtStyles,
   listAllYouTubePublishChannels,
+  listInstagramChannels,
   updateScene,
   addScene,
   removeScene,
@@ -49,6 +50,7 @@ import type {
   TUpdateReelReviewBody,
   TRevoiceReelBody,
   TPublishReelBody,
+  TDistributeReelBody,
   TVariantParams,
   TThumbnailFrameBody,
   TThumbnailSceneBody,
@@ -397,6 +399,30 @@ export async function publishReelController({
     data: { youtube: reel.youtube },
     message: "YouTube publish job queued",
   };
+}
+
+/** Fan one completed render out to multiple owned social accounts. Each target
+ * has its own job/state, so a failure on one handle never blocks the others. */
+export async function distributeReelController({ params, body, set }: PublishReelContext & { body: TDistributeReelBody }) {
+  const reel = await getReel(params.id);
+  if (!reel) { set.status = 404; return { success: false, error: "Reel not found" }; }
+  if (reel.status !== "completed") { set.status = 400; return { success: false, error: `Reel not completed. Current status: ${reel.status}` }; }
+  const youtubeIds = [...new Set(body.youtubeChannelIds ?? [])];
+  const instagramIds = [...new Set(body.instagramChannelIds ?? [])];
+  if (!youtubeIds.length && !instagramIds.length) { set.status = 400; return { success: false, error: "Choose at least one distribution account" }; }
+  const [youtube, instagram] = await Promise.all([listAllYouTubePublishChannels(), listInstagramChannels()]);
+  const unknown = [...youtubeIds.filter((id) => !youtube.some((c) => c.id === id)), ...instagramIds.filter((id) => !instagram.some((c) => c.id === id))];
+  if (unknown.length) { set.status = 400; return { success: false, error: `Unknown distribution account(s): ${unknown.join(", ")}` }; }
+  reel.instagram = [
+    ...reel.instagram.filter((p) => !instagramIds.includes(p.channelId)),
+    ...instagramIds.map((id) => ({ channelId: id, channelLabel: instagram.find((c) => c.id === id)?.label, status: "pending" as const })),
+  ];
+  await reel.save();
+  await Promise.all([
+    ...youtubeIds.map((id) => enqueuePublish(params.id, "youtube", id)),
+    ...instagramIds.map((id) => enqueuePublish(params.id, "instagram", id)),
+  ]);
+  return { success: true, data: { youtubeChannelIds: youtubeIds, instagramChannelIds: instagramIds }, message: `Queued ${youtubeIds.length + instagramIds.length} distribution target(s)` };
 }
 
 /** Download completed reel (returns the S3/CDN URL). */

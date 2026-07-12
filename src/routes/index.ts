@@ -9,4 +9,5 @@ export { trendRoutes } from "./trend.routes";
 export { maintenanceRoutes } from "./maintenance.routes";
 export { youtubeRoutes } from "./youtube.routes";
 export { ytImportRoutes } from "./yt-import.routes";
+export { instagramRoutes } from "./instagram.routes";
 export { storyRoutes } from "./story.routes";

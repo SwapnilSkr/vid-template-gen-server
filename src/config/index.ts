@@ -105,6 +105,14 @@ export const config = {
   // Defaults off so videos can be reviewed before they go out.
   autoPublishYoutube: process.env.AUTO_PUBLISH_YOUTUBE === "true",
 
+  // Instagram API with Instagram Login. In development mode, the connected
+  // professional accounts must belong to people added to the Meta app roles.
+  instagramAppId: process.env.INSTAGRAM_APP_ID || "",
+  instagramAppSecret: process.env.INSTAGRAM_APP_SECRET || "",
+  instagramRedirectUri:
+    process.env.INSTAGRAM_REDIRECT_URI || "http://localhost:3000/api/instagram/connect/callback",
+  instagramApiVersion: process.env.INSTAGRAM_API_VERSION || "v25.0",
+
   // YouTube Data API v3 *read* access (search/videos.list) for the trend
   // scout — a plain API key from Google Cloud Console, separate from the
   // OAuth publish credentials above (those write to OUR channel; this only

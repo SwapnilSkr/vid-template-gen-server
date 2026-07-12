@@ -38,6 +38,7 @@ export {
   downloadReelController,
   deleteReelController,
   publishReelController,
+  distributeReelController,
   getReelReviewController,
   updateReelReviewController,
   regenerateReelThumbnailController,
@@ -128,6 +129,7 @@ export {
   completeYouTubeConnectController,
   deleteYouTubeChannelController,
 } from "./youtube.controller";
+export { listInstagramChannelsController, startInstagramConnectController, completeInstagramConnectController, deleteInstagramChannelController } from "./instagram.controller";
 
 // Story browse/select controllers
 export {

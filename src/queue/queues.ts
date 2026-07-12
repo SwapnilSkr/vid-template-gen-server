@@ -42,7 +42,7 @@ export interface RegenerateCompositionJobData {
 
 export interface PublishJobData {
   reelId: string;
-  platform: "youtube";
+  platform: "youtube" | "instagram";
   channelId?: string;
 }
 

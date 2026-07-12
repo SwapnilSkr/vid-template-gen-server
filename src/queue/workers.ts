@@ -10,6 +10,7 @@ import {
   regenerateCompositionAsync,
 } from "../services/composition.service";
 import { publishReelToYouTube } from "../services/youtube-publish.service";
+import { publishReelToInstagram } from "../services/instagram-publish.service";
 import { processRevoice } from "../services/reel-revoice.service";
 import type {
   ReelJobData,
@@ -82,6 +83,8 @@ export function startWorkers(): void {
     async (job: Job<PublishJobData, void, "publish">) => {
       if (job.data.platform === "youtube") {
         await publishReelToYouTube(job.data.reelId, job.data.channelId);
+      } else if (job.data.platform === "instagram") {
+        await publishReelToInstagram(job.data.reelId, job.data.channelId);
       }
     },
     {

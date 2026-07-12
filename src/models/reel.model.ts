@@ -234,6 +234,17 @@ export interface IYouTubePublish {
   publishedAt?: Date;
 }
 
+/** A reel may go to several Instagram creator/business accounts. */
+export interface IInstagramPublish {
+  channelId: string;
+  channelLabel?: string;
+  status: "pending" | "uploading" | "published" | "failed";
+  mediaId?: string;
+  url?: string;
+  error?: string;
+  publishedAt?: Date;
+}
+
 export interface IReelReviewPackage {
   title?: string;
   description?: string;
@@ -384,6 +395,7 @@ export interface IReel extends Document {
   costBreakdown?: ICostBreakdown;
   error?: string;
   youtube?: IYouTubePublish;
+  instagram: IInstagramPublish[];
 
   createdAt: Date;
   updatedAt: Date;
@@ -652,6 +664,19 @@ const youtubePublishSchema = new Schema<IYouTubePublish>(
   { _id: false }
 );
 
+const instagramPublishSchema = new Schema<IInstagramPublish>(
+  {
+    channelId: { type: String, required: true },
+    channelLabel: String,
+    status: { type: String, enum: ["pending", "uploading", "published", "failed"], default: "pending" },
+    mediaId: String,
+    url: String,
+    error: String,
+    publishedAt: Date,
+  },
+  { _id: false }
+);
+
 const reelReviewSchema = new Schema<IReelReviewPackage>(
   {
     title: String,
@@ -792,6 +817,7 @@ const reelSchema = new Schema<IReel>(
     costBreakdown: costBreakdownSchema,
     error: String,
     youtube: youtubePublishSchema,
+    instagram: { type: [instagramPublishSchema], default: [] },
   },
   { timestamps: true }
 );
