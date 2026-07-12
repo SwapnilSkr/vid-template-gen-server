@@ -292,6 +292,8 @@ export const ThumbnailSourceBody = t.Object({
   atSeconds: t.Optional(t.Number({ minimum: 0 })),
   sceneIndex: t.Optional(t.Number({ minimum: 0 })),
   aspectRatio: ThumbnailAspectRatio,
+  /** Pull from the original gameplay clip, not the already-composited reel. */
+  cleanGameplay: t.Optional(t.Boolean()),
 });
 
 export type TThumbnailSourceBody = typeof ThumbnailSourceBody.static;

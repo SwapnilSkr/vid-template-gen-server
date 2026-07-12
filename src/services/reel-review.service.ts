@@ -16,6 +16,8 @@ import {
   type MeasuredCostInput,
 } from "./reel-cost.service";
 import { deleteFromS3, uploadImage } from "./s3.service";
+import { renderRedditCard } from "./reddit-card.service";
+import { pickGameplay } from "./reel-gameplay.service";
 import { listTrendReferences } from "./trend-reference.service";
 import { getTrendDigest } from "./trend-insight.service";
 import { getRecipe } from "../config/niche-styles";
@@ -258,7 +260,7 @@ function buildDescription(reel: IReel, title: string, tags: string[]): string {
   return `${title}\n\n${recipe.displayName} short.${part}\n\n${hashtags}`.trim();
 }
 
-async function buildThumbnailPrompt(reel: IReel, title: string): Promise<string> {
+async function buildThumbnailPrompt(reel: IReel, _title: string): Promise<string> {
   const genre = reel.genre ? ` ${reel.genre.replace(/_/g, " ")}` : "";
   const digest = await getTrendDigest(reel.niche, reel.genre);
   const trendBlock = digest ? ` Reference these winning thumbnail/title patterns from top-performing videos in this genre: ${digest.replace(/\n/g, " ")}` : "";
@@ -772,6 +774,25 @@ export interface ThumbnailSourceInput {
   atSeconds?: number;
   sceneIndex?: number;
   aspectRatio?: ThumbnailAspectRatio;
+  cleanGameplay?: boolean;
+}
+
+const CLEAN_GAMEPLAY_PREVIEW_CACHE_MAX = 48;
+const cleanGameplayPreviewCache = new Map<string, string>();
+
+function cleanGameplayPreviewKey(reel: IReel, input: ThumbnailSourceInput): string {
+  const story = reel.redditStory;
+  return [
+    reel.gameplayKey,
+    (input.atSeconds ?? 0).toFixed(1),
+    input.aspectRatio ?? "9:16",
+    story?.title ?? reel.title,
+    story?.subreddit,
+    story?.cardUsername ?? story?.author,
+    story?.ageHours,
+    story?.upvotes,
+    story?.comments,
+  ].join("|");
 }
 
 /** Render an aspect-corrected background source for the client-side Thumbnail
@@ -789,8 +810,28 @@ export async function previewThumbnailSource(
   const outPath = join(config.processingPath, generateFilename("thumb_source", "png"));
   try {
     if (input.sourceType === "frame") {
-      if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
-      await extractVideoFrame(reel.outputUrl, input.atSeconds ?? 0, outPath, input.aspectRatio);
+      if (input.cleanGameplay && reel.strategy === "gameplay_overlay") {
+        const cacheKey = cleanGameplayPreviewKey(reel, input);
+        const cached = cleanGameplayPreviewCache.get(cacheKey);
+        if (cached) {
+          // Refresh insertion order so frequently scrubbed frames survive.
+          cleanGameplayPreviewCache.delete(cacheKey);
+          cleanGameplayPreviewCache.set(cacheKey, cached);
+          return cached;
+        }
+        await renderCleanGameplayTitlePreview(reel, input.atSeconds ?? 0, outPath, input.aspectRatio);
+        const buffer = await readFile(outPath);
+        const dataUrl = `data:image/png;base64,${buffer.toString("base64")}`;
+        cleanGameplayPreviewCache.set(cacheKey, dataUrl);
+        if (cleanGameplayPreviewCache.size > CLEAN_GAMEPLAY_PREVIEW_CACHE_MAX) {
+          const oldest = cleanGameplayPreviewCache.keys().next().value;
+          if (oldest) cleanGameplayPreviewCache.delete(oldest);
+        }
+        return dataUrl;
+      } else {
+        if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
+        await extractVideoFrame(reel.outputUrl, input.atSeconds ?? 0, outPath, input.aspectRatio);
+      }
     } else if (input.sourceType === "scene") {
       await composeStillImageThumbnail(sceneImageSource(reel, input.sceneIndex), outPath, input.aspectRatio);
     } else {
@@ -802,6 +843,51 @@ export async function previewThumbnailSource(
     return `data:image/png;base64,${buffer.toString("base64")}`;
   } finally {
     await unlink(outPath).catch(() => {});
+  }
+}
+
+async function renderCleanGameplayTitlePreview(
+  reel: IReel,
+  atSeconds: number,
+  output: string,
+  aspectRatio?: ThumbnailAspectRatio,
+): Promise<void> {
+  if (!reel.gameplayKey) throw new Error("Reel has no original gameplay clip");
+  const framePath = join(config.processingPath, generateFilename("clean_gameplay", "png"));
+  const story = reel.redditStory;
+  const count = (value: number | undefined): string | undefined => {
+    if (!Number.isFinite(value)) return undefined;
+    if (value! >= 1_000_000) return `${(value! / 1_000_000).toFixed(1)}m`;
+    if (value! >= 1_000) return `${(value! / 1_000).toFixed(1)}k`;
+    return String(Math.round(value!));
+  };
+  const card = await renderRedditCard(story?.title ?? reel.title ?? "Reddit story", {
+    subreddit: story?.subreddit,
+    username: story?.cardUsername ?? (story?.author ? `u/${story.author.replace(/^u\//, "")}` : undefined),
+    ageHours: story?.ageHours,
+    upvotes: count(story?.upvotes),
+    comments: count(story?.comments),
+  });
+  try {
+    // pickGameplay resolves to the existing local clip cache, downloading the
+    // S3 object only once. Repeated timeline scrubs therefore seek local disk.
+    const gameplay = await pickGameplay(reel.gameplayKey);
+    await extractVideoFrame(gameplay.path, atSeconds, framePath, aspectRatio);
+    const size = thumbnailSize(aspectRatio ?? "9:16");
+    const x = Math.round((size.width - card.width) / 2);
+    await new Promise<void>((resolve, reject) => {
+      ffmpeg()
+        .input(framePath)
+        .input(card.path)
+        .complexFilter(`[0:v][1:v]overlay=${x}:250[v]`, ["v"])
+        .outputOptions(["-frames:v", "1"])
+        .output(output)
+        .on("end", () => resolve())
+        .on("error", (error) => reject(new Error(`Clean gameplay preview failed: ${error.message}`)))
+        .run();
+    });
+  } finally {
+    await Promise.all([framePath, card.path].map((path) => unlink(path).catch(() => {})));
   }
 }
 
