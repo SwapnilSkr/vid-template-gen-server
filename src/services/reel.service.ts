@@ -75,6 +75,7 @@ interface CreateReelOptions {
   gameplayKey?: string;
   horrorAudioKey?: string;
   outroChannelId?: string;
+  outroInstagramChannelId?: string;
   outro?: IReel["outro"];
   thumbnailMode?: IReel["thumbnailMode"];
   imageModel?: string;
@@ -218,6 +219,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     outroChannelId: options.outroChannelId,
+    outroInstagramChannelId: options.outroInstagramChannelId,
     outro: options.outro,
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
@@ -314,6 +316,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
     outroChannelId: options.outroChannelId,
+    outroInstagramChannelId: options.outroInstagramChannelId,
     outro: options.outro,
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
@@ -378,6 +381,7 @@ async function createGameplayReelSeries(
       gameplayKey: options.gameplayKey,
       horrorAudioKey: options.horrorAudioKey,
       outroChannelId: options.outroChannelId,
+      outroInstagramChannelId: options.outroInstagramChannelId,
       outro: options.outro,
       thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
@@ -478,6 +482,7 @@ async function createHorrorReelSeries(
       horrorReferenceId: options.horrorReferenceId,
       horrorAudioKey: options.horrorAudioKey,
       outroChannelId: options.outroChannelId,
+      outroInstagramChannelId: options.outroInstagramChannelId,
       outro: options.outro,
       thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
@@ -2008,6 +2013,122 @@ export async function deleteReel(id: string): Promise<boolean> {
   await Reel.findByIdAndDelete(id);
   console.log(`🗑️  Deleted reel ${id} + ${assetUrls.length} S3 asset(s)`);
   return true;
+}
+
+const PART_ACTIVE_STATUSES: IReel["status"][] = [
+  "planning",
+  "generating_assets",
+  "generating_audio",
+  "aligning",
+  "rendering",
+  "uploading",
+];
+
+/** True while a "Stay tuned for part N+1" teaser is spoken/burned into this part. */
+function hasPartTeaser(partNumber: number, partCount: number): boolean {
+  return partNumber < partCount;
+}
+
+/** Clear the composite render caches that carry a now-stale part teaser so a
+ *  re-generate rebuilds them; keep scenes + per-scene audio for a cheap redo. */
+function invalidatePartTeaserRender(reel: IReel): string[] {
+  const stale = [
+    reel.outputUrl,
+    reel.bodyVideoUrl,
+    reel.assemblyVideoUrl,
+    reel.subtitlesUrl,
+    reel.partOutroAudioUrl,
+    reel.outroAudioUrl,
+  ].filter((url): url is string => Boolean(url));
+  reel.outputUrl = undefined;
+  reel.bodyVideoUrl = undefined;
+  reel.assemblyVideoUrl = undefined;
+  reel.subtitlesUrl = undefined;
+  reel.partOutroAudioUrl = undefined;
+  reel.outroAudioUrl = undefined;
+  if (reel.status === "completed") {
+    reel.status = "plan_review";
+    reel.progress = 15;
+  }
+  return stale;
+}
+
+/**
+ * Delete one part of a series and re-record the remaining parts: renumber them
+ * contiguously (Part 1..N of N), sync the Reddit story part fields, and collapse
+ * to a standalone reel when only one part is left. Parts whose spoken "Stay tuned
+ * for part N" teaser changes AND that were already rendered get their composite
+ * caches cleared so a re-generate fixes the teaser. Returns the ids that remain
+ * (renumbered order) so the caller can navigate off a deleted part.
+ */
+export async function deleteSeriesPart(
+  partId: string
+): Promise<{ seriesId?: string; remainingIds: string[] } | null> {
+  const target = await Reel.findById(partId);
+  if (!target) return null;
+
+  const seriesId = target.seriesId;
+  const isSeries = Boolean(seriesId && (target.partCount ?? 1) > 1);
+
+  // Standalone reel (or a stray single part) — plain delete, nothing to renumber.
+  if (!isSeries || !seriesId) {
+    await deleteReel(partId);
+    return { seriesId: undefined, remainingIds: [] };
+  }
+
+  await deleteReel(partId); // guards active status + cascades S3/job/doc
+
+  const remaining = (await listReelsBySeries(seriesId)).sort(
+    (a, b) =>
+      (a.partNumber ?? 1) - (b.partNumber ?? 1) ||
+      a.createdAt.getTime() - b.createdAt.getTime()
+  );
+
+  const staleMedia: string[] = [];
+  const total = remaining.length;
+
+  for (let i = 0; i < total; i++) {
+    const reel = remaining[i];
+    const oldNumber = reel.partNumber ?? 1;
+    const oldCount = reel.partCount ?? total;
+    const standalone = total === 1;
+    const newNumber = standalone ? 1 : i + 1;
+    const newCount = standalone ? 1 : total;
+
+    const teaserChanged =
+      oldNumber !== newNumber ||
+      hasPartTeaser(oldNumber, oldCount) !== hasPartTeaser(newNumber, newCount);
+
+    reel.seriesId = standalone ? undefined : seriesId;
+    reel.partNumber = newNumber;
+    reel.partCount = newCount;
+    if (reel.redditStory) {
+      reel.redditStory.partNumber = newNumber;
+      reel.redditStory.partCount = newCount;
+      reel.markModified("redditStory");
+    }
+
+    // Only touch heavy render caches when the teaser actually changed and the
+    // part was already rendered; never disturb a part mid-generation.
+    if (
+      teaserChanged &&
+      !PART_ACTIVE_STATUSES.includes(reel.status) &&
+      (reel.outputUrl || reel.bodyVideoUrl)
+    ) {
+      staleMedia.push(...invalidatePartTeaserRender(reel));
+    }
+
+    await reel.save();
+  }
+
+  await deleteS3Urls(staleMedia);
+  console.log(
+    `✂️  Deleted series part ${partId}; ${total} part(s) remain in ${seriesId}`
+  );
+  return {
+    seriesId: total === 1 ? undefined : seriesId,
+    remainingIds: remaining.map((reel) => reel._id.toString()),
+  };
 }
 
 /** Delete every reel currently marked "failed" — same full cascade as

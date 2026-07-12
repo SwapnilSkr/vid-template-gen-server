@@ -37,6 +37,7 @@ export {
   getReelStatusController,
   downloadReelController,
   deleteReelController,
+  deleteSeriesPartController,
   publishReelController,
   distributeReelController,
   getReelReviewController,

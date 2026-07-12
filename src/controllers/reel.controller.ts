@@ -7,7 +7,7 @@ import {
   getReel,
   listReels,
   listReelsBySeries,
-  deleteReel,
+  deleteSeriesPart,
   ensureReelReviewPackage,
   regenerateReelThumbnail,
   previewReelFrameThumbnail,
@@ -163,6 +163,7 @@ export async function createReelController({ body, set }: CreateReelContext) {
       gameplayKey: body.gameplayKey,
       horrorAudioKey: body.horrorAudioKey,
       outroChannelId: body.outroChannelId,
+      outroInstagramChannelId: body.outroInstagramChannelId,
       outro: body.outro,
       thumbnailMode: body.thumbnailMode,
       imageModel: body.imageModel,
@@ -1115,15 +1116,34 @@ export async function getThumbnailDraftAssetController({
   }
 }
 
-/** Delete a reel record. */
+/** Delete a reel record. Series-aware: deleting a part renumbers its siblings
+ *  so a series never lingers with a stale "Part N of M" count. */
 export async function deleteReelController({ params, set }: GetReelContext) {
   try {
-    const deleted = await deleteReel(params.id);
-    if (!deleted) {
+    const result = await deleteSeriesPart(params.id);
+    if (!result) {
       set.status = 404;
       return { success: false, error: "Reel not found" };
     }
-    return { success: true, message: "Reel deleted" };
+    return { success: true, message: "Reel deleted", data: result };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Delete one part of a series and renumber the survivors. */
+export async function deleteSeriesPartController({
+  params,
+  set,
+}: GetReelContext) {
+  try {
+    const result = await deleteSeriesPart(params.id);
+    if (!result) {
+      set.status = 404;
+      return { success: false, error: "Reel not found" };
+    }
+    return { success: true, data: result };
   } catch (error: unknown) {
     set.status = 400;
     return { success: false, error: getErrorMessage(error) };

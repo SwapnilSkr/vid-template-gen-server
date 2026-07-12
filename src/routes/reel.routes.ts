@@ -35,6 +35,7 @@ import {
   getReelStatusController,
   downloadReelController,
   deleteReelController,
+  deleteSeriesPartController,
   publishReelController,
   distributeReelController,
   getReelReviewController,
@@ -210,6 +211,11 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
 
   // Delete a reel
   .delete("/:id", deleteReelController, {
+    params: IdParams,
+  })
+
+  // Delete one part of a series and renumber the remaining parts
+  .delete("/:id/part", deleteSeriesPartController, {
     params: IdParams,
   })
 
