@@ -1461,7 +1461,12 @@ async function produceImageReel(
     reel.captionsBurned = true;
     reel.captionBurnError = undefined;
     const videoBuffer = await readFile(result.videoPath);
+    const prevOutput = reel.outputUrl;
+    const hadPriorOutput = Boolean(prevOutput);
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
+    if (prevOutput && prevOutput !== reel.outputUrl) {
+      await deleteFromS3(prevOutput).catch(() => {});
+    }
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
     // Build the review package (incl. the AI thumbnail) only on the FIRST
@@ -1479,7 +1484,6 @@ async function produceImageReel(
       });
     }
     const heroScene = isHybrid ? result.scenes.find((_, i) => reel.scenes[i]?.isHero) : undefined;
-    const hadPriorOutput = Boolean(reel.outputUrl);
     const runBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
       tts,

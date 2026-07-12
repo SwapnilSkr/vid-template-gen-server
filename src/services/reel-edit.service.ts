@@ -12,7 +12,7 @@ import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce } from "../queue/queues";
 import { syncRedditBodyFromScenes } from "./reel.service";
 import { assertFfmpegReady } from "./ffmpeg-capability.service";
-import { deleteFromS3 } from "./s3.service";
+import { deleteS3Urls } from "./s3.service";
 
 // ============================================
 // Studio editing — human-in-the-loop scene/settings/caption edits + surgical
@@ -50,20 +50,44 @@ async function loadReel(reelId: string): Promise<IReel> {
   return reel;
 }
 
+function sceneImageUrls(reel: IReel): (string | undefined)[] {
+  return reel.scenes.map((scene) => scene.assetUrl);
+}
+
+function sceneAudioUrls(reel: IReel): (string | undefined)[] {
+  return reel.scenes.map((scene) => scene.audioUrl);
+}
+
+function sceneMediaUrls(reel: IReel): (string | undefined)[] {
+  return reel.scenes.flatMap((scene) => [scene.assetUrl, scene.audioUrl]);
+}
+
 /** Clear cached render artifacts that are invalidated by body/composite changes. */
-async function clearBodyVideoCache(reelId: string): Promise<void> {
-  await Reel.updateOne({ _id: reelId }, { $unset: { bodyVideoUrl: "" } });
+async function clearBodyVideoCache(reel: IReel): Promise<void> {
+  const stale = reel.bodyVideoUrl;
+  await Reel.updateOne({ _id: reel._id }, { $unset: { bodyVideoUrl: "" } });
+  await deleteS3Urls([stale]);
 }
 
 /** Clear pre-caption assembly (scene/stills/audio/motion changes). */
-async function clearAssemblyCache(reelId: string): Promise<void> {
-  await Reel.updateOne({ _id: reelId }, { $unset: { assemblyVideoUrl: "", bodyVideoUrl: "" } });
+async function clearAssemblyCache(reel: IReel): Promise<void> {
+  const stale = [reel.assemblyVideoUrl, reel.bodyVideoUrl];
+  await Reel.updateOne({ _id: reel._id }, { $unset: { assemblyVideoUrl: "", bodyVideoUrl: "" } });
+  await deleteS3Urls(stale);
 }
 
 /** Clear all gameplay narration + outro caches (voice change / full assets regen). */
-async function clearNarrationCaches(reelId: string): Promise<void> {
+async function clearNarrationCaches(reel: IReel): Promise<void> {
+  const stale = [
+    reel.titleAudioUrl,
+    reel.partOutroAudioUrl,
+    reel.outroAudioUrl,
+    reel.bodyVideoUrl,
+    reel.assemblyVideoUrl,
+    ...sceneAudioUrls(reel),
+  ];
   await Reel.updateOne(
-    { _id: reelId },
+    { _id: reel._id },
     {
       $unset: {
         titleAudioUrl: "",
@@ -75,6 +99,7 @@ async function clearNarrationCaches(reelId: string): Promise<void> {
       },
     }
   );
+  await deleteS3Urls(stale);
 }
 
 /** Per-scene motion type for a reel's motion mode (mirrors reel.service). */
@@ -132,8 +157,6 @@ export async function updateScene(
   const narrationChanged =
     patch.narration !== undefined && patch.narration !== scene.narration;
   const staleAudioUrl = narrationChanged ? scene.audioUrl : undefined;
-  const staleAssembly = reel.assemblyVideoUrl;
-  const staleBody = reel.bodyVideoUrl;
   if (patch.narration !== undefined) scene.narration = patch.narration;
   if (patch.visualPrompt !== undefined) scene.visualPrompt = patch.visualPrompt;
   if (patch.motion) scene.motion = { ...scene.motion, ...patch.motion };
@@ -147,8 +170,8 @@ export async function updateScene(
   }
   await reel.save();
   if (narrationChanged || patch.visualPrompt !== undefined || patch.motion) {
-    await clearAssemblyCache(reelId);
-    await deleteCachedMediaUrls([staleAudioUrl, staleAssembly, staleBody]);
+    await clearAssemblyCache(reel);
+    await deleteS3Urls([staleAudioUrl]);
   }
   return loadReel(reelId);
 }
@@ -204,9 +227,11 @@ export async function updateRedditCard(
   await reel.save();
   // Card is burned into the body video; title audio only invalidates when spoken.
   // Gameplay has no assemblyVideoUrl — clearing body is enough for composite rebuild.
+  const stale = [reel.bodyVideoUrl, titleChanged ? reel.titleAudioUrl : undefined];
   const unset: Record<string, ""> = { bodyVideoUrl: "" };
   if (titleChanged) unset.titleAudioUrl = "";
   await Reel.updateOne({ _id: reelId }, { $unset: unset });
+  await deleteS3Urls(stale);
   return loadReel(reelId);
 }
 
@@ -219,12 +244,21 @@ export async function regenerateScene(
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
-  if (!reel.scenes[index]) throw new Error(`Scene ${index} not found`);
+  const scene = reel.scenes[index];
+  if (!scene) throw new Error(`Scene ${index} not found`);
 
+  const stale: (string | undefined)[] = [];
   const unset: Record<string, ""> = {};
-  if (targets.includes("image")) unset[`scenes.${index}.assetUrl`] = "";
-  if (targets.includes("audio")) unset[`scenes.${index}.audioUrl`] = "";
+  if (targets.includes("image")) {
+    stale.push(scene.assetUrl);
+    unset[`scenes.${index}.assetUrl`] = "";
+  }
+  if (targets.includes("audio")) {
+    stale.push(scene.audioUrl);
+    unset[`scenes.${index}.audioUrl`] = "";
+  }
   await Reel.updateOne({ _id: reelId }, { $unset: unset });
+  await deleteS3Urls(stale);
 
   await markQueued(reelId);
   await enqueueReelProduce(reelId);
@@ -262,7 +296,7 @@ export async function addScene(
     reel.markModified("redditStory");
   }
   await reel.save();
-  await clearAssemblyCache(reelId);
+  await clearAssemblyCache(reel);
   return loadReel(reelId);
 }
 
@@ -273,7 +307,7 @@ export async function removeScene(reelId: string, index: number): Promise<IReel>
   if (!scene) throw new Error(`Scene ${index} not found`);
   if (reel.scenes.length <= 1) throw new Error("A reel must keep at least one scene");
 
-  const orphaned = [scene.assetUrl, scene.audioUrl, reel.assemblyVideoUrl, reel.bodyVideoUrl];
+  const orphaned = [scene.assetUrl, scene.audioUrl];
   reel.scenes.splice(index, 1);
   reindex(reel);
   if (reel.strategy === "gameplay_overlay") {
@@ -281,8 +315,8 @@ export async function removeScene(reelId: string, index: number): Promise<IReel>
     reel.markModified("redditStory");
   }
   await reel.save();
-  await clearAssemblyCache(reelId);
-  await deleteCachedMediaUrls(orphaned);
+  await clearAssemblyCache(reel);
+  await deleteS3Urls(orphaned);
   return loadReel(reelId);
 }
 
@@ -300,17 +334,11 @@ export async function reorderScenes(reelId: string, order: number[]): Promise<IR
     reel.markModified("redditStory");
   }
   await reel.save();
-  await clearAssemblyCache(reelId);
+  await clearAssemblyCache(reel);
   return loadReel(reelId);
 }
 
 // ---- Reel-level settings ----
-
-/** Delete superseded S3 objects; ignore failures so edits never block on GC. */
-async function deleteCachedMediaUrls(urls: (string | undefined)[]): Promise<void> {
-  const unique = [...new Set(urls.filter((url): url is string => Boolean(url)))];
-  await Promise.all(unique.map((url) => deleteFromS3(url).catch(() => {})));
-}
 
 export async function updateReelSettings(
   reelId: string,
@@ -341,6 +369,10 @@ export async function updateReelSettings(
   const prevPartOutroAudioUrl = reel.partOutroAudioUrl;
   const prevOutroAudioUrl = reel.outroAudioUrl;
   const prevBodyVideoUrl = reel.bodyVideoUrl;
+  const prevAssemblyVideoUrl = reel.assemblyVideoUrl;
+  const prevTitleAudioUrl = reel.titleAudioUrl;
+  const prevSceneImages = sceneImageUrls(reel);
+  const prevSceneAudios = sceneAudioUrls(reel);
 
   if (patch.thumbnailSceneIndex !== undefined) {
     if (!reel.niche.startsWith("horror")) throw new Error("Scene cover selection is only available for horror reels");
@@ -410,25 +442,35 @@ export async function updateReelSettings(
   const unset: Record<string, ""> = {};
   const s3Delete: (string | undefined)[] = [];
 
-  if (clearsImages) unset["scenes.$[].assetUrl"] = "";
+  if (clearsImages) {
+    unset["scenes.$[].assetUrl"] = "";
+    s3Delete.push(...prevSceneImages);
+  }
   if (clearsAudio) {
     unset["scenes.$[].audioUrl"] = "";
     unset.titleAudioUrl = "";
     unset.partOutroAudioUrl = "";
     unset.outroAudioUrl = "";
-    s3Delete.push(prevPartOutroAudioUrl, prevOutroAudioUrl);
+    s3Delete.push(
+      ...prevSceneAudios,
+      prevTitleAudioUrl,
+      prevPartOutroAudioUrl,
+      prevOutroAudioUrl
+    );
   } else if (clearsOutroAudio) {
     unset.outroAudioUrl = "";
     s3Delete.push(prevOutroAudioUrl);
   }
-  if (clearsAssembly) unset.assemblyVideoUrl = "";
+  if (clearsAssembly) {
+    unset.assemblyVideoUrl = "";
+    s3Delete.push(prevAssemblyVideoUrl);
+  }
   if (clearsBody) {
     unset.bodyVideoUrl = "";
     s3Delete.push(prevBodyVideoUrl);
   }
 
-  // Part outro is baked into the gameplay body — toggling it requires a body rebuild
-  // and drops the cached "Stay tuned…" TTS from S3.
+  // Part outro is baked into the gameplay body — toggling it requires a body rebuild.
   if (partOutroToggledOff || partOutroToggledOn) {
     unset.bodyVideoUrl = "";
     s3Delete.push(prevBodyVideoUrl);
@@ -446,7 +488,7 @@ export async function updateReelSettings(
   if (Object.keys(unset).length) {
     await Reel.updateOne({ _id: reelId }, { $unset: unset });
   }
-  await deleteCachedMediaUrls(s3Delete);
+  await deleteS3Urls(s3Delete);
 
   return loadReel(reelId);
 }
@@ -460,7 +502,7 @@ export async function updateCaptions(reelId: string, patch: ICaptionStyle): Prom
   reel.markModified("captionStyle");
   await reel.save();
   // Captions are burned into bodyVideoUrl; assembly (pre-caption) stays valid.
-  await clearBodyVideoCache(reelId);
+  await clearBodyVideoCache(reel);
   return loadReel(reelId);
 }
 
@@ -480,11 +522,10 @@ export async function regenerateReel(
   // Claim the lock first so a concurrent tab can't also enqueue.
   await markQueued(reelId);
   if (mode === "assets") {
-    await clearNarrationCaches(reelId);
-    await Reel.updateOne(
-      { _id: reelId },
-      { $unset: { "scenes.$[].assetUrl": "", "scenes.$[].audioUrl": "" } }
-    );
+    const staleImages = sceneImageUrls(reel);
+    await clearNarrationCaches(reel);
+    await Reel.updateOne({ _id: reelId }, { $unset: { "scenes.$[].assetUrl": "" } });
+    await deleteS3Urls(staleImages);
   }
   const produceMode =
     mode === "outro_only" ? "outro_only" : mode === "composite_only" ? "composite_only" : "full";
@@ -539,9 +580,29 @@ export async function replanReel(
   if (patch.topic !== undefined) reel.topic = patch.topic;
   if (patch.providedScript !== undefined) reel.providedScript = patch.providedScript;
   if (patch.horrorReferenceId !== undefined) reel.horrorReferenceId = patch.horrorReferenceId;
+
+  // Drop prior render media before wiping the plan so S3 doesn't keep orphans.
+  const staleMedia = [
+    reel.outputUrl,
+    reel.bodyVideoUrl,
+    reel.assemblyVideoUrl,
+    reel.subtitlesUrl,
+    reel.titleAudioUrl,
+    reel.partOutroAudioUrl,
+    reel.outroAudioUrl,
+    ...sceneMediaUrls(reel),
+  ];
+
   reel.scenes = [];
   reel.title = undefined;
   reel.hook = undefined;
+  reel.outputUrl = undefined;
+  reel.bodyVideoUrl = undefined;
+  reel.assemblyVideoUrl = undefined;
+  reel.subtitlesUrl = undefined;
+  reel.titleAudioUrl = undefined;
+  reel.partOutroAudioUrl = undefined;
+  reel.outroAudioUrl = undefined;
   if (reel.strategy === "gameplay_overlay") {
     reel.redditStory = undefined;
     reel.markModified("redditStory");
@@ -550,6 +611,7 @@ export async function replanReel(
   reel.progress = 5;
   reel.error = undefined;
   await reel.save();
+  await deleteS3Urls(staleMedia);
   await enqueueReelPlan(reelId);
   return loadReel(reelId);
 }

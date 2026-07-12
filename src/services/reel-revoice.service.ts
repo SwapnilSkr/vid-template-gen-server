@@ -6,7 +6,7 @@ import { getRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
 import { cleanupFiles } from "../utils";
 import { pickGameplay, renderGameplayReel } from "./reel-gameplay.service";
-import { deleteFromS3, uploadVideo } from "./s3.service";
+import { deleteS3Urls, uploadVideo } from "./s3.service";
 import { enqueueRevoice } from "../queue/queues";
 
 // ============================================
@@ -137,6 +137,14 @@ export async function promoteVoiceVariant(reelId: string, variantId: string): Pr
   }
 
   const previousOutputUrl = reel.outputUrl;
+  const staleCaches = [
+    reel.titleAudioUrl,
+    reel.partOutroAudioUrl,
+    reel.outroAudioUrl,
+    reel.bodyVideoUrl,
+    reel.assemblyVideoUrl,
+    ...reel.scenes.map((scene) => scene.audioUrl),
+  ];
   reel.outputUrl = variant.videoUrl;
   reel.narrationVoice = {
     model: variant.model,
@@ -157,15 +165,12 @@ export async function promoteVoiceVariant(reelId: string, variantId: string): Pr
   for (const scene of reel.scenes) scene.audioUrl = undefined;
   reel.markModified("scenes");
   await reel.save();
+  await deleteS3Urls(staleCaches);
 
   const stillReferenced =
     !previousOutputUrl ||
     previousOutputUrl === variant.videoUrl ||
     reel.voiceVariants.some((v) => v.videoUrl === previousOutputUrl);
-  if (!stillReferenced && previousOutputUrl) {
-    await deleteFromS3(previousOutputUrl).catch((error) => {
-      console.warn(`Could not delete superseded output for reel ${reelId}: ${getErrorMessage(error)}`);
-    });
-  }
+  if (!stillReferenced) await deleteS3Urls([previousOutputUrl]);
   return reel;
 }
