@@ -368,6 +368,7 @@ export async function updateReelSettings(
     horrorReferenceId?: string;
     gameplayKey?: string;
     outroChannelId?: string;
+    outroInstagramChannelId?: string;
     outro?: IReel["outro"];
     skipPartOutro?: boolean;
     skipBrandedOutro?: boolean;
@@ -406,9 +407,11 @@ export async function updateReelSettings(
   if (patch.horrorReferenceId !== undefined) reel.horrorReferenceId = patch.horrorReferenceId;
   if (patch.gameplayKey !== undefined) reel.gameplayKey = patch.gameplayKey || undefined;
   const prevOutroChannel = reel.outroChannelId;
+  const prevOutroInstagramChannel = reel.outroInstagramChannelId;
   const prevSpokenLine = reel.outro?.spokenLine;
   const prevOutroChannelName = reel.outro?.channelName;
   if (patch.outroChannelId !== undefined) reel.outroChannelId = patch.outroChannelId || undefined;
+  if (patch.outroInstagramChannelId !== undefined) reel.outroInstagramChannelId = patch.outroInstagramChannelId || undefined;
   if (patch.outro !== undefined) {
     reel.outro = patch.outro;
     reel.markModified("outro");
@@ -445,6 +448,7 @@ export async function updateReelSettings(
     (patch.audioPost?.voiceProfile !== undefined && patch.audioPost.voiceProfile !== prevVoiceProfile);
   const clearsOutroAudio =
     (patch.outroChannelId !== undefined && patch.outroChannelId !== prevOutroChannel) ||
+    (patch.outroInstagramChannelId !== undefined && patch.outroInstagramChannelId !== prevOutroInstagramChannel) ||
     (patch.outro !== undefined &&
       (patch.outro.spokenLine !== prevSpokenLine ||
         patch.outro.channelName !== prevOutroChannelName));

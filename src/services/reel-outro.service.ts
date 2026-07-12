@@ -3,7 +3,7 @@ import ffmpeg from "fluent-ffmpeg";
 import { unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
-import { YouTubeChannel, type IReel } from "../models";
+import { InstagramChannel, YouTubeChannel, type IReel } from "../models";
 import { ensureDir, generateFilename } from "../utils";
 import { generateNarration, type MediaUsageCallback } from "./openrouter-media.service";
 
@@ -30,6 +30,9 @@ export interface OutroTts {
 }
 
 export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undefined> {
+  const explicitInstagram = reel.outroInstagramChannelId
+    ? await InstagramChannel.findOne({ channelKey: reel.outroInstagramChannelId, status: "active" })
+    : undefined;
   const explicitChannel = reel.outroChannelId
     ? await YouTubeChannel.findOne({
         channelKey: reel.outroChannelId,
@@ -41,9 +44,9 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
     const channel = explicitChannel ?? (await findChannelForNiche(["reddit", "reddit_stories", "aita"]));
     return {
       kind: "reddit",
-      channelName: reel.outro?.channelName?.trim() || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
-      channelHandle: reel.outro?.channelHandle?.trim() || channel?.googleChannelHandle,
-      logoUrl: channel?.logoUrl,
+      channelName: reel.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
+      channelHandle: reel.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
+      logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
       spokenLine: reel.outro?.spokenLine?.trim(),
       title: reel.outro?.title?.trim(),
       subtitle: reel.outro?.subtitle?.trim(),
@@ -57,9 +60,9 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
       explicitChannel ?? (await findChannelForNiche(["horror", "horror_comic", reel.genre ?? ""]));
     return {
       kind: "horror",
-      channelName: reel.outro?.channelName?.trim() || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
-      channelHandle: reel.outro?.channelHandle?.trim() || channel?.googleChannelHandle,
-      logoUrl: channel?.logoUrl,
+      channelName: reel.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
+      channelHandle: reel.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
+      logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
       spokenLine: reel.outro?.spokenLine?.trim(),
       title: reel.outro?.title?.trim(),
       subtitle: reel.outro?.subtitle?.trim(),
