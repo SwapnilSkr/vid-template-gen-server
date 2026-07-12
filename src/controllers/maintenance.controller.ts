@@ -1,5 +1,5 @@
 import type { Context } from "elysia";
-import { cleanupLocalProcessing, reconcileS3Assets, purgeFailedReels } from "../services";
+import { cleanupGameplayDownloadCache, cleanupLocalProcessing, reconcileS3Assets, purgeFailedReels } from "../services";
 import { getErrorMessage } from "../types";
 
 interface ReconcileS3Context extends Context {
@@ -40,6 +40,17 @@ export async function cleanupLocalProcessingController({ query, set }: LocalClea
     const olderThanHours = query.olderThanHours ? Number(query.olderThanHours) : undefined;
     const result = await cleanupLocalProcessing(!apply, olderThanHours);
     return { success: true, data: result };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Inspect or apply the bounded disposable gameplay-download cache sweep. */
+export async function cleanupGameplayCacheController({ query, set }: LocalCleanupContext) {
+  try {
+    const apply = query.apply === "true";
+    return { success: true, data: await cleanupGameplayDownloadCache(!apply) };
   } catch (error: unknown) {
     set.status = 400;
     return { success: false, error: getErrorMessage(error) };

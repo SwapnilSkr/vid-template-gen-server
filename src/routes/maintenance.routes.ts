@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { cleanupLocalProcessingController, reconcileS3Controller, purgeFailedReelsController } from "../controllers";
+import { cleanupGameplayCacheController, cleanupLocalProcessingController, reconcileS3Controller, purgeFailedReelsController } from "../controllers";
 import { runCaptionSmokeController } from "../controllers/caption-smoke.controller";
 
 // ============================================
@@ -18,6 +18,9 @@ export const maintenanceRoutes = new Elysia({ prefix: "/api/maintenance" })
       olderThanHours: t.Optional(t.String()),
     }),
   })
+  .get("/gameplay-cache-cleanup", cleanupGameplayCacheController, {
+    query: t.Object({ apply: t.Optional(t.String()) }),
+  })
   .post("/reels/purge-failed", purgeFailedReelsController)
   .get("/caption-smoke", runCaptionSmokeController, {
     query: t.Object({ keepOutput: t.Optional(t.String()) }),
@@ -30,4 +33,3 @@ export const maintenanceRoutes = new Elysia({ prefix: "/api/maintenance" })
       tags: ["Maintenance", "Captions"],
     },
   });
-

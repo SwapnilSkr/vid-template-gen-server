@@ -1,6 +1,7 @@
 import { getErrorMessage } from "../types";
 import { cleanupLocalProcessing } from "./local-cleanup.service";
 import { reconcileS3Assets } from "./s3-reconciliation.service";
+import { cleanupGameplayDownloadCache } from "./gameplay-cache.service";
 
 // ============================================
 // In-process hygiene scheduler — the same pattern as the story top-up
@@ -37,10 +38,12 @@ export function startHygieneScheduler(): void {
   const run = async () => {
     try {
       const local = await cleanupLocalProcessing(false);
+      const gameplay = await cleanupGameplayDownloadCache(false);
       const s3 = await reconcileS3Assets(false);
-      if (local.deleted > 0 || s3.deleted.length > 0) {
+      if (local.deleted > 0 || gameplay.deleted > 0 || s3.deleted.length > 0) {
         console.log(
           `🧹 Hygiene sweep: local ${local.deleted} entries (${Math.round(local.bytesDeleted / 1024 / 1024)} MB), ` +
+            `gameplay cache ${gameplay.deleted} clips (${Math.round(gameplay.bytesDeleted / 1024 / 1024)} MB), ` +
             `S3 ${s3.deleted.length} orphaned object(s) deleted`
         );
       }

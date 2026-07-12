@@ -20,6 +20,7 @@ import {
 import { initializeStorage } from "./utils";
 import { ensureYtImportsStorage } from "./services/yt-import.service";
 import { cleanupLocalProcessingOnStartup } from "./services/local-cleanup.service";
+import { cleanupGameplayDownloadCache } from "./services/gameplay-cache.service";
 import { startStoryTopUpScheduler } from "./services/story-scheduler.service";
 import { startHygieneScheduler } from "./services/hygiene-scheduler.service";
 import { startWorkers } from "./queue/workers";
@@ -52,6 +53,10 @@ async function initialize() {
   await initializeStorage();
   await ensureYtImportsStorage();
   await cleanupLocalProcessingOnStartup();
+  const gameplayCleanup = await cleanupGameplayDownloadCache(false);
+  if (gameplayCleanup.deleted > 0) {
+    console.log(`🧹 Gameplay cache startup cleanup: deleted ${gameplayCleanup.deleted} clip(s) (${Math.round(gameplayCleanup.bytesDeleted / 1024 / 1024)} MB)`);
+  }
 }
 
 // Create Elysia app

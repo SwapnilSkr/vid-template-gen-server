@@ -36,6 +36,7 @@ export * from "./reel-shorts-cover.service";
 export * from "./reel-cost.service";
 export * from "./reddit-card.service";
 export * from "./gameplay-ingest.service";
+export * from "./gameplay-cache.service";
 export * from "./story.service";
 export * from "./reel.service";
 export * from "./reel-edit.service";

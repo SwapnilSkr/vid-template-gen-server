@@ -1,5 +1,5 @@
 import ffmpeg from "fluent-ffmpeg";
-import { readFile, readdir, writeFile, unlink, stat } from "node:fs/promises";
+import { readFile, readdir, writeFile, unlink, stat, rename } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { config } from "../config";
 import { ensureDir, concatDemuxerEntry, assFilenameFilter } from "../utils";
@@ -16,6 +16,7 @@ import { DEFAULT_CAPTION_STYLE } from "../config/style-presets";
 import { captionStylePlain } from "../utils/caption-style.utils";
 import { captionBurnFailed } from "./ffmpeg-capability.service";
 import type { ICaptionStyle } from "../models";
+import { gameplayDownloadCacheDir, touchGameplayCacheFile } from "./gameplay-cache.service";
 
 // ============================================
 // GameplayOverlayStrategy (Reddit / AITA).
@@ -59,12 +60,19 @@ export interface PickedGameplay {
  */
 export async function pickGameplay(preferredKey?: string): Promise<PickedGameplay> {
   await ensureDir(config.gameplayDir);
+  const cacheDir = gameplayDownloadCacheDir();
+  await ensureDir(cacheDir);
 
   if (preferredKey) {
-    const dest = join(config.gameplayDir, basename(preferredKey));
-    const cached = await stat(dest).then(() => true).catch(() => false);
-    if (!cached) await downloadToCache(preferredKey, dest);
-    return { path: dest, key: preferredKey };
+    const filename = basename(preferredKey);
+    const libraryPath = join(config.gameplayDir, filename);
+    const libraryHit = await stat(libraryPath).then((info) => info.isFile()).catch(() => false);
+    if (libraryHit) return { path: libraryPath, key: preferredKey };
+    const cachePath = join(cacheDir, filename);
+    const cacheHit = await stat(cachePath).then((info) => info.isFile()).catch(() => false);
+    if (!cacheHit) await downloadToCache(preferredKey, cachePath);
+    await touchGameplayCacheFile(cachePath);
+    return { path: cachePath, key: preferredKey };
   }
 
   const local = (await readdir(config.gameplayDir)).filter((f) =>
@@ -73,6 +81,14 @@ export async function pickGameplay(preferredKey?: string): Promise<PickedGamepla
   if (local.length) {
     const file = local[Math.floor(Math.random() * local.length)];
     return { path: join(config.gameplayDir, file), key: `gameplay/${file}` };
+  }
+
+  const downloaded = (await readdir(cacheDir).catch(() => [])).filter((f) => /\.(mp4|mov|webm)$/i.test(f));
+  if (downloaded.length) {
+    const file = downloaded[Math.floor(Math.random() * downloaded.length)];
+    const path = join(cacheDir, file);
+    await touchGameplayCacheFile(path);
+    return { path, key: `gameplay/${file}` };
   }
 
   // fall back to S3/CDN
@@ -84,8 +100,9 @@ export async function pickGameplay(preferredKey?: string): Promise<PickedGamepla
     );
   }
   const key = keys[Math.floor(Math.random() * keys.length)];
-  const dest = join(config.gameplayDir, basename(key));
+  const dest = join(cacheDir, basename(key));
   await downloadToCache(key, dest);
+  await touchGameplayCacheFile(dest);
   return { path: dest, key };
 }
 
@@ -104,7 +121,13 @@ async function downloadToCache(key: string, dest: string): Promise<void> {
     try {
       const res = await fetch(url);
       if (!res.ok) continue;
-      await writeFile(dest, Buffer.from(await res.arrayBuffer()));
+      const temp = `${dest}.${process.pid}.${Date.now()}.part`;
+      try {
+        await writeFile(temp, Buffer.from(await res.arrayBuffer()));
+        await rename(temp, dest);
+      } finally {
+        await unlink(temp).catch(() => {});
+      }
       return;
     } catch {
       /* try next */

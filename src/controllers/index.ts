@@ -113,6 +113,7 @@ export {
 export {
   reconcileS3Controller,
   cleanupLocalProcessingController,
+  cleanupGameplayCacheController,
   purgeFailedReelsController,
 } from "./maintenance.controller";
 
