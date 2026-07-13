@@ -174,7 +174,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
       niche,
       topic,
       tier,
-      parts: options.source === "verbatim" && parts === "off" ? "auto" : parts,
+      parts,
     });
   }
 
@@ -358,7 +358,9 @@ async function createGameplayReelSeries(
     topic: autoTopic ? undefined : topic,
     genre: options.genre,
     tier: tier as Tier,
-    parts: parts === "off" ? "auto" : parts,
+    // Verbatim "1 (no split)" → one whole-story reel (full body). Non-verbatim
+    // only reaches here with a real part count, so "off" can't occur for them.
+    parts: parts === "off" ? (source === "verbatim" ? 1 : "auto") : parts,
     selectedStoryId: options.selectedStoryId,
     selectedSeedUrl: options.selectedSeedUrl,
   });

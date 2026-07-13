@@ -855,6 +855,11 @@ async function llmStorySeries(
     : "";
   const digest = await getTrendDigest("reddit", genreId);
   const trendBlock = digest ? `\nCURRENT WINNING PATTERNS (from trending videos in this genre this week):\n${digest}\n` : "";
+  const cliffhangerSpec = `CLIFFHANGER REQUIREMENT (non-negotiable for every part except the last):
+- The FINAL sentence of each non-final part is the retention hook. It MUST do one of: pose an urgent open question, stop mid-action right before something happens, tease a shocking reveal, or escalate the threat to a new level.
+- It must make skipping to the next part feel unbearable. Never end a non-final part on a calm, resolved, or wrap-up line (no "anyway", "that was that", "the end", "more soon").
+- The final part's last sentence delivers the payoff and may resolve.
+- Before returning, RE-READ the last sentence of each non-final part and rewrite any that a viewer could comfortably stop on.`;
   const prompt = `You write serialized Reddit-style short-form stories read aloud over gameplay footage.
 
 FLAVOUR: ${angle}${seedBlock}${trendBlock}
@@ -864,11 +869,13 @@ Create exactly ${partCount} parts of one continuous story.
 RULES:
 - Each part title is a curiosity-gap Reddit hook and must end with "Part N".
 - Each part body is first person, conversational, 90-150 words, 5-9 punchy sentences.
-- Part 1 sets up the conflict and ends on a strong cliffhanger.
+- Part 1 sets up the conflict fast and ends on a strong cliffhanger.
 - Middle parts escalate and end on unanswered consequences.
 - Final part gives the reveal/payoff.
 - Read naturally aloud: spell out numbers, no markdown, no headings, no emojis, no "edit:"/"update:".
 - Must be ORIGINAL — invented people and details.
+
+${cliffhangerSpec}
 
 OUTPUT JSON ONLY:
 { "parts": [
@@ -876,15 +883,104 @@ OUTPUT JSON ONLY:
   { "title": "... Part 2", "body": "..." }
 ] }`;
 
+  const parseAndValidate = (text: string): StoryDraft[] => {
+    const parsed = extractJson<{ parts: StoryDraft[] }>(text);
+    if (!Array.isArray(parsed.parts) || parsed.parts.length !== partCount) {
+      throw new Error("LLM series missing expected parts");
+    }
+    for (const part of parsed.parts) {
+      if (!part.title || !part.body) throw new Error("LLM series part missing title/body");
+    }
+    return parsed.parts;
+  };
+
   const { text } = await generateText({ model: openrouter(llm), prompt });
-  const parsed = extractJson<{ parts: StoryDraft[] }>(text);
-  if (!Array.isArray(parsed.parts) || parsed.parts.length !== partCount) {
-    throw new Error("LLM series missing expected parts");
+  let parts = parseAndValidate(text);
+
+  // Cliffhanger scrutiny. Primary: an LLM judge rates every non-final ending and
+  // rewrites the soft ones (catches subtle misses keyword checks can't see). If
+  // the judge call fails, fall back to the free deterministic guard.
+  try {
+    parts = await judgeAndFixCliffhangers(parts, llm);
+  } catch {
+    const weak = parts.slice(0, -1).some((part) => endsFlat(part.body));
+    if (weak) {
+      try {
+        const retry = await generateText({
+          model: openrouter(llm),
+          prompt: `${prompt}
+
+The previous draft ended a non-final part on a flat, resolvable line. Regenerate ALL parts; every non-final part must end on an urgent cliffhanger the viewer cannot stop on.`,
+        });
+        parts = parseAndValidate(retry.text);
+      } catch {
+        // Keep the first draft if the repair pass also fails.
+      }
+    }
   }
-  for (const part of parsed.parts) {
-    if (!part.title || !part.body) throw new Error("LLM series part missing title/body");
+  return parts;
+}
+
+const firstSentence = (body: string): string => splitSentences(body)[0]?.trim() ?? "";
+
+/**
+ * LLM "retention editor" pass: scores each NON-FINAL part's ending 1-5 as a
+ * cliffhanger and rewrites any it scores <= 3, keeping the same events, length,
+ * and handoff into the next part. Best-effort — the caller handles failures.
+ */
+async function judgeAndFixCliffhangers(parts: StoryDraft[], llm: string): Promise<StoryDraft[]> {
+  if (parts.length < 2) return parts;
+  const nonFinal = parts.slice(0, -1);
+  const list = nonFinal
+    .map(
+      (part, i) =>
+        `--- PART ${i + 1} of ${parts.length} ---\n${part.body}\n[The next part opens with: "${firstSentence(
+          parts[i + 1].body
+        )}"]`
+    )
+    .join("\n\n");
+  const prompt = `You are a retention editor for serialized short-form videos. Rate how strong each NON-FINAL part's ENDING is as a cliffhanger, 1-5 (5 = the viewer physically cannot stop; 1 = calm/resolved). A 5 poses an urgent open question, stops mid-action right before impact, teases a shocking reveal, or escalates the threat to a new level.
+
+For every part you score 3 or lower, rewrite its FULL body. Keep the same events and characters, stay first person and read-aloud (90-150 words, 5-9 sentences, no markdown, no emojis, no "edit:"/"update:"), keep it flowing naturally into the next part's opening shown in brackets — but end on a 5-level cliffhanger. Leave parts scored 4 or 5 untouched (omit their body).
+
+${list}
+
+OUTPUT JSON ONLY:
+{ "verdicts": [ { "part": 1, "score": 3, "body": "rewritten full body — omit when score >= 4" } ] }`;
+
+  const { text } = await generateText({ model: openrouter(llm), prompt });
+  const parsed = extractJson<{ verdicts?: EndingVerdict[] }>(text);
+  return applyEndingVerdicts(parts, parsed.verdicts ?? []);
+}
+
+type EndingVerdict = { part?: number; score?: number; body?: string };
+
+/**
+ * Splice the judge's rewrites back into the series: apply a rewrite only when the
+ * verdict targets a NON-FINAL part, scores it soft (<= 3), and returns a
+ * substantial body. Pure so it can be unit-tested without an LLM call.
+ */
+function applyEndingVerdicts(parts: StoryDraft[], verdicts: EndingVerdict[]): StoryDraft[] {
+  const fixed = parts.map((part) => ({ ...part }));
+  for (const verdict of verdicts) {
+    const idx = (verdict.part ?? 0) - 1;
+    if (idx < 0 || idx >= parts.length - 1) continue; // never rewrite the finale
+    const rewrite = verdict.body?.trim();
+    if (typeof verdict.score === "number" && verdict.score <= 3 && rewrite && wordCount(rewrite) >= 40) {
+      fixed[idx] = { ...fixed[idx], body: rewrite };
+    }
   }
-  return parsed.parts;
+  return fixed;
+}
+
+/** True when a body ends on a deflating / resolved line — a poor episode cliffhanger. */
+function endsFlat(body: string): boolean {
+  const sentences = splitSentences(body);
+  const last = sentences[sentences.length - 1]?.trim() ?? "";
+  if (wordCount(last) < 4) return true;
+  return /\b(anyway|so yeah|that'?s it|that was that|thanks for reading|the end|nothing (?:else )?happened|more soon|to be continued)\b/i.test(
+    last
+  );
 }
 
 /** Trim a verbatim reddit body to a narratable length at a sentence boundary. */
@@ -921,7 +1017,11 @@ function wordCount(text: string): number {
 }
 
 function resolvePartCount(requested: number | "auto" | undefined, words: number): number {
-  if (typeof requested === "number") return Math.min(Math.max(Math.round(requested), 2), 4);
+  if (typeof requested === "number") {
+    // An explicit 1 (or lower) means "no split" — the whole story in one reel.
+    if (requested <= 1) return 1;
+    return Math.min(Math.max(Math.round(requested), 2), 4);
+  }
   if (words < 220) return 1;
   return Math.min(Math.max(Math.ceil(words / 145), 2), 4);
 }
@@ -929,26 +1029,6 @@ function resolvePartCount(requested: number | "auto" | undefined, words: number)
 function titleWithPart(title: string, partNumber: number): string {
   const stripped = title.replace(/\s+part\s+\d+\s*$/i, "").trim();
   return `${stripped} Part ${partNumber}`;
-}
-
-function candidateCutAfter(sentences: string[], partCount: number): number[] {
-  const totalWords = sentences.reduce((sum, s) => sum + wordCount(s), 0);
-  const target = totalWords / partCount;
-  const candidates: number[] = [];
-  let runningWords = 0;
-
-  for (let i = 0; i < sentences.length - 1; i++) {
-    runningWords += wordCount(sentences[i]);
-    const next = sentences[i + 1]?.toLowerCase() ?? "";
-    const current = sentences[i].toLowerCase();
-    const structural =
-      /^(edit|update|final update|tl;dr|tldr)\b/i.test(next) ||
-      /\b(update|edit|more later|i'll update|i will update)\b/i.test(current);
-    const nearTarget = Math.abs(runningWords / target - Math.round(runningWords / target)) < 0.25;
-    if (structural || nearTarget) candidates.push(i + 1);
-  }
-
-  return [...new Set(candidates)];
 }
 
 function fallbackCutAfter(sentences: string[], partCount: number): number[] {
@@ -967,6 +1047,85 @@ function fallbackCutAfter(sentences: string[], partCount: number): number[] {
   }
 
   return cuts;
+}
+
+/** Running word total after each sentence (cum[i] = words through sentence i). */
+function cumulativeWords(sentences: string[]): number[] {
+  const cum: number[] = [];
+  let running = 0;
+  for (const s of sentences) {
+    running += wordCount(s);
+    cum.push(running);
+  }
+  return cum;
+}
+
+/**
+ * Heuristic strength of a sentence as an episode-ENDING hook. Verbatim can't
+ * invent a cliffhanger — this only ranks the endings the story already offers,
+ * so a cut can be nudged onto the strongest one nearby. `next` is the sentence
+ * the FOLLOWING part would open on (cutting right before an "Edit/Update" is gold).
+ */
+function cliffhangerScore(sentence: string, next?: string): number {
+  const s = sentence.trim();
+  const words = wordCount(s);
+  let score = 0;
+  if (/[?]["'’)\]]*$/.test(s)) score += 3; // leaves an open question
+  if (/(\.\.\.|…)["'’)\]]*$/.test(s)) score += 2; // trails off mid-tension
+  if (next && /^\s*(edit|update|final update|part\s*\d)\b/i.test(next)) score += 4; // land right before the payoff
+  if (
+    /\b(but then|then i|that'?s when|suddenly|until|little did|what happened next|turned out|turns out|realized|found out|next thing|never (?:expected|thought|imagined)|everything changed|out of nowhere|the moment|come to find)\b/i.test(
+      s
+    )
+  )
+    score += 2; // escalation / reveal cue
+  if (
+    /\b(police|cops|lawyer|lawsuit|court|judge|gun|knife|blood|hospital|dead|died|dying|divorce|fired|evicted|pregnant|cheating|affair|threat|threatened|911|emergency|scream|screamed|arrested|restraining order|custody)\b/i.test(
+      s
+    )
+  )
+    score += 1; // raised stakes
+  if (words < 5) score -= 2; // too short to land a beat
+  if (/\b(anyway|so yeah|that'?s it|thanks for reading|tl;?dr|to be continued)\b/i.test(s)) score -= 3; // deflates tension
+  return score;
+}
+
+/**
+ * Nudge each cut onto the strongest cliffhanger within a word-balance window,
+ * preserving order/validity. `margin` guards how much better a nearby ending
+ * must be before we move: a small margin (fallback) chases hooks aggressively;
+ * a larger one (post-LLM) only rescues parts the model ended on a flat line.
+ */
+function refineCutsForCliffhangers(sentences: string[], cuts: number[], margin: number): number[] {
+  const n = sentences.length;
+  if (n <= 2 || cuts.length === 0) return cuts;
+  const cum = cumulativeWords(sentences);
+  const total = cum[n - 1] ?? 0;
+  const partCount = cuts.length + 1;
+  const slack = (total / partCount) * 0.4; // a boundary may drift ±40% of one part's words
+  const refined: number[] = [];
+  let prev = 0;
+  for (let i = 0; i < cuts.length; i++) {
+    const remaining = cuts.length - i - 1;
+    const maxK = n - 1 - remaining; // leave one sentence for every later part + the finale
+    const origK = Math.min(Math.max(cuts[i], prev + 1), maxK);
+    const idealWords = cum[origK - 1] ?? 0;
+    const origScore = cliffhangerScore(sentences[origK - 1], sentences[origK]);
+    let bestK = origK;
+    let bestScore = origScore;
+    for (let k = prev + 1; k <= maxK; k++) {
+      const endWords = cum[k - 1] ?? 0;
+      if (Math.abs(endWords - idealWords) > slack) continue;
+      const score = cliffhangerScore(sentences[k - 1], sentences[k]) - Math.abs(k - origK) * 0.01;
+      if (score > bestScore + (k === origK ? 0 : margin)) {
+        bestScore = score;
+        bestK = k;
+      }
+    }
+    refined.push(bestK);
+    prev = bestK;
+  }
+  return refined;
 }
 
 function normalizeCuts(cuts: number[], sentenceCount: number, partCount: number): number[] {
@@ -990,39 +1149,61 @@ async function selectVerbatimCuts(
   partCount: number,
   tier: Tier
 ): Promise<number[]> {
-  const candidates = candidateCutAfter(sentences, partCount);
-  const fallback = normalizeCuts(fallbackCutAfter(sentences, partCount), sentences.length, partCount);
-  if (sentences.length < partCount * 3 || candidates.length < partCount - 1) return fallback;
+  // Fallback: balance by words, then chase the strongest nearby hook aggressively.
+  const fallback = normalizeCuts(
+    refineCutsForCliffhangers(sentences, fallbackCutAfter(sentences, partCount), 0.5),
+    sentences.length,
+    partCount
+  );
+  // Not enough sentences to place partCount-1 distinct interior cuts.
+  if (sentences.length <= partCount) return fallback;
 
   const llm = resolveModels(tier).llm;
-  const numbered = sentences.map((s, i) => `${i + 1}. ${s}`).join("\n");
-  const prompt = `Choose cut points for a verbatim Reddit story series.
+  const totalWords = sentences.reduce((sum, s) => sum + wordCount(s), 0);
+  const targetWords = Math.max(1, Math.round(totalWords / partCount));
+  const minWords = Math.round(targetWords * 0.6);
+  const maxWords = Math.round(targetWords * 1.5);
+
+  // Annotate each sentence with the running word total so the model can balance
+  // parts while still being free to cut anywhere (not just near word targets).
+  let running = 0;
+  const numbered = sentences
+    .map((s, i) => {
+      running += wordCount(s);
+      return `${i + 1}. [${running}w] ${s}`;
+    })
+    .join("\n");
+
+  const prompt = `You are splitting a verbatim first-person Reddit story into ${partCount} sequential short-video parts (each becomes its own 55-75s reel).
 
 Title: ${title}
+
+The whole story is ${totalWords} words. Aim for about ${targetWords} words per part. Each sentence below is prefixed with its cumulative word count in [ ].
 
 Sentences:
 ${numbered}
 
-Pick exactly ${partCount - 1} cut points from these candidate sentence numbers:
-${candidates.join(", ")}
+Choose exactly ${partCount - 1} cut points. A cut point N means a part ENDS after sentence N, and the next part begins at sentence N+1.
 
-Rules:
-- A cut point means the part ends AFTER that sentence number.
-- Prefer update/edit boundaries, cliffhangers, escalation, and unanswered consequences.
-- Keep parts reasonably balanced for short videos.
-- Do not rewrite text.
+Priorities, in order:
+1. END EVERY PART ON A CLIFFHANGER. The final sentence of a part is the retention hook — it should leave a question open, introduce a threat, escalate the stakes, tease a reveal, or land right before an "Edit/Update". Never end a part mid-thought or on a throwaway line.
+2. Keep parts watchable — ideally each part between ~${minWords} and ~${maxWords} words. Balance matters, but a strong ending beats perfect balance.
 
-OUTPUT JSON ONLY: { "cutAfter": [number, number] }`;
+Cut points must be strictly increasing integers between 1 and ${sentences.length - 1}, and there must be exactly ${partCount - 1} of them.
+
+OUTPUT JSON ONLY: { "cutAfter": [${Array.from({ length: partCount - 1 }, () => "number").join(", ")}] }`;
 
   try {
     const { text } = await generateText({ model: openrouter(llm), prompt });
     const parsed = extractJson<{ cutAfter: number[] }>(text);
-    const valid = normalizeCuts(
-      parsed.cutAfter.filter((n) => candidates.includes(Math.round(n))),
+    const valid = normalizeCuts(parsed.cutAfter, sentences.length, partCount);
+    if (valid.length !== partCount - 1) return fallback;
+    // Trust the model's cliffhangers, but rescue any part it ended on a flat line.
+    return normalizeCuts(
+      refineCutsForCliffhangers(sentences, valid, 1.5),
       sentences.length,
       partCount
     );
-    return valid.length === partCount - 1 ? valid : fallback;
   } catch {
     return fallback;
   }
@@ -1157,7 +1338,12 @@ export async function generateStorySeries(
   });
 
   if (mode === "hybrid") {
-    const partCount = typeof requestedParts === "number" ? resolvePartCount(requestedParts, 300) : 2;
+    // "auto" adapts to the richness of the seed thread (longer source → more
+    // episodes) instead of always defaulting to 2. Floor at 2: hybrid rewrites
+    // can expand a short seed, and a "series" should stay multi-part. Explicit
+    // 2-4 pass through unchanged.
+    const seedWords = wordCount(cleanRedditBody(post.body));
+    const partCount = Math.max(2, resolvePartCount(requestedParts, seedWords));
     const parts = await llmStorySeries(genre.angle, tier, partCount, genre.id, post);
     return parts.map((part, i) => ({
       ...part,
@@ -1181,11 +1367,15 @@ export async function generateStorySeries(
   const body = cleanRedditBody(threadedPost.body);
   const words = wordCount(body);
   const partCount = resolvePartCount(requestedParts, words);
+  // An explicit "1 (no split)" keeps the WHOLE story untruncated; auto-collapse
+  // (a naturally short story) still trims to a narratable length.
+  const keepFullBody = requestedParts === 1;
+  const singleBody = keepFullBody ? body : trimBody(body);
   if (partCount === 1) {
     return [
       {
         title: threadedPost.title,
-        body: trimBody(body),
+        body: singleBody,
         source: "verbatim",
         theme: theme?.id,
         genre: genre.id,
@@ -1208,7 +1398,7 @@ export async function generateStorySeries(
     return [
       {
         title: threadedPost.title,
-        body: trimBody(body),
+        body: singleBody,
         source: "verbatim",
         theme: theme?.id,
         genre: genre.id,
