@@ -11,3 +11,4 @@ export { youtubeRoutes } from "./youtube.routes";
 export { ytImportRoutes } from "./yt-import.routes";
 export { instagramRoutes } from "./instagram.routes";
 export { storyRoutes } from "./story.routes";
+export { operationLogRoutes } from "./operation-log.routes";

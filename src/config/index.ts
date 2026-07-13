@@ -22,6 +22,15 @@ export const config = {
   redisUrl: process.env.REDIS_URL || "redis://localhost:6379",
   queueConcurrency: parseInt(process.env.QUEUE_CONCURRENCY || "2"),
 
+  // Operations log: Mongo-backed request, queue, worker, and fallback history.
+  // A TTL index removes entries after this period; individual rows can be
+  // deleted earlier in the Operations screen.
+  operationLogRetentionDays: Math.max(1, parseInt(process.env.OPERATION_LOG_RETENTION_DAYS || "30")),
+  // Mirror every durable server-side operation record to stdout. Set false in
+  // a managed environment only when the process logger already captures Mongo
+  // records through another integration.
+  operationLogConsole: process.env.OPERATION_LOG_CONSOLE !== "false",
+
   // AWS S3
   awsRegion: process.env.AWS_REGION || "us-east-1",
   awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
@@ -133,6 +142,11 @@ export const config = {
   redditUserAgent:
     process.env.REDDIT_USER_AGENT ||
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+
+  // Followup/update discovery: a candidate the LLM adjudicator scores at or above
+  // this confidence (0..1) is auto-included as a genuine continuation; below it we
+  // fall back to deterministic signals (embedded link / title mirror / update cue).
+  updateAiConfidence: parseFloat(process.env.UPDATE_AI_CONFIDENCE_THRESHOLD || "0.7"),
 
   // Limits
   maxFileSizeMB: parseInt(process.env.MAX_FILE_SIZE_MB || "2048"),

@@ -1,6 +1,7 @@
 import { Queue } from "bullmq";
 import { Reel } from "../models";
 import { redisConnection } from "./connection";
+import { recordOperationLog } from "../services/operation-log.service";
 
 // ============================================
 // BullMQ queues — replaces the old fire-and-forget `processX(id).catch()`
@@ -97,11 +98,14 @@ export const ytImportFramesQueue = new Queue<YtImportFramesJobData, void, "extra
 
 export async function enqueueReel(reelId: string): Promise<void> {
   await reelQueue.add("process", { reelId }, { jobId: reelId });
+  recordOperationLog({ scope: "queue", event: "queue.reel_enqueued", message: "Full reel job queued", reelId, jobId: reelId });
 }
 
 /** Plan-only stage — cheap script/scene-graph, stops at plan_review. */
 export async function enqueueReelPlan(reelId: string): Promise<void> {
-  await reelQueue.add("process", { reelId, stage: "plan" }, { jobId: `${reelId}-plan` });
+  const jobId = `${reelId}-plan`;
+  await reelQueue.add("process", { reelId, stage: "plan" }, { jobId });
+  recordOperationLog({ scope: "queue", event: "queue.reel_plan_enqueued", message: "Reel plan job queued", reelId, jobId });
 }
 
 /** Produce stage — assets→render→upload on an approved/edited plan. Unique
@@ -118,13 +122,30 @@ export async function enqueueReelProduce(
   );
   if (duplicate) {
     console.warn(`⏭️  Skipping duplicate produce enqueue for reel ${reelId}`);
+    recordOperationLog({
+      scope: "queue",
+      level: "warn",
+      event: "queue.produce_duplicate_skipped",
+      message: "Skipped a duplicate produce request because a produce job is already active",
+      reelId,
+      metadata: { produceMode },
+    });
     return;
   }
+  const jobId = `${reelId}-produce-${Date.now()}`;
   await reelQueue.add(
     "process",
     { reelId, stage: "produce", produceMode },
-    { jobId: `${reelId}-produce-${Date.now()}` }
+    { jobId }
   );
+  recordOperationLog({
+    scope: "queue",
+    event: "queue.reel_produce_enqueued",
+    message: "Reel produce job queued",
+    reelId,
+    jobId,
+    metadata: { produceMode },
+  });
 }
 
 /** Remove a reel's queued jobs regardless of state (queued, stalled, failed,
@@ -149,7 +170,17 @@ export async function enqueuePublish(
       job.data.platform === platform &&
       job.data.channelId === channelId
   );
-  if (duplicate) return;
+  if (duplicate) {
+    recordOperationLog({
+      scope: "queue",
+      level: "warn",
+      event: "queue.publish_duplicate_skipped",
+      message: "Skipped a duplicate publish request because a matching publish job is already active",
+      reelId,
+      metadata: { platform, channelId },
+    });
+    return;
+  }
 
   // Surface an in-flight publish to the studio poller. Auto-publish used to
   // enqueue without this, so the UI stayed on "completed" until a manual refresh.
@@ -162,49 +193,67 @@ export async function enqueuePublish(
     });
   }
 
+  const jobId = `${reelId}-publish-${platform}-${channelId ?? "default"}-${Date.now()}`;
   await publishQueue.add(
     "publish",
     { reelId, platform, channelId },
     {
-      jobId: `${reelId}-publish-${platform}-${channelId ?? "default"}-${Date.now()}`,
+      jobId,
       // Retrying a failed Instagram container automatically can create a
       // duplicate post. Surface the failure and require an explicit resend.
       ...(platform === "instagram" ? { attempts: 1 } : {}),
     }
   );
+  recordOperationLog({
+    scope: "queue",
+    event: "queue.publish_enqueued",
+    message: `${platform} publish job queued`,
+    reelId,
+    jobId,
+    metadata: { platform, channelId },
+  });
 }
 
 export async function enqueueRevoice(reelId: string, variantIds: string[]): Promise<void> {
+  const jobId = `${reelId}-revoice-${Date.now()}`;
   await revoiceQueue.add(
     "revoice",
     { reelId, variantIds },
-    { jobId: `${reelId}-revoice-${Date.now()}` }
+    { jobId }
   );
+  recordOperationLog({ scope: "queue", event: "queue.revoice_enqueued", message: "Revoice job queued", reelId, jobId, metadata: { variantIds } });
 }
 
 export async function enqueueYtImport(importId: string): Promise<void> {
-  await ytImportQueue.add("process", { importId }, { jobId: `yt-import-${importId}` });
+  const jobId = `yt-import-${importId}`;
+  await ytImportQueue.add("process", { importId }, { jobId });
+  recordOperationLog({ scope: "queue", event: "queue.yt_import_enqueued", message: "YouTube import job queued", jobId, metadata: { importId } });
 }
 
 export async function enqueueYtImportFrames(importId: string): Promise<void> {
+  const jobId = `yt-frames-${importId}-${Date.now()}`;
   await ytImportFramesQueue.add(
     "extract",
     { importId },
-    { jobId: `yt-frames-${importId}-${Date.now()}` }
+    { jobId }
   );
+  recordOperationLog({ scope: "queue", event: "queue.yt_import_frames_enqueued", message: "YouTube import frame-extraction job queued", jobId, metadata: { importId } });
 }
 
 export async function enqueueComposition(compositionId: string): Promise<void> {
   await compositionQueue.add("process", { compositionId }, { jobId: compositionId });
+  recordOperationLog({ scope: "queue", event: "queue.composition_enqueued", message: "Composition job queued", jobId: compositionId, metadata: { compositionId } });
 }
 
 export async function enqueueCompositionRegeneration(
   compositionId: string,
   delays?: number[]
 ): Promise<void> {
+  const jobId = `${compositionId}-regen-${Date.now()}`;
   await compositionRegenerateQueue.add(
     "regenerate",
     { compositionId, delays },
-    { jobId: `${compositionId}-regen-${Date.now()}` }
+    { jobId }
   );
+  recordOperationLog({ scope: "queue", event: "queue.composition_regeneration_enqueued", message: "Composition regeneration job queued", jobId, metadata: { compositionId } });
 }
