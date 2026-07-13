@@ -10,6 +10,8 @@ import {
   deleteSeriesPart,
   ensureReelReviewPackage,
   regenerateReelThumbnail,
+  regenerateInstagramCaption,
+  regenerateReelReviewCopy,
   previewReelFrameThumbnail,
   previewReelFrameWithText,
   previewThumbnailSource,
@@ -50,6 +52,7 @@ import {
   addReelDestination,
   removeReelDestination,
   updateReelDestinationOutro,
+  resolveInstagramPublishCaption,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { resolveRenderedPublishDestination } from "../services/reel-outro.service";
@@ -394,6 +397,46 @@ export async function regenerateReelThumbnailController({
   return { success: true, data: review };
 }
 
+/** Generate fresh YouTube Shorts title and description without changing any
+ * tag, thumbnail, Instagram, or rendered-media state. */
+export async function regenerateReelReviewCopyController({ params, set }: GetReelContext) {
+  const reel = await getReel(params.id);
+  if (!reel) {
+    set.status = 404;
+    return { success: false, error: "Reel not found" };
+  }
+  if (reel.status !== "completed") {
+    set.status = 400;
+    return { success: false, error: `YouTube copy generation requires a completed reel. Current status: ${reel.status}` };
+  }
+  try {
+    return { success: true, data: await regenerateReelReviewCopy(params.id) };
+  } catch (error: unknown) {
+    set.status = 500;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Generate fresh platform-specific Instagram copy without changing YouTube
+ * review metadata or any rendered media. */
+export async function regenerateInstagramCaptionController({ params, set }: GetReelContext) {
+  const reel = await getReel(params.id);
+  if (!reel) {
+    set.status = 404;
+    return { success: false, error: "Reel not found" };
+  }
+  if (reel.status !== "completed") {
+    set.status = 400;
+    return { success: false, error: `Instagram caption generation requires a completed reel. Current status: ${reel.status}` };
+  }
+  try {
+    return { success: true, data: await regenerateInstagramCaption(params.id) };
+  } catch (error: unknown) {
+    set.status = 500;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
 export async function listYouTubeChannelsController() {
   return { success: true, data: await listAllYouTubePublishChannels() };
 }
@@ -475,6 +518,14 @@ export async function distributeReelController({ params, body, set }: PublishRee
   if (unavailable.length) {
     set.status = 409;
     return { success: false, error: `Only ready destination renders can be published. ${unavailable.join(" ")}` };
+  }
+  if (instagramIds.length) {
+    try {
+      resolveInstagramPublishCaption(reel);
+    } catch (error) {
+      set.status = 400;
+      return { success: false, error: getErrorMessage(error) };
+    }
   }
   const active = instagramIds.filter((id) => {
     const state = reel.instagram.find((publish) => publish.channelId === id)?.status;

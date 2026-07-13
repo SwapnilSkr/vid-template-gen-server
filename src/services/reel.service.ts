@@ -43,7 +43,10 @@ import {
 } from "./reel-outro.service";
 import { assertFfmpegReady, isCaptionBurnError } from "./ffmpeg-capability.service";
 import { getScoutTargets } from "./trend-scout.service";
-import { buildReelReviewPackage } from "./reel-review.service";
+import {
+  buildReelReviewPackage,
+  generateInstagramCaptionForReel,
+} from "./reel-review.service";
 import {
   accumulateReelCostBreakdown,
   applyMeasuredCostsToReel,
@@ -1372,6 +1375,14 @@ function reviewPackageUsageHandlers(measuredCosts: MeasuredCostInput[]) {
         source: usage.costUsd !== undefined ? "actual" : "estimated",
       });
     },
+    onInstagramCaptionUsage: (usage: { label: string; model: string; costUsd: number }) => {
+      measuredCosts.push({
+        label: usage.label,
+        model: usage.model,
+        costUsd: usage.costUsd,
+        source: "actual",
+      });
+    },
   };
 }
 
@@ -1837,6 +1848,12 @@ async function produceImageReel(
     if (!reel.review) {
       reel.review = await buildReelReviewPackage(reel, reviewPackageUsageHandlers(measuredCosts));
     }
+    if (typeof reel.instagramSettings?.caption !== "string") {
+      await generateInstagramCaptionForReel(
+        reel,
+        reviewPackageUsageHandlers(measuredCosts).onInstagramCaptionUsage,
+      );
+    }
     const heroScene = isHybrid ? result.scenes.find((_, i) => reel.scenes[i]?.isHero) : undefined;
     const runBreakdown = await buildReelCostBreakdown(reel, {
       llmModel: models.llm,
@@ -2086,6 +2103,12 @@ async function processGameplayReel(
       reel.review = await buildReelReviewPackage(
         reel,
         reviewPackageUsageHandlers(gameplayMeasuredCosts),
+      );
+    }
+    if (typeof reel.instagramSettings?.caption !== "string") {
+      await generateInstagramCaptionForReel(
+        reel,
+        reviewPackageUsageHandlers(gameplayMeasuredCosts).onInstagramCaptionUsage,
       );
     }
     const runBreakdown = await buildReelCostBreakdown(reel, {

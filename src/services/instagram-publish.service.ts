@@ -1,12 +1,42 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { config } from "../config";
-import { InstagramChannel, OAuthState, Reel } from "../models";
+import { InstagramChannel, OAuthState, Reel, type IReel } from "../models";
 import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { resolveRenderedPublishDestination } from "./reel-outro.service";
 
 const graphBase = () => `https://graph.instagram.com/${config.instagramApiVersion}`;
 const scopes = ["instagram_business_basic", "instagram_business_content_publish"];
+const INSTAGRAM_CAPTION_MAX_HASHTAGS = 5;
+
+function instagramCaptionHashtagCount(caption: string): number {
+  return (caption.match(/#[\p{L}\p{N}_]+/gu) ?? []).length;
+}
+
+function assertPublishableInstagramCaption(caption: string): void {
+  if (!caption.trim()) {
+    throw new Error(
+      "Instagram caption is required before publishing. Save platform-specific Instagram details first.",
+    );
+  }
+  const hashtagCount = instagramCaptionHashtagCount(caption);
+  if (hashtagCount > INSTAGRAM_CAPTION_MAX_HASHTAGS) {
+    throw new Error(
+      `Instagram captions may contain at most ${INSTAGRAM_CAPTION_MAX_HASHTAGS} hashtags (found ${hashtagCount})`,
+    );
+  }
+}
+
+/** The worker and the enqueueing HTTP boundary must use the same validation.
+ * This prevents a known-invalid Instagram job from briefly appearing pending
+ * before the background worker rejects it. */
+export function resolveInstagramPublishCaption(
+  reel: Pick<IReel, "instagramSettings">,
+): string {
+  const caption = (reel.instagramSettings?.caption ?? "").trim().slice(0, 2200);
+  assertPublishableInstagramCaption(caption);
+  return caption;
+}
 
 export interface StartInstagramConnectInput { label: string; channelKey?: string; niches?: string[] }
 
@@ -98,7 +128,9 @@ async function accessTokenFor(channel: InstanceType<typeof InstagramChannel>): P
 export async function publishReelToInstagram(reelId: string, channelId?: string): Promise<void> {
   const reel = await Reel.findById(reelId); if (!reel) throw new Error("Reel not found");
   const destination = resolveRenderedPublishDestination(reel, "instagram", channelId);
+  if (!destination.outputUrl) throw new Error("Instagram destination output is not ready");
   const channel = await resolveInstagramChannel(channelId ?? destination.channelId);
+  const caption = resolveInstagramPublishCaption(reel);
   recordOperationLog({
     scope: "system",
     event: "publish.destination_output_selected",
@@ -124,16 +156,17 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
   };
   await setStatus("uploading", { message: "Preparing Reel for Instagram…", error: undefined });
   try {
-    // Instagram copy is deliberately independent from the YouTube review
-    // package. An absent Instagram caption means an intentionally blank
-    // Instagram caption; it must never inherit a YouTube description/title.
-    const caption = (reel.instagramSettings?.caption ?? "").slice(0, 2200);
     recordOperationLog({
       scope: "system",
       event: "publish.instagram_caption_selected",
-      message: "Selected the saved platform-specific Instagram caption",
+      message: "Selected the saved, non-empty platform-specific Instagram caption",
       reelId,
-      metadata: { channelId: channel.channelKey, source: "instagramSettings", length: caption.length },
+      metadata: {
+        channelId: channel.channelKey,
+        source: "instagramSettings",
+        length: caption.length,
+        hashtagCount: instagramCaptionHashtagCount(caption),
+      },
     });
     const token = await accessTokenFor(channel);
     let containerId = priorPublish?.containerId;
@@ -144,7 +177,16 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
       // The current Vertical Cover is an overlay asset, not guaranteed to be a
       // flattened 9:16 image. Sending it as Meta's native cover can produce a
       // text-only cover, so let Instagram choose from the final MP4 for now.
-      const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media_type: "REELS", video_url: destination.outputUrl, caption, share_to_feed: reel.instagramSettings?.shareToFeed ?? true }) });
+      const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          media_type: "REELS",
+          video_url: destination.outputUrl,
+          caption,
+          share_to_feed: String(reel.instagramSettings?.shareToFeed ?? true),
+        }),
+      });
       containerId = create.id;
       // Persist this before polling. A worker restart or timeout can now
       // continue the accepted container without creating a duplicate post.
@@ -168,7 +210,11 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
     }
     if (!ready) throw new Error("Instagram media processing timed out");
     await setStatus("uploading", { message: "Instagram finished processing — publishing Reel…" });
-    const published = await graph<{ id: string }>(`/${channel.instagramUserId}/media_publish`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ creation_id: containerId }) });
+    const published = await graph<{ id: string }>(`/${channel.instagramUserId}/media_publish`, token, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ creation_id: containerId }),
+    });
     // Publishing has succeeded even if Meta needs another moment to expose its
     // permalink. Do not incorrectly report a duplicate-risking failure here.
     let permalink: string | undefined;

@@ -28,6 +28,13 @@ export const OutroSettingsBody = t.Object({
   footer: t.Optional(t.String()),
 });
 
+/** Platform-owned publish copy. Reused by create and Studio settings so this
+ * field cannot be accepted in one path and silently discarded in another. */
+export const InstagramPublishSettingsBody = t.Object({
+  caption: t.Optional(t.String({ maxLength: 2200 })),
+  shareToFeed: t.Optional(t.Boolean()),
+});
+
 export const CreateReelBody = t.Object({
   niche: t.String(),
   genre: t.Optional(t.String()),
@@ -87,7 +94,7 @@ export const CreateReelBody = t.Object({
   horrorReferenceId: t.Optional(t.String()),
   /** cinematic edit FX applied as a final render pass (rain/grain/vignette/letterbox) */
   editEffects: t.Optional(EditEffectsBody),
-  instagram: t.Optional(t.Object({ caption: t.Optional(t.String({ maxLength: 2200 })), shareToFeed: t.Optional(t.Boolean()) })),
+  instagram: t.Optional(InstagramPublishSettingsBody),
   /** pre-selected bank story id (browse/select flow) */
   selectedStoryId: t.Optional(t.String()),
   /** pre-selected Reddit permalink (browse/select flow) */
@@ -223,6 +230,7 @@ export const UpdateReelSettingsBody = t.Object({
     })
   ),
   editEffects: t.Optional(EditEffectsBody),
+  instagram: t.Optional(InstagramPublishSettingsBody),
 });
 export type TUpdateReelSettingsBody = typeof UpdateReelSettingsBody.static;
 

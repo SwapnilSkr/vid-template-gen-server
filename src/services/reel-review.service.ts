@@ -4,7 +4,12 @@ import { readFile, writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
 import { resolveModels } from "../config/models";
-import { Reel, type IReel, type IReelReviewPackage } from "../models";
+import {
+  Reel,
+  type IInstagramPublishSettings,
+  type IReel,
+  type IReelReviewPackage,
+} from "../models";
 import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { ensureDir, escapeFilterPath, applyOutputOptions, generateFilename } from "../utils";
@@ -72,6 +77,21 @@ function normalizeTags(tags: string[]): string[] {
       return true;
     })
     .slice(0, 15);
+}
+
+function reviewTagsForReel(reel: IReel): string[] {
+  const nicheTags =
+    reel.niche === "reddit"
+      ? DEFAULT_REDDIT_TAGS
+      : isHorrorNiche(reel.niche)
+        ? DEFAULT_HORROR_TAGS
+        : [reel.niche];
+  return normalizeTags([
+    reel.niche,
+    reel.genre ?? "",
+    reel.redditStory?.subreddit?.replace(/^r\//i, "") ?? "",
+    ...nicheTags,
+  ]);
 }
 
 function isHorrorNiche(niche: string): boolean {
@@ -147,11 +167,68 @@ function cleanTitle(title: string): string {
 const HASHTAG_LINE_PATTERN = /^(?:\s*#[\p{L}\p{N}_]+\s*)+$/u;
 const TRAILING_HASHTAGS_PATTERN = /(?:\s+#[\p{L}\p{N}_]+)+\s*$/u;
 
-function formatHashtags(tags: string[]): string[] {
+const YOUTUBE_HASHTAG_DISPLAY: Record<string, string> = {
+  aita: "AITA",
+  reddit: "Reddit",
+  redditstories: "RedditStories",
+  storytime: "Storytime",
+  shorts: "Shorts",
+  youtubeshorts: "YouTubeShorts",
+  horror: "Horror",
+  horrorstories: "HorrorStories",
+  scarystories: "ScaryStories",
+  creepypasta: "Creepypasta",
+};
+
+function hashtagToken(value: string): string | undefined {
+  const token = value.trim().replace(/^#+/, "").replace(/[^\p{L}\p{N}_]/gu, "");
+  return token || undefined;
+}
+
+/** YouTube hashtags are discoverability metadata: valid `#word` tokens on a
+ * single trailing description line, never stuffed into the title. */
+function formatYouTubeHashtags(tags: string[]): string[] {
+  const seen = new Set<string>();
   return tags
-    .map((tag) => tag.trim().replace(/^#/, ""))
-    .filter(Boolean)
+    .map(hashtagToken)
+    .filter((tag): tag is string => Boolean(tag))
+    .map((tag) => tag.toLocaleLowerCase())
+    .filter((tag) => {
+      if (seen.has(tag)) return false;
+      seen.add(tag);
+      return true;
+    })
+    .map((tag) => `#${YOUTUBE_HASHTAG_DISPLAY[tag] ?? tag}`)
+    .slice(0, 5);
+}
+
+/** Instagram tags intentionally use a distinct, lower-case convention. They
+ * are appended as a final, separate line by `cleanInstagramCaption`. */
+function formatInstagramHashtags(tags: string[]): string[] {
+  const seen = new Set<string>();
+  return tags
+    .map(hashtagToken)
+    .filter((tag): tag is string => Boolean(tag))
+    .map((tag) => tag.toLocaleLowerCase())
+    .filter((tag) => {
+      if (seen.has(tag)) return false;
+      seen.add(tag);
+      return true;
+    })
     .map((tag) => `#${tag}`);
+}
+
+function instagramTagsForReel(reel: IReel): string[] {
+  const platformTags = reel.niche === "reddit"
+    ? ["redditstories", "aita", "storytime", "redditdrama"]
+    : isHorrorNiche(reel.niche)
+      ? ["horrorstories", "scarystories", "creepypasta", "horrortok"]
+      : [reel.niche, "storytime"];
+  return normalizeTags([
+    reel.genre ?? "",
+    reel.redditStory?.subreddit?.replace(/^r\//i, "") ?? "",
+    ...platformTags,
+  ]).slice(0, INSTAGRAM_CAPTION_MAX_HASHTAGS);
 }
 
 function stripHashtagsFromText(value: string): string {
@@ -167,24 +244,180 @@ function stripHashtagsFromText(value: string): string {
   return withoutBlock.replace(TRAILING_HASHTAGS_PATTERN, "").trim();
 }
 
-function withTitleHashtags(baseTitle: string, hashtags: string[], maxLength = 100): string {
-  const base = stripHashtagsFromText(baseTitle).trim();
-  let result = base;
-  for (const tag of hashtags) {
-    const next = result ? `${result} ${tag}` : tag;
-    if (next.length <= maxLength) {
-      result = next;
-    } else {
-      break;
-    }
-  }
-  return result.slice(0, maxLength);
-}
-
 function withDescriptionHashtags(description: string, hashtags: string[]): string {
   const managed = hashtags.length ? hashtags.join(" ") : "";
   const body = stripHashtagsFromText(description);
   return managed ? `${body}${body ? "\n\n" : ""}${managed}` : body;
+}
+
+const INSTAGRAM_CAPTION_MAX_HASHTAGS = 5;
+const INSTAGRAM_HASHTAG_PATTERN = /#[\p{L}\p{N}_]+/gu;
+
+function instagramHashtagCount(caption: string): number {
+  return (caption.match(INSTAGRAM_HASHTAG_PATTERN) ?? []).length;
+}
+
+function instagramFallbackCaption(reel: IReel, tags: string[]): string {
+  const title = stripHashtagsFromText(buildTitle(reel)).slice(0, 220);
+  const partCta =
+    reel.partNumber && reel.partCount && reel.partNumber < reel.partCount
+      ? `Follow for part ${reel.partNumber + 1}.`
+      : "Follow for more stories.";
+  const prompt = reel.niche === "reddit" ? "What would you have done?" : "Would you watch to the end?";
+  return [title, prompt, partCta, formatInstagramHashtags(tags).slice(0, INSTAGRAM_CAPTION_MAX_HASHTAGS).join(" ")]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function extractInstagramCaption(text: string): string | undefined {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]) as unknown;
+      if (parsed && typeof parsed === "object" && typeof (parsed as Record<string, unknown>).caption === "string") {
+        return (parsed as Record<string, string>).caption;
+      }
+      return undefined;
+    } catch {
+      // Fall through to a plain-text response. The final guardrail still caps tags.
+    }
+  }
+  const plain = text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .replace(/^caption\s*:\s*/i, "")
+    .replace(/^["']|["']$/g, "")
+    .trim();
+  return plain || undefined;
+}
+
+function trimCaptionBody(value: string, maximum: number): string {
+  const compact = value
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (compact.length <= maximum) return compact;
+  return compact.slice(0, maximum).replace(/\s+\S*$/, "").trim();
+}
+
+/** Normalize AI output into a real Instagram caption: prose first, then one
+ * final line of 3–5 lower-case tags. This does not process manual captions. */
+function cleanInstagramCaption(value: string, fallback: string, tags: string[]): string {
+  const generatedTags = formatInstagramHashtags(value.match(INSTAGRAM_HASHTAG_PATTERN) ?? []);
+  const prohibited = new Set(["#fyp", "#viral", "#reels", "#explorepage", "#instagram", "#shorts"]);
+  const selectedTags = [...new Set([
+    ...generatedTags.filter((tag) => !prohibited.has(tag)),
+    ...formatInstagramHashtags(tags),
+  ])].slice(0, INSTAGRAM_CAPTION_MAX_HASHTAGS);
+  const finalTags = selectedTags.length
+    ? selectedTags
+    : formatInstagramHashtags(tags).slice(0, INSTAGRAM_CAPTION_MAX_HASHTAGS);
+  const maximumProseLength = Math.max(1, 700 - (finalTags.join(" ").length + 2));
+  const prose = trimCaptionBody(value.replace(INSTAGRAM_HASHTAG_PATTERN, ""), maximumProseLength)
+    || trimCaptionBody(fallback.replace(INSTAGRAM_HASHTAG_PATTERN, ""), maximumProseLength);
+  return finalTags.length ? `${prose}\n\n${finalTags.join(" ")}`.trim() : prose;
+}
+
+export interface InstagramCaptionResult {
+  caption: string;
+  source: "ai" | "fallback";
+  model?: string;
+}
+
+/** Generate platform-native copy from story material, not from YouTube metadata.
+ * The output is normalized after the model returns so provider variation cannot
+ * exceed the Instagram hashtag guardrail. */
+async function buildInstagramCaption(
+  reel: IReel,
+  tags: string[],
+  onLlmUsage?: LlmUsageCallback,
+): Promise<InstagramCaptionResult> {
+  const fallback = instagramFallbackCaption(reel, tags);
+  const source = storySeed(reel).slice(0, 2_600);
+  if (!source || !config.openRouterApiKey) {
+    recordOperationLog({
+      scope: "system",
+      level: "warn",
+      event: "instagram.caption_ai_fallback",
+      message: "Instagram caption AI was unavailable; saved a deterministic guarded draft",
+      reelId: reel._id.toString(),
+      metadata: { reason: !source ? "missing_source" : "missing_openrouter_key" },
+    });
+    return { caption: fallback, source: "fallback" };
+  }
+
+  const nicheLabel = reel.niche === "reddit" ? "Reddit story Reel" : isHorrorNiche(reel.niche) ? "horror Reel" : `${getRecipe(reel.niche).displayName} Reel`;
+  const partInstruction =
+    reel.partNumber && reel.partCount && reel.partCount > 1
+      ? `This is part ${reel.partNumber} of ${reel.partCount}; make the CTA accurately point to the next part when one exists.`
+      : "This is a standalone/final Reel; use a natural follow CTA only if it fits.";
+  try {
+    const { text, usage } = await generateText({
+      model: openrouter(config.openRouterModel),
+      prompt: `Write the caption that appears under an Instagram Reel for this ${nicheLabel}.
+
+SOURCE STORY:
+${source}
+
+Rules:
+- Output JSON only: {"caption":"..."}.
+- Write 2–3 short, mobile-readable paragraphs. The first line is a specific emotional hook; the middle gives only the essential setup/conflict; the last prose line is a natural question or light follow CTA.
+- This is Instagram copy, not a title or transcript. Do not repeat the post title verbatim, use title labels, or mention AI, gameplay, video generation, captions, thumbnails, YouTube, likes, or "watch now".
+- Do not invent facts, use spoiler language beyond this part, or use generic engagement bait such as "wait for it".
+- Put exactly 3–5 relevant Instagram hashtags on their own final line. Each must be lower-case, start with #, contain no spaces, and be story/niche-specific. Never use #fyp, #viral, #reels, #explorepage, #instagram, or #shorts.
+- Keep all prose and hashtags under 700 characters.
+- ${partInstruction}`,
+    });
+    reportLlmUsage(onLlmUsage, "Instagram caption", config.openRouterModel, usage);
+    const generatedCaption = extractInstagramCaption(text);
+    if (!generatedCaption) throw new Error("Instagram caption model returned no caption");
+    const caption = cleanInstagramCaption(generatedCaption, fallback, tags);
+    return { caption, source: "ai", model: config.openRouterModel };
+  } catch (error: unknown) {
+    console.warn(`Instagram caption generation failed, using fallback: ${getErrorMessage(error)}`);
+    recordOperationLog({
+      scope: "external",
+      level: "warn",
+      event: "instagram.caption_ai_fallback",
+      message: "Instagram caption generation failed; saved a deterministic guarded draft",
+      reelId: reel._id.toString(),
+      error,
+    });
+    return { caption: fallback, source: "fallback" };
+  }
+}
+
+/** Mutates the loaded reel so normal production can persist the generated copy
+ * atomically with its review package and cost breakdown. */
+export async function generateInstagramCaptionForReel(
+  reel: IReel,
+  onLlmUsage?: LlmUsageCallback,
+): Promise<IInstagramPublishSettings> {
+  const result = await buildInstagramCaption(reel, instagramTagsForReel(reel), onLlmUsage);
+  const settings: IInstagramPublishSettings = {
+    caption: result.caption,
+    shareToFeed: reel.instagramSettings?.shareToFeed ?? true,
+    source: result.source,
+    generatedAt: new Date(),
+    model: result.model,
+  };
+  reel.instagramSettings = settings;
+  reel.markModified("instagramSettings");
+  recordOperationLog({
+    scope: "system",
+    event: "instagram.caption_generated",
+    message: result.source === "ai" ? "Generated an Instagram-native caption" : "Saved a guarded Instagram caption fallback",
+    reelId: reel._id.toString(),
+    metadata: {
+      source: result.source,
+      model: result.model,
+      length: settings.caption?.length ?? 0,
+      hashtagCount: instagramHashtagCount(settings.caption ?? ""),
+    },
+  });
+  return settings;
 }
 
 async function buildReviewCopy(
@@ -192,10 +425,10 @@ async function buildReviewCopy(
   tags: string[],
   onLlmUsage?: LlmUsageCallback,
 ): Promise<{ title: string; description: string }> {
-  const hashtagStrings = formatHashtags(tags);
-  const baseFallbackTitle = buildTitle(reel).slice(0, 100);
-  const fallbackTitle = withTitleHashtags(baseFallbackTitle, hashtagStrings);
-  const fallbackDescription = buildDescription(reel, baseFallbackTitle, tags);
+  const hashtagStrings = formatYouTubeHashtags(tags);
+  const baseFallbackTitle = stripHashtagsFromText(buildTitle(reel)).slice(0, 100);
+  const fallbackTitle = baseFallbackTitle;
+  const fallbackDescription = withDescriptionHashtags(buildDescription(reel, baseFallbackTitle), hashtagStrings);
   const source = storySeed(reel).slice(0, 2600);
   if (!source || !config.openRouterApiKey) {
     return { title: fallbackTitle, description: fallbackDescription };
@@ -211,21 +444,19 @@ async function buildReviewCopy(
   try {
     const { text, usage } = await generateText({
       model: openrouter(config.openRouterModel),
-      prompt: `Write YouTube Shorts review copy for this ${nicheLabel}.
+      prompt: `Write the YouTube Shorts metadata for this ${nicheLabel}.
 
 SOURCE STORY:
 ${source}
 
 Rules:
 - Output JSON only: {"title":"...","description":"..."}.
-- Title must be specific to the conflict/twist, 50-80 characters, curiosity-gap style.
-- Do not include hashtags in the title or description — those are appended separately.
-- Avoid generic format words such as gameplay, AI, video generation, horror video, short-form, content, captions, or thumbnail.
+- The title is the YouTube Shorts headline: 45–75 characters, specific to the central conflict or twist, spoken-natural, and curiosity-led without clickbait. It must contain no hashtags, emojis, quotation marks, or ALL CAPS.
+- The description is 1–2 concise, searchable sentences that add context rather than repeat the title. It must contain no hashtags; the server appends a separate YouTube hashtag line.
+- Avoid generic format words such as gameplay, AI, video generation, horror video, short-form, content, captions, thumbnail, Instagram, Reel, or "watch now".
 - Do not invent facts not present in the source.
-- Description should be 1-2 natural sentences only.
-- Keep description under 500 characters.
-- Include part info if the source says this is one part of a series.
-- Make it punchy, human, and platform-ready, not templated slop.`,
+- Include accurate part context when this is one part of a series.
+- Make it punchy, human, searchable, and platform-native — never templated filler.`,
     });
     reportLlmUsage(onLlmUsage, "Review copy", config.openRouterModel, usage);
 
@@ -234,7 +465,7 @@ Rules:
     const baseDescription = parsed.description
       ? stripHashtagsFromText(parsed.description.trim()).slice(0, 500)
       : "";
-    const title = withTitleHashtags(baseTitle, hashtagStrings);
+    const title = baseTitle;
     const description = baseDescription
       ? withDescriptionHashtags(baseDescription, hashtagStrings)
       : fallbackDescription;
@@ -252,20 +483,18 @@ Rules:
   }
 }
 
-function buildDescription(reel: IReel, title: string, tags: string[]): string {
+function buildDescription(reel: IReel, title: string): string {
   const part =
     reel.partNumber && reel.partCount && reel.partCount > 1
       ? `\n\nPart ${reel.partNumber} of ${reel.partCount}.`
       : "";
-  const hashtags = tags.slice(0, 8).map((tag) => `#${tag}`).join(" ");
-
   if (reel.niche === "reddit") {
     const source = reel.redditStory?.subreddit ? `${reel.redditStory.subreddit} story` : "Reddit story";
-    return `${title}\n\n${source} with gameplay, captions, and a fast hook.${part}\n\n${hashtags}`.trim();
+    return `${title}\n\n${source}.${part}`.trim();
   }
 
   const recipe = getRecipe(reel.niche);
-  return `${title}\n\n${recipe.displayName} short.${part}\n\n${hashtags}`.trim();
+  return `${title}\n\n${recipe.displayName}.${part}`.trim();
 }
 
 async function buildThumbnailPrompt(reel: IReel, _title: string): Promise<string> {
@@ -503,13 +732,7 @@ export async function buildReelReviewPackage(
   usage?: MediaUsageCallback | ReelReviewUsageCallbacks,
 ): Promise<IReelReviewPackage> {
   const callbacks = resolveReviewUsageCallbacks(usage);
-  const nicheTags = reel.niche === "reddit" ? DEFAULT_REDDIT_TAGS : isHorrorNiche(reel.niche) ? DEFAULT_HORROR_TAGS : [reel.niche];
-  const tags = normalizeTags([
-    reel.niche,
-    reel.genre ?? "",
-    reel.redditStory?.subreddit?.replace(/^r\//i, "") ?? "",
-    ...nicheTags,
-  ]);
+  const tags = reviewTagsForReel(reel);
   const { title, description } = await buildReviewCopy(reel, tags, callbacks.onReviewCopyUsage);
   const thumbnailPrompt = await buildThumbnailPrompt(reel, title);
   const visibilityNotes = await buildVisibilityNotes(reel);
@@ -555,16 +778,16 @@ async function renderAndUploadThumbnail(
 export async function ensureReelReviewPackage(reelId: string): Promise<IReelReviewPackage> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
-  if (!reel.review?.title || (reel.thumbnailMode === "ai" && !reel.review.thumbnailUrl)) {
+  const needsReview = !reel.review?.title || (reel.thumbnailMode === "ai" && !reel.review.thumbnailUrl);
+  // A string (including an intentional empty one) means a human has already
+  // made the Instagram-copy decision. Only genuinely unset settings get an AI
+  // draft as part of the normal review package.
+  const needsInstagramCaption = typeof reel.instagramSettings?.caption !== "string";
+  if (needsReview || needsInstagramCaption) {
     const measuredCosts: MeasuredCostInput[] = [];
-    reel.review = await buildReelReviewPackage(reel, {
+    const callbacks: ReelReviewUsageCallbacks = {
       onReviewCopyUsage: (usage) => {
-        measuredCosts.push({
-          label: usage.label,
-          model: usage.model,
-          costUsd: usage.costUsd,
-          source: "actual",
-        });
+        measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
       },
       onThumbnailImageUsage: (usage) => {
         measuredCosts.push({
@@ -574,11 +797,87 @@ export async function ensureReelReviewPackage(reelId: string): Promise<IReelRevi
           source: usage.costUsd !== undefined ? "actual" : "estimated",
         });
       },
-    });
+    };
+    if (needsReview) reel.review = await buildReelReviewPackage(reel, callbacks);
+    if (needsInstagramCaption) {
+      await generateInstagramCaptionForReel(reel, (usage) => {
+        measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+      });
+    }
     applyMeasuredCostsToReel(reel, measuredCosts, "Review package");
     await reel.save();
   }
+  if (!reel.review) throw new Error("Review package could not be created");
   return reel.review;
+}
+
+/** Paid, explicit re-generation for an already-reviewed Reel. It replaces only
+ * the Instagram caption; YouTube title, description, tags, and thumbnails are
+ * intentionally untouched. */
+export async function regenerateInstagramCaption(reelId: string): Promise<IReel> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const measuredCosts: MeasuredCostInput[] = [];
+  await generateInstagramCaptionForReel(reel, (usage) => {
+    measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+  });
+  applyMeasuredCostsToReel(reel, measuredCosts, "Instagram caption");
+  await reel.save();
+  return reel;
+}
+
+/** Paid, explicit re-generation for an already-reviewed Reel. It replaces
+ * only the YouTube Shorts title and description. Upload tags, thumbnail,
+ * Instagram caption, and every rendered output deliberately remain intact. */
+export async function regenerateReelReviewCopy(reelId: string): Promise<IReel> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+
+  // Completed reels normally have a review package. Keep this endpoint safe
+  // for legacy records without silently rebuilding a thumbnail or Instagram
+  // caption (both are separate paid/intentional actions).
+  const savedTags = reel.review?.tags?.length ? [...reel.review.tags] : undefined;
+  const tags = savedTags ? normalizeTags(savedTags) : reviewTagsForReel(reel);
+  const current: IReelReviewPackage = reel.review ?? {
+    tags: savedTags ?? tags,
+    status: "ready",
+    updatedAt: new Date(),
+  };
+  const measuredCosts: MeasuredCostInput[] = [];
+  const { title, description } = await buildReviewCopy(reel, tags, (usage) => {
+    measuredCosts.push({
+      label: usage.label,
+      model: usage.model,
+      costUsd: usage.costUsd,
+      source: "actual",
+    });
+  });
+
+  reel.review = {
+    ...current,
+    title,
+    description,
+    // Never rewrite the user-managed upload-tag field as a side effect of
+    // copy regeneration. `tags` above is only the normalized prompt input.
+    tags: savedTags ?? tags,
+    updatedAt: new Date(),
+  };
+  reel.markModified("review");
+  applyMeasuredCostsToReel(reel, measuredCosts, "YouTube review copy");
+  recordOperationLog({
+    scope: "system",
+    event: "youtube.review_copy_generated",
+    message: "Generated YouTube Shorts title and description",
+    reelId: reel._id.toString(),
+    metadata: {
+      model: config.openRouterModel,
+      titleLength: title.length,
+      descriptionLength: description.length,
+      tagCount: (savedTags ?? tags).length,
+    },
+  });
+  await reel.save();
+  return reel;
 }
 
 export async function updateReelReview(
@@ -600,6 +899,17 @@ export async function updateReelReview(
     updatedAt: new Date(),
   };
   await reel.save();
+  recordOperationLog({
+    scope: "system",
+    event: "youtube.review_metadata_saved",
+    message: "Saved YouTube publishing metadata",
+    reelId: reel._id.toString(),
+    metadata: {
+      titleLength: reel.review.title?.length ?? 0,
+      descriptionLength: reel.review.description?.length ?? 0,
+      tagCount: reel.review.tags.length,
+    },
+  });
   return reel.review;
 }
 

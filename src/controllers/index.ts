@@ -43,6 +43,8 @@ export {
   getReelReviewController,
   updateReelReviewController,
   regenerateReelThumbnailController,
+  regenerateReelReviewCopyController,
+  regenerateInstagramCaptionController,
   revoiceReelController,
   promoteVoiceVariantController,
   listGameplayController,

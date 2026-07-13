@@ -280,7 +280,14 @@ export interface IInstagramPublish {
   updatedAt?: Date;
   publishedAt?: Date;
 }
-export interface IInstagramPublishSettings { caption?: string; shareToFeed: boolean; }
+export interface IInstagramPublishSettings {
+  caption?: string;
+  shareToFeed: boolean;
+  /** Provenance keeps an AI draft distinct from a later human edit. */
+  source?: "ai" | "manual" | "fallback";
+  generatedAt?: Date;
+  model?: string;
+}
 
 export interface IReelReviewPackage {
   title?: string;
@@ -867,7 +874,16 @@ const instagramPublishSchema = new Schema<IInstagramPublish>(
   },
   { _id: false }
 );
-const instagramSettingsSchema = new Schema<IInstagramPublishSettings>({ caption: String, shareToFeed: { type: Boolean, default: true } }, { _id: false });
+const instagramSettingsSchema = new Schema<IInstagramPublishSettings>(
+  {
+    caption: String,
+    shareToFeed: { type: Boolean, default: true },
+    source: { type: String, enum: ["ai", "manual", "fallback"] },
+    generatedAt: Date,
+    model: String,
+  },
+  { _id: false },
+);
 
 const reelReviewSchema = new Schema<IReelReviewPackage>(
   {

@@ -49,6 +49,8 @@ import {
   getReelReviewController,
   updateReelReviewController,
   regenerateReelThumbnailController,
+  regenerateReelReviewCopyController,
+  regenerateInstagramCaptionController,
   revoiceReelController,
   promoteVoiceVariantController,
   previewReelFrameThumbnailController,
@@ -151,6 +153,14 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .post("/:id/review/thumbnail", regenerateReelThumbnailController, {
     params: IdParams,
     body: UpdateReelReviewBody,
+  })
+
+  .post("/:id/review/copy", regenerateReelReviewCopyController, {
+    params: IdParams,
+  })
+
+  .post("/:id/instagram-caption", regenerateInstagramCaptionController, {
+    params: IdParams,
   })
 
   // Use a specific frame of the rendered video as the thumbnail

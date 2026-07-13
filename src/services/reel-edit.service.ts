@@ -59,6 +59,7 @@ import {
   type UpdateSignal,
 } from "./reddit-update-discovery.service";
 import { applyMeasuredCostsToReel, type MeasuredCostInput } from "./reel-cost.service";
+import { recordOperationLog } from "./operation-log.service";
 import {
   invalidateFinalDestinationRenders,
   resolveReelDestinations,
@@ -81,6 +82,12 @@ const ACTIVE_STATUSES: IReel["status"][] = [
   "rendering",
   "uploading",
 ];
+
+const INSTAGRAM_CAPTION_MAX_HASHTAGS = 5;
+
+function instagramCaptionHashtagCount(caption: string): number {
+  return (caption.match(/#[\p{L}\p{N}_]+/gu) ?? []).length;
+}
 
 function assertEditable(reel: IReel): void {
   if (ACTIVE_STATUSES.includes(reel.status)) {
@@ -613,7 +620,23 @@ export async function updateReelSettings(
     reel.markModified("editEffects");
   }
   if (patch.instagram !== undefined) {
-    reel.instagramSettings = { caption: patch.instagram.caption, shareToFeed: patch.instagram.shareToFeed ?? reel.instagramSettings?.shareToFeed ?? true };
+    if (
+      patch.instagram.caption !== undefined &&
+      instagramCaptionHashtagCount(patch.instagram.caption) >
+        INSTAGRAM_CAPTION_MAX_HASHTAGS
+    ) {
+      throw new Error(
+        `Instagram captions may contain at most ${INSTAGRAM_CAPTION_MAX_HASHTAGS} hashtags`,
+      );
+    }
+    const captionChanged = patch.instagram.caption !== undefined;
+    reel.instagramSettings = {
+      caption: captionChanged ? patch.instagram.caption : reel.instagramSettings?.caption,
+      shareToFeed: patch.instagram.shareToFeed ?? reel.instagramSettings?.shareToFeed ?? true,
+      source: captionChanged ? "manual" : reel.instagramSettings?.source,
+      generatedAt: captionChanged ? undefined : reel.instagramSettings?.generatedAt,
+      model: captionChanged ? undefined : reel.instagramSettings?.model,
+    };
     reel.markModified("instagramSettings");
   }
   if (patch.motionMode !== undefined) {
@@ -624,6 +647,19 @@ export async function updateReelSettings(
     reel.markModified("scenes");
   }
   await reel.save();
+  if (patch.instagram !== undefined) {
+    recordOperationLog({
+      scope: "system",
+      event: "instagram.publish_metadata_saved",
+      message: "Saved Instagram publishing metadata",
+      reelId: reel._id.toString(),
+      metadata: {
+        captionLength: reel.instagramSettings?.caption?.length ?? 0,
+        hashtagCount: instagramCaptionHashtagCount(reel.instagramSettings?.caption ?? ""),
+        shareToFeed: reel.instagramSettings?.shareToFeed ?? true,
+      },
+    });
+  }
 
   // Changing the art style or image model invalidates the stills; a new voice
   // invalidates the narration. Clear so the next produce regenerates them.
