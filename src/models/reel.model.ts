@@ -128,6 +128,35 @@ export interface IOutroSettings {
   footer?: string;
 }
 
+/**
+ * One publish destination for a reel. All destinations share the same body
+ * video (`reel.bodyVideoUrl`); each appends its OWN branded outro (channel card
+ * + spoken subscribe line) and produces its OWN final `outputUrl`. This is what
+ * lets one story become N channel-scoped videos where the only extra AI cost is
+ * the per-destination outro TTS.
+ */
+export interface IReelDestination {
+  /** Stable id used by studio/render to address this destination. */
+  id: string;
+  platform: "youtube" | "instagram";
+  /** Connected channel/account id (YouTubeChannel / InstagramChannel doc id). */
+  channelId: string;
+  channelLabel?: string;
+  /** Per-destination outro copy overrides (channel name/handle/spoken line…). */
+  outro?: IOutroSettings;
+  /** Skip the branded end card + spoken line for just this destination. */
+  skipBrandedOutro?: boolean;
+  /** Cached outro narration mp3 — reused while the spoken line is unchanged. */
+  outroAudioUrl?: string;
+  /** Final rendered video (body + this destination's outro). */
+  outputUrl?: string;
+  /** Seconds the outro added over the shared body. */
+  durationAdded?: number;
+  status: "pending" | "rendering" | "ready" | "failed";
+  error?: string;
+  createdAt: Date;
+}
+
 /** Explicit voice pick made at creation time — overrides the tier default
  *  and any niche voice override (config/niche-styles.ts) for this reel's
  *  initial render. Unset fields fall back to the normal resolution chain. */
@@ -360,6 +389,13 @@ export interface IReel extends Document {
   /** Connected Instagram account used for rendered outro branding. */
   outroInstagramChannelId?: string;
   outro?: IOutroSettings;
+  /**
+   * Multi-channel publish targets. When present (length ≥ 1), each renders its
+   * own outro + `outputUrl` over the shared body. Legacy reels leave this empty
+   * and are treated as a single implicit destination from the `outro*` fields
+   * above (see resolveReelDestinations).
+   */
+  destinations?: IReelDestination[];
   /** When true, skip the multi-part "Stay tuned for part N" segment (Reddit). */
   skipPartOutro?: boolean;
   /** When true, skip the branded channel end card + spoken subscribe line. */
@@ -504,6 +540,28 @@ const outroSettingsSchema = new Schema<IOutroSettings>(
     subtitle: String,
     cta: String,
     footer: String,
+  },
+  { _id: false }
+);
+
+const reelDestinationSchema = new Schema<IReelDestination>(
+  {
+    id: { type: String, required: true },
+    platform: { type: String, enum: ["youtube", "instagram"], required: true },
+    channelId: { type: String, required: true },
+    channelLabel: String,
+    outro: outroSettingsSchema,
+    skipBrandedOutro: Boolean,
+    outroAudioUrl: String,
+    outputUrl: String,
+    durationAdded: Number,
+    status: {
+      type: String,
+      enum: ["pending", "rendering", "ready", "failed"],
+      default: "pending",
+    },
+    error: String,
+    createdAt: { type: Date, default: Date.now },
   },
   { _id: false }
 );
@@ -787,6 +845,7 @@ const reelSchema = new Schema<IReel>(
     outroChannelId: String,
     outroInstagramChannelId: String,
     outro: outroSettingsSchema,
+    destinations: { type: [reelDestinationSchema], default: undefined },
     skipPartOutro: { type: Boolean, default: false },
     skipBrandedOutro: { type: Boolean, default: false },
     thumbnailMode: { type: String, enum: ["frame", "ai"], default: "frame" },

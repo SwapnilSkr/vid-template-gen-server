@@ -41,6 +41,10 @@ import {
   moveSeriesBoundary,
   mergePartIntoPrevious,
   updateRedditCard,
+  listReelDestinations,
+  addReelDestination,
+  removeReelDestination,
+  updateReelDestinationOutro,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { TTS_VOICE_CATALOG } from "../config/models";
@@ -70,6 +74,9 @@ import type {
   TReplanReelBody,
   TReplanReelSeriesBody,
   TMoveBoundaryBody,
+  TDestinationInputBody,
+  TDestinationParams,
+  TUpdateDestinationOutroBody,
   TCustomThumbnailBody,
   TStageThumbnailDraftBody,
   TStageThumbnailImageBody,
@@ -168,6 +175,7 @@ export async function createReelController({ body, set }: CreateReelContext) {
       outroChannelId: body.outroChannelId,
       outroInstagramChannelId: body.outroInstagramChannelId,
       outro: body.outro,
+      destinations: body.destinations,
       thumbnailMode: body.thumbnailMode,
       imageModel: body.imageModel,
       artStyleId: body.artStyleId,
@@ -732,6 +740,17 @@ interface MoveBoundaryContext extends Context {
   params: TIdParams;
   body: TMoveBoundaryBody;
 }
+interface AddDestinationContext extends Context {
+  params: TIdParams;
+  body: TDestinationInputBody;
+}
+interface DestinationContext extends Context {
+  params: TDestinationParams;
+}
+interface UpdateDestinationOutroContext extends Context {
+  params: TDestinationParams;
+  body: TUpdateDestinationOutroBody;
+}
 interface DraftAssetContext extends Context {
   params: TDraftAssetParams;
 }
@@ -889,6 +908,38 @@ export async function moveSeriesBoundaryController({
 /** Merge this part's lines into the previous part, then delete this part. */
 export async function mergePartController({ params, set }: GetReelContext) {
   return runEdit(set, () => mergePartIntoPrevious(params.id));
+}
+
+// ---- Multi-channel destinations ----
+
+/** List a reel's publish destinations (legacy outro fields resolve as one). */
+export async function listReelDestinationsController({ params, set }: GetReelContext) {
+  return runEdit(set, () => listReelDestinations(params.id));
+}
+
+/** Add a channel destination; renders its outro now when already produced. */
+export async function addReelDestinationController({ params, body, set }: AddDestinationContext) {
+  return runEdit(set, () =>
+    addReelDestination(params.id, {
+      platform: body.platform,
+      channelId: body.channelId,
+      outro: body.outro,
+    })
+  );
+}
+
+/** Remove a destination (keeps at least one). */
+export async function removeReelDestinationController({ params, set }: DestinationContext) {
+  return runEdit(set, () => removeReelDestination(params.id, params.destId));
+}
+
+/** Update one destination's outro copy; re-renders that outro when produced. */
+export async function updateReelDestinationOutroController({
+  params,
+  body,
+  set,
+}: UpdateDestinationOutroContext) {
+  return runEdit(set, () => updateReelDestinationOutro(params.id, params.destId, body.outro));
 }
 
 export async function saveReelEditDraftController({

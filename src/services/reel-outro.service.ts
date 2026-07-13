@@ -3,7 +3,13 @@ import ffmpeg from "fluent-ffmpeg";
 import { unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
-import { InstagramChannel, YouTubeChannel, type IReel } from "../models";
+import {
+  InstagramChannel,
+  YouTubeChannel,
+  type IReel,
+  type IReelDestination,
+  type IOutroSettings,
+} from "../models";
 import { ensureDir, generateFilename } from "../utils";
 import { generateNarration, type MediaUsageCallback } from "./openrouter-media.service";
 
@@ -29,13 +35,62 @@ export interface OutroTts {
   format?: "mp3" | "pcm";
 }
 
-export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undefined> {
-  const explicitInstagram = reel.outroInstagramChannelId
-    ? await InstagramChannel.findOne({ channelKey: reel.outroInstagramChannelId, status: "active" })
+/** The channel/copy fields brand resolution reads — a reel or one of its destinations. */
+export interface OutroSource {
+  outroChannelId?: string;
+  outroInstagramChannelId?: string;
+  outro?: IOutroSettings;
+}
+
+/** Map a destination onto the OutroSource shape resolveOutroBrand consumes. */
+export function destinationOutroSource(dest: IReelDestination): OutroSource {
+  return {
+    outroChannelId: dest.platform === "youtube" ? dest.channelId : undefined,
+    outroInstagramChannelId: dest.platform === "instagram" ? dest.channelId : undefined,
+    outro: dest.outro,
+  };
+}
+
+/**
+ * The implicit PRIMARY destination, synthesized from the reel's legacy `outro*`
+ * fields. It always renders to the canonical `${reelId}.mp4` and mirrors
+ * `reel.outputUrl` / `reel.outroAudioUrl`, so existing reels keep working with no
+ * migration. Its outro is edited the legacy way (updateReelSettings), not via the
+ * destination endpoints — those manage the EXTRA channels in `reel.destinations`.
+ */
+export function primaryDestination(reel: IReel): IReelDestination {
+  const platform: "youtube" | "instagram" = reel.outroInstagramChannelId ? "instagram" : "youtube";
+  return {
+    id: "primary",
+    platform,
+    channelId: reel.outroInstagramChannelId || reel.outroChannelId || "",
+    outro: reel.outro,
+    skipBrandedOutro: reel.skipBrandedOutro,
+    outroAudioUrl: reel.outroAudioUrl,
+    outputUrl: reel.outputUrl,
+    status: reel.outputUrl ? "ready" : "pending",
+    createdAt: reel.createdAt ?? new Date(),
+  };
+}
+
+/** Every destination to render/publish: the primary plus any extra channels. */
+export function resolveReelDestinations(reel: IReel): IReelDestination[] {
+  return [primaryDestination(reel), ...(reel.destinations ?? [])];
+}
+
+export async function resolveOutroBrand(
+  reel: IReel,
+  source?: OutroSource
+): Promise<OutroBrand | undefined> {
+  // Legacy calls resolve from the reel's own outro* fields; destination-scoped
+  // renders pass that destination's channel/copy instead.
+  const src = source ?? reel;
+  const explicitInstagram = src.outroInstagramChannelId
+    ? await InstagramChannel.findOne({ channelKey: src.outroInstagramChannelId, status: "active" })
     : undefined;
-  const explicitChannel = reel.outroChannelId
+  const explicitChannel = src.outroChannelId
     ? await YouTubeChannel.findOne({
-        channelKey: reel.outroChannelId,
+        channelKey: src.outroChannelId,
         status: "active",
       })
     : undefined;
@@ -44,14 +99,14 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
     const channel = explicitChannel ?? (await findChannelForNiche(["reddit", "reddit_stories", "aita"]));
     return {
       kind: "reddit",
-      channelName: reel.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
-      channelHandle: reel.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
+      channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
+      channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
       logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
-      spokenLine: reel.outro?.spokenLine?.trim(),
-      title: reel.outro?.title?.trim(),
-      subtitle: reel.outro?.subtitle?.trim(),
-      cta: reel.outro?.cta?.trim(),
-      footer: reel.outro?.footer?.trim(),
+      spokenLine: src.outro?.spokenLine?.trim(),
+      title: src.outro?.title?.trim(),
+      subtitle: src.outro?.subtitle?.trim(),
+      cta: src.outro?.cta?.trim(),
+      footer: src.outro?.footer?.trim(),
     };
   }
 
@@ -60,14 +115,14 @@ export async function resolveOutroBrand(reel: IReel): Promise<OutroBrand | undef
       explicitChannel ?? (await findChannelForNiche(["horror", "horror_comic", reel.genre ?? ""]));
     return {
       kind: "horror",
-      channelName: reel.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
-      channelHandle: reel.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
+      channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
+      channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
       logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
-      spokenLine: reel.outro?.spokenLine?.trim(),
-      title: reel.outro?.title?.trim(),
-      subtitle: reel.outro?.subtitle?.trim(),
-      cta: reel.outro?.cta?.trim(),
-      footer: reel.outro?.footer?.trim(),
+      spokenLine: src.outro?.spokenLine?.trim(),
+      title: src.outro?.title?.trim(),
+      subtitle: src.outro?.subtitle?.trim(),
+      cta: src.outro?.cta?.trim(),
+      footer: src.outro?.footer?.trim(),
     };
   }
 
@@ -89,8 +144,14 @@ export async function appendBrandedOutro(
   onUsage?: MediaUsageCallback,
   options: {
     backgroundVideo?: string;
-    /** Skip cached reel.outroAudioUrl (e.g. after spoken-line change cleared it). */
+    /** Skip cached outro audio (e.g. after spoken-line change cleared it). */
     forceFreshOutroAudio?: boolean;
+    /**
+     * Render this destination's outro instead of the reel's legacy outro fields:
+     * its channel branding, its cached outro audio, and unique temp filenames so
+     * sibling destinations don't collide.
+     */
+    destination?: IReelDestination;
   } = {}
 ): Promise<
   | {
@@ -103,11 +164,14 @@ export async function appendBrandedOutro(
     }
   | undefined
 > {
-  if (reel.skipBrandedOutro) return undefined;
+  const dest = options.destination;
+  if ((dest ? dest.skipBrandedOutro : reel.skipBrandedOutro)) return undefined;
 
-  const brand = await resolveOutroBrand(reel);
+  const brand = await resolveOutroBrand(reel, dest ? destinationOutroSource(dest) : undefined);
   if (!brand) return undefined;
 
+  const key = dest ? `${reel._id}_${dest.id}` : `${reel._id}`;
+  const cachedOutroAudioUrl = dest ? dest.outroAudioUrl : reel.outroAudioUrl;
   const tmp: string[] = [];
   let retainAudioPath: string | undefined;
   try {
@@ -118,9 +182,9 @@ export async function appendBrandedOutro(
 
     let audioPath: string;
     let outroAudioGenerated = false;
-    if (!options.forceFreshOutroAudio && reel.outroAudioUrl) {
-      audioPath = join(config.processingPath, `${reel._id}_outro_reused.mp3`);
-      const res = await fetch(reel.outroAudioUrl);
+    if (!options.forceFreshOutroAudio && cachedOutroAudioUrl) {
+      audioPath = join(config.processingPath, `${key}_outro_reused.mp3`);
+      const res = await fetch(cachedOutroAudioUrl);
       if (!res.ok) {
         throw new Error(`Could not reuse outro audio (${res.status})`);
       }
@@ -146,11 +210,11 @@ export async function appendBrandedOutro(
       nextRedditPart(reel)
     );
     tmp.push(cardPath);
-    const outroClip = join(config.processingPath, `${reel._id}_outro_clip.mp4`);
+    const outroClip = join(config.processingPath, `${key}_outro_clip.mp4`);
     tmp.push(outroClip);
     await renderOutroClip(cardPath, audioPath, outroClip, brand.kind, options.backgroundVideo);
 
-    const output = join(config.processingPath, `${reel._id}_with_outro.mp4`);
+    const output = join(config.processingPath, `${key}_with_outro.mp4`);
     const mainDuration = await videoDuration(inputVideo);
     await appendWithoutOverlap(inputVideo, outroClip, output);
     const durationAdded = await videoDuration(outroClip);

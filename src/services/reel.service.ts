@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import ffmpeg from "fluent-ffmpeg";
 import { join } from "node:path";
-import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion, type IRedditStoryPayload } from "../models";
+import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion, type IRedditStoryPayload, type IReelDestination } from "../models";
 import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
 import { ensureDir, cleanupDirectory, cleanupFiles, cleanupRenderScratch } from "../utils";
@@ -35,7 +35,7 @@ import {
 import { generateImage, generateNarration } from "./openrouter-media.service";
 import { renderImageKenBurns, applyEditEffects, hasEditEffects, finishFromAssembly, type RenderScene } from "./reel-render.service";
 import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
-import { appendBrandedOutro } from "./reel-outro.service";
+import { appendBrandedOutro, type OutroTts } from "./reel-outro.service";
 import { assertFfmpegReady, isCaptionBurnError } from "./ffmpeg-capability.service";
 import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
@@ -77,6 +77,8 @@ interface CreateReelOptions {
   outroChannelId?: string;
   outroInstagramChannelId?: string;
   outro?: IReel["outro"];
+  /** Multi-channel targets — one video per destination, each with its own outro. */
+  destinations?: { platform: "youtube" | "instagram"; channelId: string; outro?: IReel["outro"] }[];
   thumbnailMode?: IReel["thumbnailMode"];
   imageModel?: string;
   artStyleId?: string;
@@ -91,6 +93,21 @@ interface CreateReelOptions {
   ttsFormat?: "mp3" | "pcm";
   selectedStoryId?: string;
   selectedSeedUrl?: string;
+}
+
+/** Build the initial destinations[] for a new reel from create-flow input. */
+function buildCreateDestinations(
+  input?: CreateReelOptions["destinations"]
+): IReelDestination[] | undefined {
+  if (!input?.length) return undefined;
+  return input.map((dest) => ({
+    id: randomUUID(),
+    platform: dest.platform,
+    channelId: dest.channelId,
+    outro: dest.outro,
+    status: "pending" as const,
+    createdAt: new Date(),
+  }));
 }
 
 /** Default per-scene motion type for a reel's motion mode. */
@@ -221,6 +238,7 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     outroChannelId: options.outroChannelId,
     outroInstagramChannelId: options.outroInstagramChannelId,
     outro: options.outro,
+    destinations: buildCreateDestinations(options.destinations),
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
     voiceOverride,
@@ -246,6 +264,9 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
   let hook: string | undefined;
   let redditStory: IRedditStoryPayload | undefined;
   let reservedStoryId: string | undefined;
+  const storyCosts: MeasuredCostInput[] = [];
+  const onStoryUsage = (usage: { label: string; model: string; costUsd: number }) =>
+    storyCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
 
   if (options.selectedStoryId) {
     console.log(`📝 Creating Reddit reel from bank story=${options.selectedStoryId}`);
@@ -288,7 +309,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     console.log(
       `📝 Creating Reddit reel (bank/auto) source=${source} genre=${options.genre ?? "any"} topic=auto`
     );
-    const story = await takeNextStory(source, tier as Tier, undefined, {
+    const story = await takeNextStory(source, tier as Tier, onStoryUsage, {
       genre: options.genre,
       source,
     });
@@ -318,6 +339,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     outroChannelId: options.outroChannelId,
     outroInstagramChannelId: options.outroInstagramChannelId,
     outro: options.outro,
+    destinations: buildCreateDestinations(options.destinations),
     thumbnailMode: options.thumbnailMode ?? "frame",
     imageModelOverride: options.imageModel,
     voiceOverride: toVoiceOverride(options),
@@ -329,6 +351,7 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     hook,
     redditStory,
   });
+  if (storyCosts.length) applyMeasuredCostsToReel(reel, storyCosts, "Story");
   await reel.save();
   if (reservedStoryId) await markStoryReel(reservedStoryId, reel._id.toString());
   if (pipelineMode === "review") await enqueueReelPlan(reel._id.toString());
@@ -354,6 +377,7 @@ async function createGameplayReelSeries(
   console.log(
     `📝 Creating Reddit series (sync story) source=${source} parts=${String(parts)} genre=${options.genre ?? "any"}${options.selectedSeedUrl ? " seed=selected" : ""}${options.selectedStoryId ? " bank=selected" : ""}`
   );
+  const storyCosts: MeasuredCostInput[] = [];
   const plannedParts = await generateStorySeries(source, {
     topic: autoTopic ? undefined : topic,
     genre: options.genre,
@@ -363,6 +387,8 @@ async function createGameplayReelSeries(
     parts: parts === "off" ? (source === "verbatim" ? 1 : "auto") : parts,
     selectedStoryId: options.selectedStoryId,
     selectedSeedUrl: options.selectedSeedUrl,
+    onLlmUsage: (usage) =>
+      storyCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" }),
   });
   console.log(
     `📝 Reddit series ready in ${((Date.now() - seriesStartedAt) / 1000).toFixed(1)}s: ${plannedParts.length} part(s)`
@@ -385,6 +411,7 @@ async function createGameplayReelSeries(
       outroChannelId: options.outroChannelId,
       outroInstagramChannelId: options.outroInstagramChannelId,
       outro: options.outro,
+      destinations: buildCreateDestinations(options.destinations),
       thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
       voiceOverride: toVoiceOverride(options),
@@ -407,6 +434,13 @@ async function createGameplayReelSeries(
 
   if (reservedStoryId && reels[0]) {
     await markStoryReel(reservedStoryId, reels[0]._id.toString());
+  }
+
+  // Story generation (cut selection / rewrite / cliffhanger judge) is one shared
+  // LLM spend for the whole set — record it on part 1 so it shows in the ledger.
+  if (storyCosts.length && reels[0]) {
+    applyMeasuredCostsToReel(reels[0], storyCosts, seriesId ? "Series story" : "Story");
+    await reels[0].save();
   }
 
   console.log(
@@ -486,6 +520,7 @@ async function createHorrorReelSeries(
       outroChannelId: options.outroChannelId,
       outroInstagramChannelId: options.outroInstagramChannelId,
       outro: options.outro,
+      destinations: buildCreateDestinations(options.destinations),
       thumbnailMode: options.thumbnailMode ?? "frame",
       imageModelOverride: options.imageModel,
       voiceOverride,
@@ -868,6 +903,81 @@ async function persistOutroAudio(
   }
 }
 
+/**
+ * Render each destination's branded outro onto the SHARED body and upload one
+ * final video per destination. The PRIMARY (legacy `reel.outro*` fields) keeps the
+ * canonical keys (`${reelId}.mp4` / `${reelId}_outro.mp3`) and mirrors
+ * `reel.outputUrl` / `reel.outroAudioUrl`. Each EXTRA channel in `reel.destinations`
+ * uploads to `${reelId}_${destId}.mp4` and records its own status/output. Only outro
+ * TTS is (re)generated, so added cost scales with destinations, not the body.
+ */
+async function renderReelDestinations(
+  reel: IReel,
+  bodyPath: string,
+  tts: OutroTts,
+  opts: {
+    backgroundVideo?: string;
+    localFiles: string[];
+    forceFreshOutroAudio?: boolean;
+    onOutroUsage?: (usage: { costUsd?: number }) => void;
+  }
+): Promise<{
+  primaryDurationAdded: number;
+  primaryOutro: Awaited<ReturnType<typeof appendBrandedOutro>>;
+}> {
+  const reelId = reel._id.toString();
+  const extras = reel.destinations ?? [];
+  const targets: { dest: IReelDestination | undefined; isPrimary: boolean }[] = [
+    { dest: undefined, isPrimary: true }, // primary uses the legacy reel.outro* fields
+    ...extras.map((dest) => ({ dest, isPrimary: false })),
+  ];
+  let primaryDurationAdded = 0;
+  let primaryOutro: Awaited<ReturnType<typeof appendBrandedOutro>> = undefined;
+
+  for (const { dest, isPrimary } of targets) {
+    const outroResult = await appendBrandedOutro(bodyPath, reel, tts, opts.onOutroUsage, {
+      backgroundVideo: opts.backgroundVideo,
+      forceFreshOutroAudio: opts.forceFreshOutroAudio,
+      destination: dest,
+    });
+    const videoPath = outroResult?.videoPath ?? bodyPath; // skip/failed outro → bare body
+    const durationAdded = outroResult?.durationAdded ?? 0;
+    if (outroResult) opts.localFiles.push(outroResult.videoPath);
+
+    const destId = dest?.id;
+    const videoKey = isPrimary ? `${reelId}.mp4` : `${reelId}_${destId}.mp4`;
+    const prevVideo = isPrimary ? reel.outputUrl : dest?.outputUrl;
+    const outputUrl = await uploadVideo(await readFile(videoPath), "reels", videoKey);
+    if (prevVideo && prevVideo !== outputUrl) await deleteFromS3(prevVideo).catch(() => {});
+
+    // Persist outro narration; reuse cached URL when nothing was regenerated.
+    let outroAudioUrl = isPrimary ? reel.outroAudioUrl : dest?.outroAudioUrl;
+    if (outroResult?.outroAudioGenerated) {
+      opts.localFiles.push(outroResult.outroAudioPath);
+      const audioKey = isPrimary ? `${reelId}_outro.mp3` : `${reelId}_${destId}_outro.mp3`;
+      const prevAudio = outroAudioUrl;
+      outroAudioUrl = await uploadAudio(await readFile(outroResult.outroAudioPath), audioKey);
+      if (prevAudio && prevAudio !== outroAudioUrl) await deleteFromS3(prevAudio).catch(() => {});
+    }
+
+    if (isPrimary) {
+      primaryDurationAdded = durationAdded;
+      primaryOutro = outroResult;
+      reel.outputUrl = outputUrl;
+      reel.outroAudioUrl = outroAudioUrl;
+    } else if (dest) {
+      dest.status = "ready";
+      dest.outputUrl = outputUrl;
+      dest.outroAudioUrl = outroAudioUrl;
+      dest.durationAdded = durationAdded;
+      dest.error = undefined;
+    }
+  }
+
+  if (extras.length) reel.markModified("destinations");
+  return { primaryDurationAdded, primaryOutro };
+}
+
 /** Upload the pre-outro body so later outro-only jobs can skip a full rebuild. */
 async function persistBodyVideo(
   reel: IReel,
@@ -1093,11 +1203,12 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
     }
 
     const hadPriorOutput = Boolean(reel.outputUrl);
-    const outroResult = await appendBrandedOutro(
-      bodyPath,
-      reel,
-      tts,
-      (usage) => {
+    await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
+    // Re-render every destination's outro onto the cached body.
+    const { primaryOutro } = await renderReelDestinations(reel, bodyPath, tts, {
+      backgroundVideo: gameplayPath,
+      localFiles,
+      onOutroUsage: (usage) => {
         measuredCosts.push({
           label: "Outro narration",
           model: `${tts.model}/${tts.voice}`,
@@ -1105,38 +1216,24 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
           source: usage.costUsd !== undefined ? "actual" : "estimated",
         });
       },
-      { backgroundVideo: gameplayPath }
-    );
+    });
 
-    let finalPath = bodyPath;
     let assPath: string | undefined;
-    await persistOutroAudio(reel, outroResult, localFiles);
-    if (outroResult) {
-      localFiles.push(outroResult.videoPath);
-      finalPath = outroResult.videoPath;
-      if (outroResult.subtitle && reel.subtitlesUrl) {
-        // Best-effort: rebuild captions file only when we already have one.
-        try {
-          const existing = await fetch(reel.subtitlesUrl);
-          if (existing.ok) {
-            assPath = join(config.processingPath, `${reelId}_outro_only.ass`);
-            await writeFile(assPath, Buffer.from(await existing.arrayBuffer()));
-            await appendBouncingCaptionCues(assPath, [outroResult.subtitle]);
-            localFiles.push(assPath);
-          }
-        } catch {
-          /* keep prior subtitles */
+    if (primaryOutro?.subtitle && reel.subtitlesUrl) {
+      // Best-effort: rebuild captions file only when we already have one.
+      try {
+        const existing = await fetch(reel.subtitlesUrl);
+        if (existing.ok) {
+          assPath = join(config.processingPath, `${reelId}_outro_only.ass`);
+          await writeFile(assPath, Buffer.from(await existing.arrayBuffer()));
+          await appendBouncingCaptionCues(assPath, [primaryOutro.subtitle]);
+          localFiles.push(assPath);
         }
+      } catch {
+        /* keep prior subtitles */
       }
     }
 
-    await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
-    const videoBuffer = await readFile(finalPath);
-    const prevOutput = reel.outputUrl;
-    reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
-    if (prevOutput && prevOutput !== reel.outputUrl) {
-      await deleteFromS3(prevOutput).catch(() => {});
-    }
     if (assPath) {
       const assContent = await readFile(assPath, "utf-8");
       const prevSubs = reel.subtitlesUrl;
@@ -1849,11 +1946,13 @@ async function processGameplayReel(
 
     await persistBodyVideo(reel, result.videoPath, localFiles);
 
-    const outroResult = await appendBrandedOutro(
-      result.videoPath,
-      reel,
-      tts,
-      (usage) => {
+    await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
+    // Render + upload one final video per destination (each with its own outro)
+    // onto the shared body. Legacy reels resolve to a single implicit destination.
+    const { primaryDurationAdded } = await renderReelDestinations(reel, result.videoPath, tts, {
+      backgroundVideo: gameplayPath,
+      localFiles,
+      onOutroUsage: (usage) => {
         gameplayMeasuredCosts.push({
           label: "Outro narration",
           model: `${tts.model}/${tts.voice}`,
@@ -1861,26 +1960,13 @@ async function processGameplayReel(
           source: usage.costUsd !== undefined ? "actual" : "estimated",
         });
       },
-      { backgroundVideo: gameplayPath }
-    );
-    await persistOutroAudio(reel, outroResult, localFiles);
-    if (outroResult) {
-      localFiles.push(outroResult.videoPath);
-      result.videoPath = outroResult.videoPath;
-      result.totalDuration += outroResult.durationAdded;
-    }
-    localFiles.push(result.videoPath, result.assPath);
+    });
+    result.totalDuration += primaryDurationAdded;
+    localFiles.push(result.assPath);
     if (reel.scenes[0]) reel.scenes[0].duration = result.totalDuration;
 
-    await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
     reel.captionsBurned = true;
     reel.captionBurnError = undefined;
-    const videoBuffer = await readFile(result.videoPath);
-    const prevOutput = reel.outputUrl;
-    reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
-    if (prevOutput && prevOutput !== reel.outputUrl) {
-      await deleteFromS3(prevOutput).catch(() => {});
-    }
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
     if (!reel.review) {

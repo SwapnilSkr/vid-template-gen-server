@@ -29,6 +29,8 @@ export {
   type IStoryBible,
   type IHorrorReferencePayload,
   type IRedditStoryPayload,
+  type IReelDestination,
+  type IOutroSettings,
   type IEditDraftBaseline,
   type ReelMotionMode,
   type ICaptionStyle,

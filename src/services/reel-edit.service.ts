@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   Reel,
+  InstagramChannel,
+  YouTubeChannel,
   type IReel,
   type IScene,
   type ICaptionStyle,
@@ -9,6 +11,8 @@ import {
   type ISceneMotion,
   type ReelMotionMode,
   type IRedditStoryPayload,
+  type IReelDestination,
+  type IOutroSettings,
 } from "../models";
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce, removeReelJob } from "../queue/queues";
@@ -30,6 +34,8 @@ import {
   markStoryReel,
   materializeFromSeed,
 } from "./story.service";
+import { applyMeasuredCostsToReel, type MeasuredCostInput } from "./reel-cost.service";
+import { resolveReelDestinations } from "./reel-outro.service";
 import type { StorySource } from "../models";
 import type { Tier } from "../config/models";
 
@@ -686,6 +692,104 @@ export async function regenerateReel(
   return loadReel(reelId);
 }
 
+// ---- Multi-channel destinations ----
+// `reel.destinations` holds the EXTRA channels beyond the primary. The primary is
+// the legacy `reel.outro*` fields (edited via updateReelSettings). These endpoints
+// manage the extras; resolveReelDestinations() = [primary, ...extras].
+
+/** True once the reel has a rendered body, so an outro-only re-render is possible. */
+function canRerenderOutro(reel: IReel): boolean {
+  return Boolean(reel.bodyVideoUrl) && !ACTIVE_STATUSES.includes(reel.status) && reel.scenes.length > 0;
+}
+
+async function resolveChannelLabel(
+  platform: "youtube" | "instagram",
+  channelId: string
+): Promise<string> {
+  if (platform === "youtube") {
+    const channel = await YouTubeChannel.findOne({ channelKey: channelId, status: "active" });
+    if (!channel) throw new Error("YouTube channel not found or inactive");
+    return channel.googleChannelTitle || channel.label;
+  }
+  const channel = await InstagramChannel.findOne({ channelKey: channelId, status: "active" });
+  if (!channel) throw new Error("Instagram account not found or inactive");
+  return channel.name || channel.username || channel.label;
+}
+
+/** List all destinations for a reel (primary + extras). */
+export async function listReelDestinations(reelId: string): Promise<IReelDestination[]> {
+  const reel = await loadReel(reelId);
+  return resolveReelDestinations(reel);
+}
+
+/** Add an EXTRA channel destination. Renders its outro now when the reel is
+ *  already produced; otherwise it renders at first produce. */
+export async function addReelDestination(
+  reelId: string,
+  input: { platform: "youtube" | "instagram"; channelId: string; outro?: IOutroSettings }
+): Promise<IReel> {
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+  const channelLabel = await resolveChannelLabel(input.platform, input.channelId);
+  const primaryPlatform = reel.outroInstagramChannelId ? "instagram" : "youtube";
+  const primaryChannel = reel.outroInstagramChannelId || reel.outroChannelId;
+  if (input.platform === primaryPlatform && input.channelId === primaryChannel) {
+    throw new Error("That channel is already the primary destination for this reel");
+  }
+  if (!reel.destinations) reel.destinations = [];
+  if (reel.destinations.some((d) => d.platform === input.platform && d.channelId === input.channelId)) {
+    throw new Error("That channel is already a destination for this reel");
+  }
+  reel.destinations.push({
+    id: randomUUID(),
+    platform: input.platform,
+    channelId: input.channelId,
+    channelLabel,
+    outro: input.outro,
+    status: "pending",
+    createdAt: new Date(),
+  });
+  reel.markModified("destinations");
+  await reel.save();
+  if (canRerenderOutro(reel)) return regenerateReel(reelId, "outro_only");
+  return loadReel(reelId);
+}
+
+/** Remove an extra destination and its dedicated media. */
+export async function removeReelDestination(reelId: string, destId: string): Promise<IReel> {
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+  const index = reel.destinations?.findIndex((d) => d.id === destId) ?? -1;
+  if (index === -1 || !reel.destinations) throw new Error("Destination not found");
+  const [removed] = reel.destinations.splice(index, 1);
+  reel.markModified("destinations");
+  await reel.save();
+  await deleteS3Urls(
+    [removed.outputUrl, removed.outroAudioUrl].filter((url): url is string => Boolean(url))
+  );
+  return loadReel(reelId);
+}
+
+/** Update one extra destination's outro copy; re-renders its outro when produced. */
+export async function updateReelDestinationOutro(
+  reelId: string,
+  destId: string,
+  outro: IOutroSettings
+): Promise<IReel> {
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+  const dest = reel.destinations?.find((d) => d.id === destId);
+  if (!dest) throw new Error("Destination not found");
+  const spokenChanged = (dest.outro?.spokenLine ?? "") !== (outro.spokenLine ?? "");
+  dest.outro = outro;
+  if (spokenChanged) dest.outroAudioUrl = undefined; // force fresh TTS on re-render
+  dest.status = "pending";
+  reel.markModified("destinations");
+  await reel.save();
+  if (canRerenderOutro(reel)) return regenerateReel(reelId, "outro_only");
+  return loadReel(reelId);
+}
+
 /**
  * Resume a failed produce job. Reuses any scene stills/narration already on S3
  * (images + TTS are the expensive part) and only re-runs render→upload.
@@ -866,6 +970,7 @@ export async function replanReelSeries(
     reservedStoryId = story.storyId;
   }
 
+  const storyCosts: MeasuredCostInput[] = [];
   const plannedParts = await generateStorySeries(source, {
     genre: anchor.genre,
     tier: anchor.tier as Tier,
@@ -873,6 +978,8 @@ export async function replanReelSeries(
     selectedStoryId: patch.selectedStoryId,
     selectedSeedUrl: patch.selectedSeedUrl,
     excludeReelIds,
+    onLlmUsage: (usage) =>
+      storyCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" }),
   });
 
   const nextSeriesId = plannedParts.length > 1 ? anchor.seriesId ?? randomUUID() : undefined;
@@ -933,6 +1040,13 @@ export async function replanReelSeries(
 
   if (reservedStoryId && updatedReels[0]) {
     await markStoryReel(reservedStoryId, updatedReels[0]._id.toString());
+  }
+
+  // Re-plan story-gen LLM spend (cut selection / rewrite / cliffhanger judge)
+  // is shared across parts — record it on part 1's ledger.
+  if (storyCosts.length && updatedReels[0]) {
+    applyMeasuredCostsToReel(updatedReels[0], storyCosts, "Series re-plan");
+    await updatedReels[0].save();
   }
 
   await deleteS3Urls(staleMedia);

@@ -26,6 +26,9 @@ import {
   ReplanReelBody,
   ReplanReelSeriesBody,
   MoveBoundaryBody,
+  DestinationInputBody,
+  DestinationParams,
+  UpdateDestinationOutroBody,
   DraftAssetParams,
   SaveShortsCoverBody,
 } from "../types/guards";
@@ -66,6 +69,10 @@ import {
   replanReelSeriesController,
   moveSeriesBoundaryController,
   mergePartController,
+  listReelDestinationsController,
+  addReelDestinationController,
+  removeReelDestinationController,
+  updateReelDestinationOutroController,
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,
@@ -254,6 +261,20 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   // Merge this part's lines into the previous part, then delete this part
   .post("/:id/merge-into-previous", mergePartController, {
     params: IdParams,
+  })
+
+  // Multi-channel destinations
+  .get("/:id/destinations", listReelDestinationsController, { params: IdParams })
+  .post("/:id/destinations", addReelDestinationController, {
+    params: IdParams,
+    body: DestinationInputBody,
+  })
+  .delete("/:id/destinations/:destId", removeReelDestinationController, {
+    params: DestinationParams,
+  })
+  .put("/:id/destinations/:destId/outro", updateReelDestinationOutroController, {
+    params: DestinationParams,
+    body: UpdateDestinationOutroBody,
   })
 
   // Reorder scenes (2-segment path — declared before the :index routes)

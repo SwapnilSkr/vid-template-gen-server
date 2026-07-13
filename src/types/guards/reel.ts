@@ -43,11 +43,21 @@ export const CreateReelBody = t.Object({
   gameplayKey: t.Optional(t.String()),
   /** explicit global S3 key (horror-audio/xxx.mp3) for horror background bed */
   horrorAudioKey: t.Optional(t.String()),
-  /** connected YouTube channel id used for rendered outro branding */
+  /** connected YouTube channel id used for rendered outro branding (single-destination legacy) */
   outroChannelId: t.Optional(t.String()),
   outroInstagramChannelId: t.Optional(t.String()),
   /** rendered outro copy/brand overrides */
   outro: t.Optional(OutroSettingsBody),
+  /** multi-channel destinations: one video per destination, each with its own outro */
+  destinations: t.Optional(
+    t.Array(
+      t.Object({
+        platform: t.Union([t.Literal("youtube"), t.Literal("instagram")]),
+        channelId: t.String(),
+        outro: t.Optional(OutroSettingsBody),
+      })
+    )
+  ),
   /** thumbnail generation policy: pick a video frame later, or generate AI thumbnail during render */
   thumbnailMode: t.Optional(t.Union([t.Literal("frame"), t.Literal("ai")])),
   /** explicit image model pick from the compatible image model catalog */
@@ -146,6 +156,25 @@ export const MoveBoundaryBody = t.Object({
   ]),
 });
 export type TMoveBoundaryBody = typeof MoveBoundaryBody.static;
+
+/** A publish destination for create/add: channel + optional outro copy overrides. */
+export const DestinationInputBody = t.Object({
+  platform: t.Union([t.Literal("youtube"), t.Literal("instagram")]),
+  channelId: t.String(),
+  outro: t.Optional(OutroSettingsBody),
+});
+export type TDestinationInputBody = typeof DestinationInputBody.static;
+
+export const DestinationParams = t.Object({
+  id: t.String(),
+  destId: t.String(),
+});
+export type TDestinationParams = typeof DestinationParams.static;
+
+export const UpdateDestinationOutroBody = t.Object({
+  outro: OutroSettingsBody,
+});
+export type TUpdateDestinationOutroBody = typeof UpdateDestinationOutroBody.static;
 
 export const UpdateReelSettingsBody = t.Object({
   thumbnailSceneIndex: t.Optional(t.Number({ minimum: 0 })),
