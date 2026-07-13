@@ -847,7 +847,8 @@ async function llmStorySeries(
   tier: Tier,
   partCount: number,
   genreId?: string,
-  seed?: RedditPost
+  seed?: RedditPost,
+  onLlmUsage?: LlmUsageCallback
 ): Promise<StoryDraft[]> {
   const llm = resolveModels(tier).llm;
   const seedBlock = seed
@@ -894,14 +895,15 @@ OUTPUT JSON ONLY:
     return parsed.parts;
   };
 
-  const { text } = await generateText({ model: openrouter(llm), prompt });
+  const { text, usage } = await generateText({ model: openrouter(llm), prompt });
+  reportLlmUsage(onLlmUsage, "Series script", llm, usage);
   let parts = parseAndValidate(text);
 
   // Cliffhanger scrutiny. Primary: an LLM judge rates every non-final ending and
   // rewrites the soft ones (catches subtle misses keyword checks can't see). If
   // the judge call fails, fall back to the free deterministic guard.
   try {
-    parts = await judgeAndFixCliffhangers(parts, llm);
+    parts = await judgeAndFixCliffhangers(parts, llm, onLlmUsage);
   } catch {
     const weak = parts.slice(0, -1).some((part) => endsFlat(part.body));
     if (weak) {
@@ -912,6 +914,7 @@ OUTPUT JSON ONLY:
 
 The previous draft ended a non-final part on a flat, resolvable line. Regenerate ALL parts; every non-final part must end on an urgent cliffhanger the viewer cannot stop on.`,
         });
+        reportLlmUsage(onLlmUsage, "Series script (cliffhanger repair)", llm, retry.usage);
         parts = parseAndValidate(retry.text);
       } catch {
         // Keep the first draft if the repair pass also fails.
@@ -928,7 +931,11 @@ const firstSentence = (body: string): string => splitSentences(body)[0]?.trim() 
  * cliffhanger and rewrites any it scores <= 3, keeping the same events, length,
  * and handoff into the next part. Best-effort — the caller handles failures.
  */
-async function judgeAndFixCliffhangers(parts: StoryDraft[], llm: string): Promise<StoryDraft[]> {
+async function judgeAndFixCliffhangers(
+  parts: StoryDraft[],
+  llm: string,
+  onLlmUsage?: LlmUsageCallback
+): Promise<StoryDraft[]> {
   if (parts.length < 2) return parts;
   const nonFinal = parts.slice(0, -1);
   const list = nonFinal
@@ -948,7 +955,8 @@ ${list}
 OUTPUT JSON ONLY:
 { "verdicts": [ { "part": 1, "score": 3, "body": "rewritten full body — omit when score >= 4" } ] }`;
 
-  const { text } = await generateText({ model: openrouter(llm), prompt });
+  const { text, usage } = await generateText({ model: openrouter(llm), prompt });
+  reportLlmUsage(onLlmUsage, "Cliffhanger judge", llm, usage);
   const parsed = extractJson<{ verdicts?: EndingVerdict[] }>(text);
   return applyEndingVerdicts(parts, parsed.verdicts ?? []);
 }
@@ -1147,7 +1155,8 @@ async function selectVerbatimCuts(
   title: string,
   sentences: string[],
   partCount: number,
-  tier: Tier
+  tier: Tier,
+  onLlmUsage?: LlmUsageCallback
 ): Promise<number[]> {
   // Fallback: balance by words, then chase the strongest nearby hook aggressively.
   const fallback = normalizeCuts(
@@ -1194,7 +1203,8 @@ Cut points must be strictly increasing integers between 1 and ${sentences.length
 OUTPUT JSON ONLY: { "cutAfter": [${Array.from({ length: partCount - 1 }, () => "number").join(", ")}] }`;
 
   try {
-    const { text } = await generateText({ model: openrouter(llm), prompt });
+    const { text, usage } = await generateText({ model: openrouter(llm), prompt });
+    reportLlmUsage(onLlmUsage, "Verbatim cut selection", llm, usage);
     const parsed = extractJson<{ cutAfter: number[] }>(text);
     const valid = normalizeCuts(parsed.cutAfter, sentences.length, partCount);
     if (valid.length !== partCount - 1) return fallback;
@@ -1308,17 +1318,19 @@ export async function generateStorySeries(
     selectedStoryId?: string;
     selectedSeedUrl?: string;
     excludeReelIds?: string[];
+    onLlmUsage?: LlmUsageCallback;
   } = {}
 ): Promise<StoryPartDraft[]> {
   const tier = opts.tier ?? "value";
   const theme = opts.themeId ? THEMES.find((t) => t.id === opts.themeId)! : undefined;
   const genre = theme ? themeToGenre(theme) : pickGenre(opts.genre);
   const requestedParts = opts.parts;
+  const onLlmUsage = opts.onLlmUsage;
 
   if (mode === "llm") {
     const partCount = typeof requestedParts === "number" ? resolvePartCount(requestedParts, 300) : 2;
     const angle = opts.topic?.trim() ? opts.topic.trim() : genre.angle;
-    const parts = await llmStorySeries(angle, tier, partCount, genre.id);
+    const parts = await llmStorySeries(angle, tier, partCount, genre.id, undefined, onLlmUsage);
     return parts.map((part, i) => ({
       ...part,
       title: titleWithPart(part.title, i + 1),
@@ -1344,7 +1356,7 @@ export async function generateStorySeries(
     // 2-4 pass through unchanged.
     const seedWords = wordCount(cleanRedditBody(post.body));
     const partCount = Math.max(2, resolvePartCount(requestedParts, seedWords));
-    const parts = await llmStorySeries(genre.angle, tier, partCount, genre.id, post);
+    const parts = await llmStorySeries(genre.angle, tier, partCount, genre.id, post, onLlmUsage);
     return parts.map((part, i) => ({
       ...part,
       title: titleWithPart(part.title, i + 1),
@@ -1415,7 +1427,7 @@ export async function generateStorySeries(
     ];
   }
 
-  const cuts = await selectVerbatimCuts(threadedPost.title, sentences, resolvedPartCount, tier);
+  const cuts = await selectVerbatimCuts(threadedPost.title, sentences, resolvedPartCount, tier, onLlmUsage);
   return buildVerbatimParts(threadedPost, threadedPost.subreddit, sentences, cuts).map((part) => ({
     ...part,
     theme: theme?.id,
