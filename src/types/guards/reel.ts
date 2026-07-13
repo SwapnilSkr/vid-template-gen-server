@@ -139,6 +139,14 @@ export const ReorderScenesBody = t.Object({
 });
 export type TReorderScenesBody = typeof ReorderScenesBody.static;
 
+export const MoveBoundaryBody = t.Object({
+  direction: t.Union([
+    t.Literal("pushLastToNext"),
+    t.Literal("pullFirstFromNext"),
+  ]),
+});
+export type TMoveBoundaryBody = typeof MoveBoundaryBody.static;
+
 export const UpdateReelSettingsBody = t.Object({
   thumbnailSceneIndex: t.Optional(t.Number({ minimum: 0 })),
   artStyleId: t.Optional(t.String()),

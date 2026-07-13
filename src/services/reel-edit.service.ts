@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   Reel,
   type IReel,
+  type IScene,
   type ICaptionStyle,
   type IAudioPost,
   type IEditEffects,
@@ -17,6 +18,7 @@ import {
   redditPayloadFromStoryPart,
   listReelsBySeries,
   deleteReel,
+  deleteSeriesPart,
   collectReelS3AssetUrls,
   cleanupReelLocalStaging,
 } from "./reel.service";
@@ -191,6 +193,131 @@ export async function updateScene(
     await deleteS3Urls([staleAudioUrl]);
   }
   return loadReel(reelId);
+}
+
+// ============================================
+// Series part boundaries — move a spoken line across the seam between two
+// adjacent gameplay parts, or merge a part into its previous one. Both keep the
+// moved sentences' per-line TTS (audio travels with the scene, so re-rendering
+// only rebuilds the composite), and re-sync each part's redditStory.body.
+// ============================================
+
+/** A movable copy of a sentence scene: keeps narration + reusable audio, resets
+ *  render-derived timing/captions (recomputed when the new part renders). */
+function detachScene(scene: IScene): Partial<IScene> {
+  return {
+    index: 0,
+    narration: scene.narration,
+    visualPrompt: scene.visualPrompt,
+    audioUrl: scene.audioUrl,
+    motion: { type: scene.motion.type, direction: scene.motion.direction },
+    startTime: 0,
+    duration: 0,
+    isHero: scene.isHero,
+  };
+}
+
+/** Renumber scene.index to match array position (parts store scenes positionally). */
+function reindexScenes(reel: IReel): void {
+  reel.scenes.forEach((scene, i) => {
+    scene.index = i;
+  });
+}
+
+function sortedSeriesParts(reels: IReel[]): IReel[] {
+  return [...reels].sort(
+    (a, b) =>
+      (a.partNumber ?? 1) - (b.partNumber ?? 1) ||
+      a.createdAt.getTime() - b.createdAt.getTime()
+  );
+}
+
+async function loadEditableSeriesParts(
+  part: IReel
+): Promise<{ parts: IReel[]; index: number }> {
+  assertEditable(part);
+  if (part.strategy !== "gameplay_overlay") {
+    throw new Error("Part boundary edits are only supported for gameplay series");
+  }
+  if (!part.seriesId || (part.partCount ?? 1) <= 1) {
+    throw new Error("This reel is not part of a multi-part series");
+  }
+  const parts = sortedSeriesParts(await listReelsBySeries(part.seriesId));
+  const index = parts.findIndex((p) => p._id.equals(part._id));
+  if (index === -1) throw new Error("Part not found in its series");
+  return { parts, index };
+}
+
+/** Persist a part whose scene list changed and drop its stale composite caches. */
+async function saveMovedPart(reel: IReel): Promise<void> {
+  reindexScenes(reel);
+  syncRedditBodyFromScenes(reel);
+  reel.markModified("scenes");
+  reel.markModified("redditStory");
+  await reel.save();
+  await clearAssemblyCache(reel);
+}
+
+/**
+ * Move one spoken line across the seam between this part and the next: either
+ * push this part's last line down to the next part, or pull the next part's
+ * first line up into this one. Rebalances a badly-placed part ending without
+ * re-planning. Returns the reloaded current part.
+ */
+export async function moveSeriesBoundary(
+  partId: string,
+  direction: "pushLastToNext" | "pullFirstFromNext"
+): Promise<IReel> {
+  const part = await loadReel(partId);
+  const { parts, index } = await loadEditableSeriesParts(part);
+  const next = parts[index + 1];
+  if (!next) throw new Error("This is the last part — no next part to share a line with");
+  assertEditable(next);
+
+  if (direction === "pushLastToNext") {
+    if (part.scenes.length <= 1) {
+      throw new Error("A part must keep at least one line");
+    }
+    const moved = detachScene(part.scenes[part.scenes.length - 1]);
+    part.scenes.splice(part.scenes.length - 1, 1);
+    next.scenes.unshift(moved as IScene);
+  } else {
+    if (next.scenes.length <= 1) {
+      throw new Error("The next part must keep at least one line");
+    }
+    const moved = detachScene(next.scenes[0]);
+    next.scenes.splice(0, 1);
+    part.scenes.push(moved as IScene);
+  }
+
+  await saveMovedPart(part);
+  await saveMovedPart(next);
+  return loadReel(partId);
+}
+
+/**
+ * Merge a part into its previous sibling: append this part's lines onto the
+ * previous part (keeping their audio), then delete this part and renumber the
+ * survivors. Losslessly consolidates an over-split series (e.g. 3 parts → 2).
+ * Returns the reloaded previous part that absorbed the content.
+ */
+export async function mergePartIntoPrevious(partId: string): Promise<IReel> {
+  const part = await loadReel(partId);
+  const { parts, index } = await loadEditableSeriesParts(part);
+  const prev = parts[index - 1];
+  if (!prev) throw new Error("This is the first part — nothing before it to merge into");
+  assertEditable(prev);
+
+  for (const scene of part.scenes) {
+    prev.scenes.push(detachScene(scene) as IScene);
+  }
+  await saveMovedPart(prev);
+
+  const prevId = prev._id.toString();
+  // Removes the now-absorbed part and renumbers the remaining parts (collapses
+  // to a standalone reel when only the merged part is left).
+  await deleteSeriesPart(partId);
+  return loadReel(prevId);
 }
 
 /** Edit Reddit title-card fields (and sync title/hook when title changes). */
@@ -640,7 +767,10 @@ function seriesPartsForGenerate(
   source: StorySource
 ): number | "auto" | undefined {
   if (parts === "off") {
-    return source === "verbatim" ? "auto" : undefined;
+    // Verbatim "1 (no split)" collapses the whole story into a single reel via
+    // the series planner (keeps the full untruncated body). Other sources fall
+    // back to a plain standalone re-plan.
+    return source === "verbatim" ? 1 : undefined;
   }
   return parts;
 }

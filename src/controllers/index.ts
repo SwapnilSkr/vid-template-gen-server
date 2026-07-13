@@ -70,6 +70,8 @@ export {
   approvePlanController,
   replanReelController,
   replanReelSeriesController,
+  moveSeriesBoundaryController,
+  mergePartController,
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,

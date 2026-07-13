@@ -38,6 +38,8 @@ import {
   approvePlan,
   replanReel,
   replanReelSeries,
+  moveSeriesBoundary,
+  mergePartIntoPrevious,
   updateRedditCard,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
@@ -67,6 +69,7 @@ import type {
   TRegenerateReelBody,
   TReplanReelBody,
   TReplanReelSeriesBody,
+  TMoveBoundaryBody,
   TCustomThumbnailBody,
   TStageThumbnailDraftBody,
   TStageThumbnailImageBody,
@@ -725,6 +728,10 @@ interface ReplanSeriesContext extends Context {
   params: TIdParams;
   body: TReplanReelSeriesBody;
 }
+interface MoveBoundaryContext extends Context {
+  params: TIdParams;
+  body: TMoveBoundaryBody;
+}
 interface DraftAssetContext extends Context {
   params: TDraftAssetParams;
 }
@@ -868,6 +875,20 @@ export async function replanReelSeriesController({
   set,
 }: ReplanSeriesContext) {
   return runEdit(set, () => replanReelSeries(params.id, body));
+}
+
+/** Move one spoken line across the seam between this part and the next. */
+export async function moveSeriesBoundaryController({
+  params,
+  body,
+  set,
+}: MoveBoundaryContext) {
+  return runEdit(set, () => moveSeriesBoundary(params.id, body.direction));
+}
+
+/** Merge this part's lines into the previous part, then delete this part. */
+export async function mergePartController({ params, set }: GetReelContext) {
+  return runEdit(set, () => mergePartIntoPrevious(params.id));
 }
 
 export async function saveReelEditDraftController({

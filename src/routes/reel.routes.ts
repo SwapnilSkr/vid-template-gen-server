@@ -25,6 +25,7 @@ import {
   RegenerateReelBody,
   ReplanReelBody,
   ReplanReelSeriesBody,
+  MoveBoundaryBody,
   DraftAssetParams,
   SaveShortsCoverBody,
 } from "../types/guards";
@@ -63,6 +64,8 @@ import {
   approvePlanController,
   replanReelController,
   replanReelSeriesController,
+  moveSeriesBoundaryController,
+  mergePartController,
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,
@@ -240,6 +243,17 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .post("/:id/replan-series", replanReelSeriesController, {
     params: IdParams,
     body: ReplanReelSeriesBody,
+  })
+
+  // Move a spoken line across the seam between this part and the next
+  .post("/:id/move-boundary", moveSeriesBoundaryController, {
+    params: IdParams,
+    body: MoveBoundaryBody,
+  })
+
+  // Merge this part's lines into the previous part, then delete this part
+  .post("/:id/merge-into-previous", mergePartController, {
+    params: IdParams,
   })
 
   // Reorder scenes (2-segment path — declared before the :index routes)
