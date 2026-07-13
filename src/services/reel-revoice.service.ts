@@ -9,6 +9,7 @@ import { pickGameplay, renderGameplayReel } from "./reel-gameplay.service";
 import { recordReelMeasuredCosts, type MeasuredCostInput } from "./reel-cost.service";
 import { deleteS3Urls, uploadVideo } from "./s3.service";
 import { enqueueRevoice } from "../queue/queues";
+import { invalidateFinalDestinationRenders } from "./reel-outro.service";
 
 // ============================================
 // Revoice — re-narrate an already-rendered gameplay_overlay reel with a
@@ -132,11 +133,10 @@ export async function processRevoice(reelId: string, variantIds: string[]): Prom
   await recordReelMeasuredCosts(reelId, batchCosts, "Revoice");
 }
 
-/** Promote a ready voice variant to be the reel's primary output. Also adopts
- *  the variant's TTS choice so later re-renders (title card / captions / clip)
- *  keep the same voice instead of snapping back to the previous narrator.
- *  The video it replaces is deleted from S3 unless it is itself a variant's
- *  render (still referenced for comparison). */
+/** Promote a ready voice variant as the new shared body, then queue a fresh
+ * branded final for every configured channel. A raw voice variant must never
+ * become a publishable channel output directly: it has no destination-specific
+ * branded outro and would otherwise leave sibling destinations stale. */
 export async function promoteVoiceVariant(reelId: string, variantId: string): Promise<IReel> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
@@ -147,16 +147,25 @@ export async function promoteVoiceVariant(reelId: string, variantId: string): Pr
     throw new Error(`Voice variant is not ready (status: ${variant.status})`);
   }
 
-  const previousOutputUrl = reel.outputUrl;
+  const previousBodyUrl = reel.bodyVideoUrl;
   const staleCaches = [
     reel.titleAudioUrl,
     reel.partOutroAudioUrl,
     reel.outroAudioUrl,
-    reel.bodyVideoUrl,
     reel.assemblyVideoUrl,
+    reel.subtitlesUrl,
     ...reel.scenes.map((scene) => scene.audioUrl),
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "A different voice variant was promoted",
+      clearOutroAudio: true,
+    }),
   ];
-  reel.outputUrl = variant.videoUrl;
+  if (previousBodyUrl && previousBodyUrl !== variant.videoUrl) {
+    staleCaches.push(previousBodyUrl);
+  }
+  // The variant already contains the title/body/part teaser, so it becomes the
+  // shared body consumed by the outro-only producer below.
+  reel.bodyVideoUrl = variant.videoUrl;
   reel.narrationVoice = {
     model: variant.model,
     voice: variant.voice,
@@ -171,17 +180,13 @@ export async function promoteVoiceVariant(reelId: string, variantId: string): Pr
   reel.titleAudioUrl = undefined;
   reel.partOutroAudioUrl = undefined;
   reel.outroAudioUrl = undefined;
-  reel.bodyVideoUrl = undefined;
   reel.assemblyVideoUrl = undefined;
+  reel.subtitlesUrl = undefined;
   for (const scene of reel.scenes) scene.audioUrl = undefined;
   reel.markModified("scenes");
   await reel.save();
   await deleteS3Urls(staleCaches);
 
-  const stillReferenced =
-    !previousOutputUrl ||
-    previousOutputUrl === variant.videoUrl ||
-    reel.voiceVariants.some((v) => v.videoUrl === previousOutputUrl);
-  if (!stillReferenced) await deleteS3Urls([previousOutputUrl]);
-  return reel;
+  const { regenerateReel } = await import("./reel-edit.service");
+  return regenerateReel(reelId, "outro_only");
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   Reel,
   InstagramChannel,
@@ -11,8 +11,10 @@ import {
   type ISceneMotion,
   type ReelMotionMode,
   type IRedditStoryPayload,
+  type IUpdateDiscoveryPayload,
   type IReelDestination,
   type IOutroSettings,
+  type StorySource,
 } from "../models";
 import { mergeCaptionStyle } from "../utils/caption-style.utils";
 import { enqueueReelPlan, enqueueReelProduce, removeReelJob } from "../queue/queues";
@@ -33,10 +35,34 @@ import {
   loadAndReserveBankStory,
   markStoryReel,
   materializeFromSeed,
+  fetchPostByUrl,
+  parseRedditPostId,
+  combinePostWithContinuations,
+  selectVerbatimCuts,
+  splitSentencesForReelParts,
+  resolvePartCount,
+  cleanRedditBody,
+  wordCount,
+  titleWithPart,
+  assessVerbatimSeriesStructureWithAi,
+  type SeriesStructureAdvice,
+  type StoryPartDraft,
+  type RedditPost,
 } from "./story.service";
+import {
+  discoverStoryUpdates,
+  resolveManualUpdates,
+  updatesToContinuations,
+  includedUpdateKeys,
+  type UpdateDiscovery,
+  type UpdateCandidate,
+  type UpdateSignal,
+} from "./reddit-update-discovery.service";
 import { applyMeasuredCostsToReel, type MeasuredCostInput } from "./reel-cost.service";
-import { resolveReelDestinations } from "./reel-outro.service";
-import type { StorySource } from "../models";
+import {
+  invalidateFinalDestinationRenders,
+  resolveReelDestinations,
+} from "./reel-outro.service";
 import type { Tier } from "../config/models";
 
 // ============================================
@@ -83,20 +109,29 @@ function sceneAudioUrls(reel: IReel): (string | undefined)[] {
   return reel.scenes.map((scene) => scene.audioUrl);
 }
 
-function sceneMediaUrls(reel: IReel): (string | undefined)[] {
-  return reel.scenes.flatMap((scene) => [scene.assetUrl, scene.audioUrl]);
-}
-
 /** Clear cached render artifacts that are invalidated by body/composite changes. */
 async function clearBodyVideoCache(reel: IReel): Promise<void> {
-  const stale = reel.bodyVideoUrl;
+  const stale = [
+    reel.bodyVideoUrl,
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "The shared body video was invalidated",
+    }),
+  ];
+  await reel.save();
   await Reel.updateOne({ _id: reel._id }, { $unset: { bodyVideoUrl: "" } });
-  await deleteS3Urls([stale]);
+  await deleteS3Urls(stale);
 }
 
 /** Clear pre-caption assembly (scene/stills/audio/motion changes). */
 async function clearAssemblyCache(reel: IReel): Promise<void> {
-  const stale = [reel.assemblyVideoUrl, reel.bodyVideoUrl];
+  const stale = [
+    reel.assemblyVideoUrl,
+    reel.bodyVideoUrl,
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "The shared assembly and body video were invalidated",
+    }),
+  ];
+  await reel.save();
   await Reel.updateOne({ _id: reel._id }, { $unset: { assemblyVideoUrl: "", bodyVideoUrl: "" } });
   await deleteS3Urls(stale);
 }
@@ -110,7 +145,12 @@ async function clearNarrationCaches(reel: IReel): Promise<void> {
     reel.bodyVideoUrl,
     reel.assemblyVideoUrl,
     ...sceneAudioUrls(reel),
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "Narration changed",
+      clearOutroAudio: true,
+    }),
   ];
+  await reel.save();
   await Reel.updateOne(
     { _id: reel._id },
     {
@@ -377,7 +417,14 @@ export async function updateRedditCard(
   await reel.save();
   // Card is burned into the body video; title audio only invalidates when spoken.
   // Gameplay has no assemblyVideoUrl — clearing body is enough for composite rebuild.
-  const stale = [reel.bodyVideoUrl, titleChanged ? reel.titleAudioUrl : undefined];
+  const stale = [
+    reel.bodyVideoUrl,
+    titleChanged ? reel.titleAudioUrl : undefined,
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "The Reddit title card changed",
+    }),
+  ];
+  await reel.save();
   const unset: Record<string, ""> = { bodyVideoUrl: "" };
   if (titleChanged) unset.titleAudioUrl = "";
   await Reel.updateOne({ _id: reelId }, { $unset: unset });
@@ -407,6 +454,13 @@ export async function regenerateScene(
     stale.push(scene.audioUrl);
     unset[`scenes.${index}.audioUrl`] = "";
   }
+  stale.push(
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "A scene asset or narration was regenerated",
+      clearOutroAudio: targets.includes("audio"),
+    }),
+  );
+  await reel.save();
   await Reel.updateOne({ _id: reelId }, { $unset: unset });
   await deleteS3Urls(stale);
 
@@ -597,6 +651,15 @@ export async function updateReelSettings(
   const partOutroToggledOff = nextSkipPartOutro && !prevSkipPartOutro;
   const partOutroToggledOn = !nextSkipPartOutro && prevSkipPartOutro;
   const brandedOutroToggledOff = nextSkipBrandedOutro && !prevSkipBrandedOutro;
+  const brandedOutroToggledOn = !nextSkipBrandedOutro && prevSkipBrandedOutro;
+  // Any card/copy/channel/skip change alters the primary final, even when its
+  // spoken line is unchanged (for example CTA, subtitle, or footer only).
+  const primaryOutroRenderChanged =
+    patch.outroChannelId !== undefined ||
+    patch.outroInstagramChannelId !== undefined ||
+    patch.outro !== undefined ||
+    brandedOutroToggledOff ||
+    brandedOutroToggledOn;
 
   const unset: Record<string, ""> = {};
   const s3Delete: (string | undefined)[] = [];
@@ -642,6 +705,25 @@ export async function updateReelSettings(
   if (brandedOutroToggledOff) {
     unset.outroAudioUrl = "";
     s3Delete.push(prevOutroAudioUrl);
+  }
+
+  // A final video is only publishable while it reflects the current body and
+  // the current destination's outro. Never leave an older primary or sibling
+  // render marked ready after an upstream edit.
+  const sharedFinalChanged = clearsBody || partOutroToggledOff || partOutroToggledOn;
+  const primaryFinalChanged = primaryOutroRenderChanged;
+  if (sharedFinalChanged || primaryFinalChanged) {
+    s3Delete.push(
+      ...invalidateFinalDestinationRenders(reel, {
+        reason: sharedFinalChanged
+          ? "Shared body, narration, or part teaser settings changed"
+          : "Primary branded outro settings changed",
+        includePrimary: true,
+        includeExtras: sharedFinalChanged,
+        clearOutroAudio: clearsAudio,
+      }),
+    );
+    await reel.save();
   }
 
   if (Object.keys(unset).length) {
@@ -822,6 +904,7 @@ export async function approvePlan(reelId: string): Promise<IReel> {
   if (reel.status !== "plan_review") {
     throw new Error(`Reel is not awaiting plan review (status: ${reel.status})`);
   }
+  await assertStructureChoice(reel);
   await markQueued(reelId);
   await enqueueReelProduce(reelId);
   return loadReel(reelId);
@@ -835,7 +918,10 @@ async function resetReelForReplan(reel: IReel): Promise<string[]> {
   reel.scenes = [];
   reel.title = undefined;
   reel.hook = undefined;
-  reel.outputUrl = undefined;
+  invalidateFinalDestinationRenders(reel, {
+    reason: "The reel was reset for a new story plan",
+    clearOutroAudio: true,
+  });
   reel.bodyVideoUrl = undefined;
   reel.assemblyVideoUrl = undefined;
   reel.subtitlesUrl = undefined;
@@ -882,6 +968,14 @@ function seriesPartsForGenerate(
 function defaultSeriesParts(reel: IReel): "off" | "auto" | number {
   if (reel.partCount && reel.partCount > 1) return reel.partCount;
   return "auto";
+}
+
+/** Manual follow-ups belong to their seed; never carry them to a different post. */
+function preserveManualLinksForSeed(reel: IReel, nextSeedUrl: string | undefined): boolean {
+  if (!nextSeedUrl || !reel.redditStory?.seedUrl) return false;
+  const currentId = parseRedditPostId(reel.redditStory.seedUrl);
+  const nextId = parseRedditPostId(nextSeedUrl);
+  return Boolean(currentId && nextId && currentId === nextId);
 }
 
 function sortSeriesReels(reels: IReel[]): IReel[] {
@@ -942,6 +1036,7 @@ export async function replanReelSeries(
   const excludeReelIds = existingReels.map((reel) => reel._id.toString());
   const partsSetting = patch.parts ?? defaultSeriesParts(anchor);
   const generateParts = seriesPartsForGenerate(partsSetting, source);
+  const keepManualLinks = preserveManualLinksForSeed(anchor, patch.selectedSeedUrl);
 
   if (generateParts === undefined) {
     const target = existingReels.find((reel) => reel._id.toString() === reelId) ?? anchor;
@@ -978,6 +1073,10 @@ export async function replanReelSeries(
     selectedStoryId: patch.selectedStoryId,
     selectedSeedUrl: patch.selectedSeedUrl,
     excludeReelIds,
+    // Keep the source's update policy when choosing a new series story, so the
+    // recommendation in the resulting plan sees the same enabled follow-ups.
+    fetchUpdates: anchor.fetchUpdates,
+    manualUpdateUrls: keepManualLinks ? anchor.manualUpdateUrls : undefined,
     onLlmUsage: (usage) =>
       storyCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" }),
   });
@@ -1009,6 +1108,7 @@ export async function replanReelSeries(
     reel.seriesId = nextSeriesId;
     reel.partNumber = part.partNumber;
     reel.partCount = part.partCount;
+    reel.manualUpdateUrls = keepManualLinks ? anchor.manualUpdateUrls : undefined;
     reel.status = "planning";
     reel.progress = 5;
     reel.error = undefined;
@@ -1074,11 +1174,13 @@ export async function replanReel(
 
   // Drop prior render media before wiping the plan so S3 doesn't keep orphans.
   const staleMedia = await resetReelForReplan(reel);
+  const storyCosts: MeasuredCostInput[] = [];
 
   if (reel.strategy === "gameplay_overlay") {
     const source = (reel.storySource ?? "llm") as StorySource;
     if (patch.selectedStoryId) {
       const story = await loadAndReserveBankStory(patch.selectedStoryId);
+      reel.manualUpdateUrls = undefined;
       reel.redditStory = redditPayloadFromStoryDraft(story);
       reel.title = story.title;
       reel.hook = story.title;
@@ -1087,9 +1189,16 @@ export async function replanReel(
       await markStoryReel(story.storyId, reelId);
     } else if (patch.selectedSeedUrl) {
       const deferHybrid = source === "hybrid";
+      const keepManualLinks = preserveManualLinksForSeed(reel, patch.selectedSeedUrl);
+      if (!keepManualLinks) reel.manualUpdateUrls = undefined;
       const story = await materializeFromSeed(patch.selectedSeedUrl, source, reel.genre, reel.tier as Tier, {
         seedOnly: deferHybrid,
         excludeReelId: reelId,
+        fetchUpdates: reel.fetchUpdates,
+        manualUpdateUrls: keepManualLinks ? reel.manualUpdateUrls : undefined,
+        stageAutoUpdates: source === "verbatim",
+        onLlmUsage: (usage) =>
+          storyCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" }),
       });
       if (deferHybrid) {
         reel.redditStory = {
@@ -1118,8 +1227,557 @@ export async function replanReel(
   }
 
   await reel.save();
+  applyMeasuredCostsToReel(reel, storyCosts, "Re-plan story");
+  if (storyCosts.length) await reel.save();
   await deleteS3Urls(staleMedia);
   await removeReelJob(reelId);
   await enqueueReelPlan(reelId);
   return loadReel(reelId);
+}
+
+// ============================================
+// Followup/update discovery in Studio — re-scan the OP's later updates, add a
+// manual followup link, then fold the chosen updates back into the story and
+// recompute parts. Two apply modes: "append" adds new followup part(s) while
+// leaving existing parts byte-stable; "recut" re-splits original + all updates
+// across the whole series for accurate pacing. See reddit-update-discovery.
+// ============================================
+
+function payloadToDiscovery(p: IUpdateDiscoveryPayload): UpdateDiscovery {
+  return {
+    method: p.method,
+    scannedAt: p.scannedAt instanceof Date ? p.scannedAt.getTime() : Date.now(),
+    candidates: p.candidates.map((c) => ({
+      key: c.key,
+      kind: c.kind,
+      title: c.title,
+      body: c.body,
+      url: c.url,
+      createdUtc: c.createdUtc,
+      matchedSignals: (c.matchedSignals ?? []) as UpdateSignal[],
+      signalScore: c.signalScore ?? 0,
+      aiConfidence: c.aiConfidence,
+      aiReason: c.aiReason,
+      decision: c.decision,
+    })),
+  };
+}
+
+function discoveryToPayload(d: UpdateDiscovery, includedKeys: string[]): IUpdateDiscoveryPayload {
+  return {
+    scannedAt: new Date(d.scannedAt),
+    method: d.method,
+    candidates: d.candidates.map((c) => ({ ...c })),
+    includedKeys,
+  };
+}
+
+/** Dedupe candidate lists by key, merging matched signals. */
+function mergeCandidates(a: UpdateCandidate[], b: UpdateCandidate[]): UpdateCandidate[] {
+  const byKey = new Map<string, UpdateCandidate>();
+  for (const c of [...a, ...b]) {
+    const existing = byKey.get(c.key);
+    if (!existing) byKey.set(c.key, { ...c });
+    else existing.matchedSignals = [...new Set([...existing.matchedSignals, ...c.matchedSignals])];
+  }
+  return [...byKey.values()].sort((x, y) => x.createdUtc - y.createdUtc);
+}
+
+/** Split a body into `count` sequential part bodies (LLM cut points, cliffhanger-aware). */
+async function splitBodyIntoParts(
+  title: string,
+  body: string,
+  count: number,
+  tier: Tier,
+  onLlmUsage?: (usage: { label: string; model: string; costUsd: number }) => void
+): Promise<string[]> {
+  const sentences = splitSentencesForReelParts(body);
+  const partCount = Math.min(Math.max(count, 1), Math.max(sentences.length, 1));
+  if (partCount <= 1) return [body];
+  const cuts = await selectVerbatimCuts(title, sentences, partCount, tier, onLlmUsage);
+  const ranges = [0, ...cuts, sentences.length];
+  return Array.from({ length: ranges.length - 1 }, (_, i) =>
+    sentences.slice(ranges[i], ranges[i + 1]).join(" ")
+  );
+}
+
+/** Put shared story/editing LLM spend on part 1, where the series ledger lives. */
+async function recordSeriesStoryCosts(reel: IReel, costs: MeasuredCostInput[], label: string): Promise<void> {
+  if (!costs.length) return;
+  const series = reel.seriesId ? sortSeriesReels(await listReelsBySeries(reel.seriesId)) : [reel];
+  const ledger = series[0];
+  applyMeasuredCostsToReel(ledger, costs, label);
+  await ledger.save();
+}
+
+function makePartDraft(
+  post: RedditPost,
+  baseTitle: string,
+  body: string,
+  partNumber: number,
+  partCount: number,
+  discovery?: UpdateDiscovery
+): StoryPartDraft {
+  return {
+    title: partCount > 1 ? titleWithPart(baseTitle, partNumber) : baseTitle,
+    body,
+    source: "verbatim",
+    subreddit: post.subreddit,
+    author: post.author,
+    upvotes: post.ups,
+    comments: post.comments,
+    ageHours: post.ageHours,
+    seedTitle: post.title,
+    seedUrl: post.url,
+    partNumber,
+    partCount,
+    updateDiscovery: discovery,
+  };
+}
+
+/**
+ * Re-scan a reel's source post for the OP's followups/updates (and optionally
+ * add a manual link). Refreshes the candidate list for Studio review WITHOUT
+ * touching the body or parts — apply happens separately.
+ */
+export async function rescanReelUpdates(
+  reelId: string,
+  opts: { manualUrl?: string } = {}
+): Promise<IReel> {
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+  if (reel.strategy !== "gameplay_overlay" || !reel.redditStory) {
+    throw new Error("Updates are only available for Reddit gameplay reels");
+  }
+  const story = reel.redditStory;
+  const existing = story.updateDiscovery ? payloadToDiscovery(story.updateDiscovery) : undefined;
+  const priorManual = (existing?.candidates ?? []).filter((c) => c.kind === "manual");
+  const costs: MeasuredCostInput[] = [];
+
+  const manualUrl = opts.manualUrl?.trim();
+  let discovery: UpdateDiscovery;
+  if (story.seedUrl) {
+    const post = await fetchPostByUrl(story.seedUrl);
+    if (!post) throw new Error(`Could not re-fetch the source post: ${story.seedUrl}`);
+    const manual = manualUrl ? await resolveManualUpdates([manualUrl], post) : [];
+    if (manualUrl && manual.length === 0) throw new Error(`Could not resolve that Reddit link: ${manualUrl}`);
+    discovery = await discoverStoryUpdates(post, {
+      tier: reel.tier as Tier,
+      existing: mergeCandidates(priorManual, manual),
+      onLlmUsage: (usage) =>
+        costs.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" }),
+    });
+  } else {
+    // No source post (e.g. bank story) — only manual links can be added.
+    const manual = manualUrl ? await resolveManualUpdates([manualUrl]) : [];
+    if (manualUrl && manual.length === 0) throw new Error(`Could not resolve that Reddit link: ${manualUrl}`);
+    const candidates = mergeCandidates(existing?.candidates ?? [], manual);
+    discovery = { method: "signals", candidates, scannedAt: Date.now() };
+  }
+
+  // Preserve prior inclusions across the re-scan.
+  const priorIncluded = new Set(story.updateDiscovery?.includedKeys ?? includedUpdateKeys(existing));
+  for (const c of discovery.candidates) {
+    if (priorIncluded.has(c.key) && c.decision !== "rejected") c.decision = "include";
+  }
+
+  const payload = discoveryToPayload(discovery, includedUpdateKeys(discovery));
+  const relatedReels = reel.seriesId ? sortSeriesReels(await listReelsBySeries(reel.seriesId)) : [reel];
+  const resolvedManualUrls = discovery.candidates
+    .filter((candidate) => candidate.kind === "manual")
+    .map((candidate) => candidate.url);
+  for (const related of relatedReels) {
+    if (!related.redditStory) continue;
+    related.redditStory.updateDiscovery = payload;
+    // Persist Studio-added manual links with this source so same-source replan
+    // can reproduce them; replan explicitly drops them for a different seed.
+    related.manualUpdateUrls = [...new Set([...(related.manualUpdateUrls ?? []), ...resolvedManualUrls])];
+    related.markModified("redditStory");
+    await related.save();
+  }
+  await recordSeriesStoryCosts(relatedReels[0], costs, "Update discovery");
+  return loadReel(reelId);
+}
+
+/**
+ * Fold the chosen updates into the story and recompute parts. "append" adds the
+ * newly-included followups as new part(s) (existing parts untouched); "recut"
+ * re-splits original + all included updates across the whole series.
+ */
+export async function applyReelUpdates(
+  reelId: string,
+  patch: { includedKeys: string[]; mode: "append" | "recut" }
+): Promise<IReel> {
+  const anchor = await loadReel(reelId);
+  assertEditable(anchor);
+  if (anchor.strategy !== "gameplay_overlay" || !anchor.redditStory) {
+    throw new Error("Updates are only available for Reddit gameplay reels");
+  }
+  if (anchor.storySource && anchor.storySource !== "verbatim") {
+    throw new Error(
+      "Applying updates recomputes verbatim parts; for hybrid/llm reels use Re-plan to regenerate the story"
+    );
+  }
+  const discoveryPayload = anchor.redditStory.updateDiscovery;
+  if (!discoveryPayload) throw new Error("No discovered updates — run a scan first");
+  const seedUrl = anchor.redditStory.seedUrl;
+  if (!seedUrl) throw new Error("This story has no source URL to recompute from");
+
+  const includeSet = new Set(patch.includedKeys);
+  for (const candidate of discoveryPayload.candidates) {
+    if (candidate.kind === "manual") includeSet.add(candidate.key);
+  }
+  const effectiveIncludedKeys = [...includeSet];
+  const discovery = payloadToDiscovery(discoveryPayload);
+  for (const c of discovery.candidates) {
+    c.decision = includeSet.has(c.key)
+      ? "include"
+      : c.decision === "include"
+        ? "candidate"
+        : c.decision;
+  }
+
+  const original = await fetchPostByUrl(seedUrl);
+  if (!original) throw new Error(`Could not re-fetch the source post: ${seedUrl}`);
+
+  const seriesReels = anchor.seriesId
+    ? sortSeriesReels(await listReelsBySeries(anchor.seriesId))
+    : [anchor];
+  for (const r of seriesReels) assertEditable(r);
+
+  const priorIncluded = new Set(discoveryPayload.includedKeys ?? []);
+  const removed = [...priorIncluded].some((k) => !includeSet.has(k));
+
+  // Append only makes sense for an existing multi-part series with pure additions.
+  if (patch.mode === "append" && seriesReels.length > 1 && !removed) {
+    return appendUpdatesAsParts(anchor, seriesReels, original, discovery, effectiveIncludedKeys, priorIncluded);
+  }
+  return recutSeriesFromBody(anchor, seriesReels, original, discovery, effectiveIncludedKeys);
+}
+
+/** Rebuild the whole series from original + included updates (accurate re-cut). */
+async function recutSeriesFromBody(
+  anchor: IReel,
+  seriesReels: IReel[],
+  original: RedditPost,
+  discovery: UpdateDiscovery,
+  includedKeys: string[]
+): Promise<IReel> {
+  const baseTitle = anchor.redditStory?.seedTitle ?? original.title;
+  const continuations = updatesToContinuations(discovery, includedKeys);
+  const combined = combinePostWithContinuations(original, continuations);
+  const body = cleanRedditBody(combined.body);
+
+  // Keep at least the current episode count, but add parts if the combined story
+  // (original + updates) is too long to fit ~2 min per reel.
+  const targetParts = resolvePartCount(seriesReels.length, wordCount(body), { capLength: true });
+  const costs: MeasuredCostInput[] = [];
+  const bodies = await splitBodyIntoParts(baseTitle, body, targetParts, anchor.tier as Tier, (usage) =>
+    costs.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" })
+  );
+  const partCount = bodies.length;
+  const seriesId = partCount > 1 ? anchor.seriesId ?? randomUUID() : undefined;
+
+  const drafts = bodies.map((partBody, i) =>
+    makePartDraft(original, baseTitle, partBody, i + 1, partCount, discovery)
+  );
+  const rebuilt = await rebuildSeriesFromDrafts(anchor, seriesReels, drafts, seriesId);
+  await recordSeriesStoryCosts(rebuilt, costs, "Update re-cut");
+  return rebuilt;
+}
+
+/**
+ * Overwrite a series' reels from a list of part drafts: reuse existing reels in
+ * order (clearing their assets), clone new ones as needed, delete leftovers, and
+ * re-enqueue the plan stage for each. Shared by re-cut and manual restructuring.
+ */
+async function rebuildSeriesFromDrafts(
+  anchor: IReel,
+  seriesReels: IReel[],
+  drafts: StoryPartDraft[],
+  seriesId: string | undefined
+): Promise<IReel> {
+  const partCount = drafts.length;
+  const staleMedia: string[] = [];
+  const updated: IReel[] = [];
+  for (let i = 0; i < drafts.length; i++) {
+    const reel = seriesReels[i] ?? cloneSeriesReelFromAnchor(anchor, { partNumber: i + 1, partCount });
+    if (seriesReels[i]) staleMedia.push(...(await resetReelForReplan(reel)));
+    reel.title = drafts[i].title;
+    reel.hook = drafts[i].title;
+    reel.redditStory = redditPayloadFromStoryPart(drafts[i]);
+    reel.markModified("redditStory");
+    reel.seriesId = seriesId;
+    reel.partNumber = i + 1;
+    reel.partCount = partCount;
+    reel.status = "planning";
+    reel.progress = 5;
+    reel.error = undefined;
+    await reel.save();
+    updated.push(reel);
+    await removeReelJob(reel._id.toString());
+    await enqueueReelPlan(reel._id.toString());
+  }
+
+  // Delete any parts beyond the new count.
+  const keep = new Set(updated.map((r) => r._id.toString()));
+  for (const reel of seriesReels) {
+    if (!keep.has(reel._id.toString())) await deleteReel(reel._id.toString());
+  }
+  await deleteS3Urls(staleMedia);
+
+  const returnId = keep.has(anchor._id.toString()) ? anchor._id.toString() : updated[0]._id.toString();
+  return loadReel(returnId);
+}
+
+/**
+ * Manually restructure a Reddit series into `parts` episodes — split a single
+ * reel into several, add more parts, or re-balance — by concatenating the
+ * current story across siblings and re-splitting. Works in plan_review or after
+ * creation. Costs LLM cut-selection credits and re-plans each part.
+ */
+export async function restructureSeriesParts(
+  reelId: string,
+  parts: number | "auto"
+): Promise<IReel> {
+  const anchor = await loadReel(reelId);
+  assertEditable(anchor);
+  if (anchor.strategy !== "gameplay_overlay" || !anchor.redditStory) {
+    throw new Error("Series restructuring is only supported for Reddit gameplay reels");
+  }
+  const seriesReels = anchor.seriesId
+    ? sortSeriesReels(await listReelsBySeries(anchor.seriesId))
+    : [anchor];
+  for (const r of seriesReels) assertEditable(r);
+
+  const card = anchor.redditStory;
+  const baseTitle = card.seedTitle ?? card.title;
+  const fullBody = cleanRedditBody(seriesReels.map((r) => r.redditStory?.body ?? "").join(" "));
+  if (!fullBody.trim()) throw new Error("No story text to restructure");
+
+  const targetParts = resolvePartCount(parts, wordCount(fullBody), { capLength: true });
+  const costs: MeasuredCostInput[] = [];
+  const bodies = await splitBodyIntoParts(baseTitle, fullBody, targetParts, anchor.tier as Tier, (usage) =>
+    costs.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" })
+  );
+  const partCount = bodies.length;
+  const seriesId = partCount > 1 ? anchor.seriesId ?? randomUUID() : undefined;
+
+  // Reconstruct the card fields the drafts need (no re-fetch of the source post).
+  const pseudo: RedditPost = {
+    id: "",
+    title: baseTitle,
+    body: "",
+    url: card.seedUrl ?? "",
+    subreddit: card.subreddit ?? "",
+    author: card.author ?? "",
+    ups: card.upvotes ?? 0,
+    comments: card.comments ?? 0,
+    ageHours: card.ageHours ?? 0,
+    createdUtc: 0,
+  };
+  const discovery = card.updateDiscovery ? payloadToDiscovery(card.updateDiscovery) : undefined;
+  const drafts = bodies.map((b, i) => makePartDraft(pseudo, baseTitle, b, i + 1, partCount, discovery));
+  const rebuilt = await rebuildSeriesFromDrafts(anchor, seriesReels, drafts, seriesId);
+  await recordSeriesStoryCosts(rebuilt, costs, "Series restructure");
+  return rebuilt;
+}
+
+/**
+ * Paid, cached editorial advice for the current assembled story. It reads every
+ * sibling body so an included follow-up/manual link is assessed as part of the
+ * same narrative, not as an afterthought on the final episode.
+ */
+export async function getSeriesStructureAdvice(reelId: string): Promise<SeriesStructureAdvice & { currentParts: number }> {
+  const anchor = await loadReel(reelId);
+  if (anchor.strategy !== "gameplay_overlay" || !anchor.redditStory) {
+    throw new Error("Series advice is only supported for Reddit gameplay reels");
+  }
+  const seriesReels = anchor.seriesId
+    ? sortSeriesReels(await listReelsBySeries(anchor.seriesId))
+    : [anchor];
+  const body = cleanRedditBody(seriesReels.map((reel) => reel.redditStory?.body ?? "").join(" "));
+  if (!body) throw new Error("No story text is available to assess");
+  const ledgerReel = seriesReels[0];
+  const fingerprint = createHash("sha256").update(body).digest("hex");
+  const cached = ledgerReel.redditStory?.structureAdvice;
+  if (cached?.fingerprint === fingerprint) {
+    // The assessment belongs to the assembled series, but each Studio route
+    // receives one part. Mirror the shared state so opening Part 2+ never
+    // appears to have skipped the assessment already recorded on Part 1.
+    const missingOnPart = seriesReels.filter(
+      (part) => part.redditStory?.structureAdvice?.fingerprint !== fingerprint
+    );
+    if (missingOnPart.length) {
+      await Promise.all(
+        missingOnPart.map(async (part) => {
+          if (!part.redditStory) return;
+          part.redditStory.structureAdvice = { ...cached, fingerprint };
+          part.markModified("redditStory");
+          await part.save();
+        })
+      );
+    }
+    return {
+      wordCount: cached.wordCount,
+      sentenceCount: cached.sentenceCount,
+      estimatedDurationSeconds: cached.estimatedDurationSeconds,
+      minimumParts: cached.minimumParts,
+      recommendedParts: cached.recommendedParts,
+      reason: cached.reason,
+      breaks: cached.breaks.map((item) => ({ ...item })),
+      hasWeakBreaks: cached.hasWeakBreaks,
+      currentParts: seriesReels.length,
+    };
+  }
+
+  const costs: MeasuredCostInput[] = [];
+  const advice = await assessVerbatimSeriesStructureWithAi(body, ledgerReel.tier as Tier, (usage) =>
+    costs.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" })
+  );
+  const persistedAdvice = { fingerprint, ...advice, assessedAt: new Date() };
+  for (const part of seriesReels) {
+    if (!part.redditStory) continue;
+    part.redditStory.structureAdvice = persistedAdvice;
+    part.markModified("redditStory");
+  }
+  // The assessment is a real OpenRouter LLM request, so record it immediately
+  // on part 1 even though the series may still be awaiting plan approval.
+  applyMeasuredCostsToReel(ledgerReel, costs, "Series structure assessment");
+  await Promise.all(seriesReels.map((part) => part.save()));
+  return {
+    ...advice,
+    currentParts: seriesReels.length,
+  };
+}
+
+type StructureChoice = "recommended" | "manual";
+
+/** Record an explicit choice; the recommended choice can safely re-split first. */
+export async function chooseSeriesStructure(reelId: string, choice: StructureChoice): Promise<IReel> {
+  const anchor = await loadReel(reelId);
+  assertEditable(anchor);
+  if (anchor.strategy !== "gameplay_overlay" || !anchor.redditStory) {
+    throw new Error("Series structure choices are only supported for Reddit gameplay reels");
+  }
+  const series = anchor.seriesId ? sortSeriesReels(await listReelsBySeries(anchor.seriesId)) : [anchor];
+  const ledger = series[0];
+  const body = cleanRedditBody(series.map((reel) => reel.redditStory?.body ?? "").join(" "));
+  const fingerprint = createHash("sha256").update(body).digest("hex");
+  const advice = ledger.redditStory?.structureAdvice;
+  if (advice?.fingerprint !== fingerprint) {
+    throw new Error("Run the AI structure assessment for the current story before choosing a plan");
+  }
+
+  let result = anchor;
+  if (choice === "recommended" && advice.recommendedParts !== series.length) {
+    result = await restructureSeriesParts(reelId, advice.recommendedParts);
+  }
+
+  const updatedSeries = result.seriesId ? sortSeriesReels(await listReelsBySeries(result.seriesId)) : [result];
+  const updatedLedger = updatedSeries[0];
+  if (!updatedLedger.redditStory) throw new Error("Story data disappeared while recording structure choice");
+  const updatedBody = cleanRedditBody(updatedSeries.map((part) => part.redditStory?.body ?? "").join(" "));
+  const updatedFingerprint = createHash("sha256").update(updatedBody).digest("hex");
+  const persistedAdvice = { ...advice, fingerprint: updatedFingerprint };
+  const persistedDecision = { fingerprint: updatedFingerprint, choice, decidedAt: new Date() };
+  for (const part of updatedSeries) {
+    if (!part.redditStory) continue;
+    part.redditStory.structureAdvice = persistedAdvice;
+    part.redditStory.structureDecision = persistedDecision;
+    part.markModified("redditStory");
+  }
+  await Promise.all(updatedSeries.map((part) => part.save()));
+  return loadReel(result._id.toString());
+}
+
+async function assertStructureChoice(reel: IReel): Promise<void> {
+  if (reel.strategy !== "gameplay_overlay" || !reel.redditStory?.body) return;
+  const series = reel.seriesId ? sortSeriesReels(await listReelsBySeries(reel.seriesId)) : [reel];
+  const ledger = series[0];
+  const body = cleanRedditBody(series.map((part) => part.redditStory?.body ?? "").join(" "));
+  const fingerprint = createHash("sha256").update(body).digest("hex");
+  const decision = ledger.redditStory?.structureDecision;
+  if (decision?.fingerprint !== fingerprint) {
+    throw new Error("Review Series structure and accept the AI recommendation or keep your manual plan before generating");
+  }
+}
+
+/** Append newly-included followups as new part(s); existing parts stay byte-stable. */
+async function appendUpdatesAsParts(
+  anchor: IReel,
+  seriesReels: IReel[],
+  original: RedditPost,
+  discovery: UpdateDiscovery,
+  includedKeys: string[],
+  priorIncluded: Set<string>
+): Promise<IReel> {
+  const baseTitle = anchor.redditStory?.seedTitle ?? original.title;
+  const newly = discovery.candidates.filter(
+    (c) => includedKeys.includes(c.key) && !priorIncluded.has(c.key)
+  );
+
+  const seriesId = anchor.seriesId!;
+  const oldCount = seriesReels.length;
+
+  // Persist the shared review state on every episode, so it remains available
+  // no matter which part the user opens in Studio.
+  const discoveryPayload = discoveryToPayload(discovery, includedKeys);
+
+  if (newly.length === 0) {
+    for (const reel of seriesReels) {
+      if (!reel.redditStory) continue;
+      reel.redditStory.updateDiscovery = discoveryPayload;
+      reel.markModified("redditStory");
+      await reel.save();
+    }
+    return loadReel(anchor._id.toString());
+  }
+
+  // Build the appended body from the new candidates, split into 1..N episodes.
+  const deltaBody = cleanRedditBody(
+    newly
+      .map((c) => `${c.title.toLowerCase().includes("update") ? c.title : "Update"}: ${c.body}`)
+      .join("\n\n")
+  );
+  const addCount = resolvePartCount("auto", wordCount(deltaBody), { capLength: true });
+  const costs: MeasuredCostInput[] = [];
+  const bodies = await splitBodyIntoParts(baseTitle, deltaBody, addCount, anchor.tier as Tier, (usage) =>
+    costs.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" })
+  );
+  const newCount = oldCount + bodies.length;
+
+  // Bump partCount on every existing part (numbering) — no body/asset changes.
+  for (const reel of seriesReels) {
+    reel.partCount = newCount;
+    if (reel.redditStory) {
+      reel.redditStory.partCount = newCount;
+      reel.redditStory.updateDiscovery = discoveryPayload;
+      reel.redditStory.sourceSegment ??= "original";
+      reel.markModified("redditStory");
+    }
+  }
+  for (const reel of seriesReels) await reel.save();
+
+  // Create the appended parts (each derives from a new followup segment).
+  for (let j = 0; j < bodies.length; j++) {
+    const partNumber = oldCount + j + 1;
+    const draft = makePartDraft(original, baseTitle, bodies[j], partNumber, newCount, discovery);
+    const reel = cloneSeriesReelFromAnchor(anchor, { partNumber, partCount: newCount });
+    reel.seriesId = seriesId;
+    reel.title = draft.title;
+    reel.hook = draft.title;
+    const payload = redditPayloadFromStoryPart(draft);
+    payload.sourceSegment = newly[Math.min(j, newly.length - 1)].key;
+    reel.redditStory = payload;
+    reel.markModified("redditStory");
+    reel.status = "planning";
+    reel.progress = 5;
+    await reel.save();
+    await enqueueReelPlan(reel._id.toString());
+  }
+
+  const updated = await loadReel(anchor._id.toString());
+  await recordSeriesStoryCosts(updated, costs, "Append updates");
+  return updated;
 }

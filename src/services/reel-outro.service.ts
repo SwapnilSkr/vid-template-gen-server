@@ -12,6 +12,7 @@ import {
 } from "../models";
 import { ensureDir, generateFilename } from "../utils";
 import { generateNarration, type MediaUsageCallback } from "./openrouter-media.service";
+import { recordOperationLog } from "./operation-log.service";
 
 const W = 1080;
 const H = 1920;
@@ -78,6 +79,102 @@ export function resolveReelDestinations(reel: IReel): IReelDestination[] {
   return [primaryDestination(reel), ...(reel.destinations ?? [])];
 }
 
+/**
+ * Invalidate rendered final videos when their shared body, narration, or
+ * destination-specific outro has changed. The values returned are no longer
+ * referenced and must be deleted from S3 only after the caller saves `reel`.
+ *
+ * This deliberately updates the canonical primary output as well as extras:
+ * a ready flag must always mean "this exact channel's current final video",
+ * never merely "a video used to exist for this channel".
+ */
+export function invalidateFinalDestinationRenders(
+  reel: IReel,
+  options: {
+    reason: string;
+    includePrimary?: boolean;
+    includeExtras?: boolean;
+    clearOutroAudio?: boolean;
+  }
+): string[] {
+  const includePrimary = options.includePrimary ?? true;
+  const includeExtras = options.includeExtras ?? true;
+  const stale: string[] = [];
+  let affected = 0;
+
+  if (includePrimary && reel.outputUrl) {
+    stale.push(reel.outputUrl);
+    reel.outputUrl = undefined;
+    affected += 1;
+  }
+
+  if (includeExtras) {
+    for (const destination of reel.destinations ?? []) {
+      if (destination.outputUrl) {
+        stale.push(destination.outputUrl);
+        affected += 1;
+      }
+      destination.outputUrl = undefined;
+      if (options.clearOutroAudio && destination.outroAudioUrl) {
+        stale.push(destination.outroAudioUrl);
+        destination.outroAudioUrl = undefined;
+      }
+      destination.status = "pending";
+      destination.error = undefined;
+    }
+    if ((reel.destinations ?? []).length) reel.markModified("destinations");
+  }
+
+  if (affected || (includeExtras && (reel.destinations ?? []).length)) {
+    recordOperationLog({
+      scope: "system",
+      event: "outro.destination_outputs_invalidated",
+      message: "Final destination outputs were invalidated after an upstream reel change",
+      reelId: reel._id.toString(),
+      metadata: {
+        reason: options.reason,
+        includePrimary,
+        includeExtras,
+        clearOutroAudio: Boolean(options.clearOutroAudio),
+        affectedOutputCount: affected,
+      },
+    });
+  }
+  return [...new Set(stale)];
+}
+
+/**
+ * Resolve the exact rendered output that is allowed to be uploaded to one
+ * social destination.  Publishing a channel-specific outro through the
+ * canonical `reel.outputUrl` would leak the primary channel's branding into a
+ * sibling account, so there is deliberately no fallback to another channel's
+ * video here.
+ */
+export function resolveRenderedPublishDestination(
+  reel: IReel,
+  platform: IReelDestination["platform"],
+  channelId?: string
+): IReelDestination {
+  const primary = primaryDestination(reel);
+  const destination = channelId
+    ? resolveReelDestinations(reel).find((candidate) => candidate.platform === platform && candidate.channelId === channelId)
+    : primary.platform === platform
+      ? primary
+      : undefined;
+
+  if (!destination) {
+    throw new Error(
+      `No ${platform} destination is configured for this account. Add it in Channels and render its dedicated outro before publishing.`
+    );
+  }
+  if (destination.status !== "ready" || !destination.outputUrl) {
+    throw new Error(
+      `${(destination.channelLabel ?? destination.channelId) || platform} does not have a ready destination render. Re-render its outro before publishing.`
+    );
+  }
+  return destination;
+}
+
 export async function resolveOutroBrand(
   reel: IReel,
   source?: OutroSource
@@ -94,6 +191,9 @@ export async function resolveOutroBrand(
         status: "active",
       })
     : undefined;
+  // CTA copy follows the destination platform whenever the creator leaves it
+  // blank. A saved value remains an intentional per-reel/channel override.
+  const defaultCta = src.outroInstagramChannelId ? "FOLLOW" : "SUBSCRIBE";
 
   if (reel.niche === "reddit") {
     const channel = explicitChannel ?? (await findChannelForNiche(["reddit", "reddit_stories", "aita"]));
@@ -105,7 +205,7 @@ export async function resolveOutroBrand(
       spokenLine: src.outro?.spokenLine?.trim(),
       title: src.outro?.title?.trim(),
       subtitle: src.outro?.subtitle?.trim(),
-      cta: src.outro?.cta?.trim(),
+      cta: src.outro?.cta?.trim() || defaultCta,
       footer: src.outro?.footer?.trim(),
     };
   }
@@ -121,7 +221,7 @@ export async function resolveOutroBrand(
       spokenLine: src.outro?.spokenLine?.trim(),
       title: src.outro?.title?.trim(),
       subtitle: src.outro?.subtitle?.trim(),
-      cta: src.outro?.cta?.trim(),
+      cta: src.outro?.cta?.trim() || defaultCta,
       footer: src.outro?.footer?.trim(),
     };
   }
@@ -168,7 +268,16 @@ export async function appendBrandedOutro(
   if ((dest ? dest.skipBrandedOutro : reel.skipBrandedOutro)) return undefined;
 
   const brand = await resolveOutroBrand(reel, dest ? destinationOutroSource(dest) : undefined);
-  if (!brand) return undefined;
+  // A configured channel destination must never quietly fall back to the
+  // shared bare body: that would create a video whose provenance/branding is
+  // ambiguous at publish time. Legacy unsupported niches retain their prior
+  // no-outro behavior until they get a branded-card implementation.
+  if (!brand) {
+    if (dest || reel.niche === "reddit" || reel.niche.startsWith("horror")) {
+      throw new Error("Could not resolve a branded outro for this destination");
+    }
+    return undefined;
+  }
 
   const key = dest ? `${reel._id}_${dest.id}` : `${reel._id}`;
   const cachedOutroAudioUrl = dest ? dest.outroAudioUrl : reel.outroAudioUrl;
@@ -234,7 +343,16 @@ export async function appendBrandedOutro(
     console.warn(
       `Skipping branded outro for reel ${reel._id}: ${error instanceof Error ? error.message : String(error)}`
     );
-    return undefined;
+    recordOperationLog({
+      scope: "external",
+      level: "error",
+      event: "outro.render_failed",
+      message: "A branded outro could not be rendered; the destination will not receive a fallback body-only video",
+      reelId: reel._id.toString(),
+      metadata: dest ? { destinationId: dest.id, platform: dest.platform, channelId: dest.channelId } : { primary: true },
+      error,
+    });
+    throw error;
   } finally {
     await Promise.all(tmp.map((file) => unlink(file).catch(() => {})));
   }

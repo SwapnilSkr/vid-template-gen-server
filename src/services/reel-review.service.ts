@@ -6,6 +6,7 @@ import { config } from "../config";
 import { resolveModels } from "../config/models";
 import { Reel, type IReel, type IReelReviewPackage } from "../models";
 import { getErrorMessage } from "../types";
+import { recordOperationLog } from "./operation-log.service";
 import { ensureDir, escapeFilterPath, applyOutputOptions, generateFilename } from "../utils";
 import { generateText } from "ai";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
@@ -15,7 +16,7 @@ import {
   applyMeasuredCostsToReel,
   type MeasuredCostInput,
 } from "./reel-cost.service";
-import { deleteFromS3, uploadImage } from "./s3.service";
+import { deleteS3Urls, uploadImage } from "./s3.service";
 import { renderRedditCard } from "./reddit-card.service";
 import { pickGameplay } from "./reel-gameplay.service";
 import { listTrendReferences } from "./trend-reference.service";
@@ -240,6 +241,13 @@ Rules:
     return { title, description };
   } catch (error: unknown) {
     console.warn(`Review copy generation failed, using fallback: ${getErrorMessage(error)}`);
+    recordOperationLog({
+      scope: "external",
+      level: "warn",
+      event: "openrouter.review_copy_fallback",
+      message: "Review copy generation failed; using deterministic title and description",
+      error,
+    });
     return { title: fallbackTitle, description: fallbackDescription };
   }
 }
@@ -466,6 +474,13 @@ async function renderThumbnailPng(
     return finalPath;
   } catch (error: unknown) {
     console.warn(`🖼️  AI thumbnail failed, falling back to flat design: ${getErrorMessage(error)}`);
+    recordOperationLog({
+      scope: "external",
+      level: "warn",
+      event: "review.thumbnail_flat_fallback",
+      message: "AI review-thumbnail generation failed; using the flat thumbnail design",
+      error,
+    });
     await Promise.all(localFiles.map((f) => unlink(f).catch(() => {})));
     return renderFlatThumbnailPng(title, subtitle, niche);
   }
@@ -691,9 +706,7 @@ export async function replaceReviewThumbnail(
   reel.review = { ...current, thumbnailUrl, updatedAt: new Date() };
   await reel.save();
   if (previousThumbnailUrl && previousThumbnailUrl !== thumbnailUrl) {
-    await deleteFromS3(previousThumbnailUrl).catch((error) => {
-      console.warn(`Could not delete previous thumbnail for reel ${reel._id}: ${getErrorMessage(error)}`);
-    });
+    await deleteS3Urls([previousThumbnailUrl]);
   }
   return reel.review;
 }
@@ -775,6 +788,8 @@ export interface ThumbnailSourceInput {
   sceneIndex?: number;
   aspectRatio?: ThumbnailAspectRatio;
   cleanGameplay?: boolean;
+  includeTitleCard?: boolean;
+  includeShortsCover?: boolean;
 }
 
 const CLEAN_GAMEPLAY_PREVIEW_CACHE_MAX = 48;
@@ -792,6 +807,8 @@ function cleanGameplayPreviewKey(reel: IReel, input: ThumbnailSourceInput): stri
     story?.ageHours,
     story?.upvotes,
     story?.comments,
+    input.includeTitleCard !== false,
+    input.includeShortsCover === true ? reel.shortsCover?.imageUrl ?? "" : "",
   ].join("|");
 }
 
@@ -819,7 +836,14 @@ export async function previewThumbnailSource(
           cleanGameplayPreviewCache.set(cacheKey, cached);
           return cached;
         }
-        await renderCleanGameplayTitlePreview(reel, input.atSeconds ?? 0, outPath, input.aspectRatio);
+        await renderCleanGameplayTitlePreview(
+          reel,
+          input.atSeconds ?? 0,
+          outPath,
+          input.aspectRatio,
+          input.includeTitleCard !== false,
+          input.includeShortsCover === true,
+        );
         const buffer = await readFile(outPath);
         const dataUrl = `data:image/png;base64,${buffer.toString("base64")}`;
         cleanGameplayPreviewCache.set(cacheKey, dataUrl);
@@ -851,6 +875,8 @@ async function renderCleanGameplayTitlePreview(
   atSeconds: number,
   output: string,
   aspectRatio?: ThumbnailAspectRatio,
+  includeTitleCard = true,
+  includeShortsCover = false,
 ): Promise<void> {
   if (!reel.gameplayKey) throw new Error("Reel has no original gameplay clip");
   const framePath = join(config.processingPath, generateFilename("clean_gameplay", "png"));
@@ -861,25 +887,37 @@ async function renderCleanGameplayTitlePreview(
     if (value! >= 1_000) return `${(value! / 1_000).toFixed(1)}k`;
     return String(Math.round(value!));
   };
-  const card = await renderRedditCard(story?.title ?? reel.title ?? "Reddit story", {
-    subreddit: story?.subreddit,
-    username: story?.cardUsername ?? (story?.author ? `u/${story.author.replace(/^u\//, "")}` : undefined),
-    ageHours: story?.ageHours,
-    upvotes: count(story?.upvotes),
-    comments: count(story?.comments),
-  });
+  const card = includeTitleCard
+    ? await renderRedditCard(story?.title ?? reel.title ?? "Reddit story", {
+        subreddit: story?.subreddit,
+        username: story?.cardUsername ?? (story?.author ? `u/${story.author.replace(/^u\//, "")}` : undefined),
+        ageHours: story?.ageHours,
+        upvotes: count(story?.upvotes),
+        comments: count(story?.comments),
+      })
+    : undefined;
+  const shortsCoverUrl = includeShortsCover ? reel.shortsCover?.imageUrl : undefined;
   try {
     // pickGameplay resolves to the existing local clip cache, downloading the
     // S3 object only once. Repeated timeline scrubs therefore seek local disk.
     const gameplay = await pickGameplay(reel.gameplayKey);
     await extractVideoFrame(gameplay.path, atSeconds, framePath, aspectRatio);
     const size = thumbnailSize(aspectRatio ?? "9:16");
-    const x = Math.round((size.width - card.width) / 2);
+    const x = card ? Math.round((size.width - card.width) / 2) : 0;
     await new Promise<void>((resolve, reject) => {
-      ffmpeg()
-        .input(framePath)
-        .input(card.path)
-        .complexFilter(`[0:v][1:v]overlay=${x}:250[v]`, ["v"])
+      const command = ffmpeg().input(framePath);
+      if (card) command.input(card.path);
+      if (shortsCoverUrl) command.input(shortsCoverUrl);
+      const baseLabel = card ? "card" : "base";
+      const filters = [
+        card ? `[0:v][1:v]overlay=${x}:250[card]` : `[0:v]null[base]`,
+      ];
+      if (shortsCoverUrl) {
+        const coverInput = card ? 2 : 1;
+        filters.push(`[${baseLabel}][${coverInput}:v]overlay=0:0[cover]`);
+      }
+      command
+        .complexFilter(filters, [shortsCoverUrl ? "cover" : baseLabel])
         .outputOptions(["-frames:v", "1"])
         .output(output)
         .on("end", () => resolve())
@@ -887,7 +925,7 @@ async function renderCleanGameplayTitlePreview(
         .run();
     });
   } finally {
-    await Promise.all([framePath, card.path].map((path) => unlink(path).catch(() => {})));
+    await Promise.all((card ? [framePath, card.path] : [framePath]).map((path) => unlink(path).catch(() => {})));
   }
 }
 

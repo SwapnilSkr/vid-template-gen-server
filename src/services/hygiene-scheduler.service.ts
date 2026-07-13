@@ -2,6 +2,7 @@ import { getErrorMessage } from "../types";
 import { cleanupLocalProcessing } from "./local-cleanup.service";
 import { reconcileS3Assets } from "./s3-reconciliation.service";
 import { cleanupGameplayDownloadCache } from "./gameplay-cache.service";
+import { recordOperationLog } from "./operation-log.service";
 
 // ============================================
 // In-process hygiene scheduler — the same pattern as the story top-up
@@ -49,6 +50,13 @@ export function startHygieneScheduler(): void {
       }
     } catch (error: unknown) {
       console.error("Hygiene sweep failed:", getErrorMessage(error));
+      recordOperationLog({
+        scope: "system",
+        level: "error",
+        event: "scheduler.hygiene_sweep_failed",
+        message: "Storage hygiene scheduler failed",
+        error,
+      });
     }
   };
 

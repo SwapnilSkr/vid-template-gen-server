@@ -40,6 +40,7 @@ async function referencedKeys(): Promise<Set<string>> {
       outroAudioUrl: 1,
       "review.thumbnailUrl": 1,
       "shortsCover.imageUrl": 1,
+      destinations: 1,
       scenes: 1,
       voiceVariants: 1,
     }
@@ -54,6 +55,10 @@ async function referencedKeys(): Promise<Set<string>> {
     addUrl(reel.outroAudioUrl);
     addUrl(reel.review?.thumbnailUrl);
     addUrl(reel.shortsCover?.imageUrl);
+    for (const destination of reel.destinations ?? []) {
+      addUrl(destination.outputUrl);
+      addUrl(destination.outroAudioUrl);
+    }
     for (const scene of reel.scenes) {
       addUrl(scene.assetUrl);
       addUrl(scene.audioUrl);

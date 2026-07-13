@@ -2,7 +2,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import { config } from "../config";
 import { InstagramChannel, OAuthState, Reel } from "../models";
 import { getErrorMessage } from "../types";
-import { ensureReelReviewPackage } from "./reel-review.service";
+import { recordOperationLog } from "./operation-log.service";
+import { resolveRenderedPublishDestination } from "./reel-outro.service";
 
 const graphBase = () => `https://graph.instagram.com/${config.instagramApiVersion}`;
 const scopes = ["instagram_business_basic", "instagram_business_content_publish"];
@@ -95,8 +96,16 @@ async function accessTokenFor(channel: InstanceType<typeof InstagramChannel>): P
   return token;
 }
 export async function publishReelToInstagram(reelId: string, channelId?: string): Promise<void> {
-  const reel = await Reel.findById(reelId); if (!reel?.outputUrl) throw new Error("Reel has no rendered video yet");
-  const channel = await resolveInstagramChannel(channelId);
+  const reel = await Reel.findById(reelId); if (!reel) throw new Error("Reel not found");
+  const destination = resolveRenderedPublishDestination(reel, "instagram", channelId);
+  const channel = await resolveInstagramChannel(channelId ?? destination.channelId);
+  recordOperationLog({
+    scope: "system",
+    event: "publish.destination_output_selected",
+    message: "Selected the destination-specific rendered output for Instagram publishing",
+    reelId,
+    metadata: { platform: "instagram", channelId: channel.channelKey, destinationId: destination.id },
+  });
   const priorPublish = reel.instagram.find((publish) => publish.channelId === channel.channelKey);
   // Atomic positional updates are essential here: review metadata and multiple
   // destination workers can update the same reel concurrently. Saving the
@@ -115,7 +124,17 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
   };
   await setStatus("uploading", { message: "Preparing Reel for Instagram…", error: undefined });
   try {
-    const review = await ensureReelReviewPackage(reelId); const caption = (reel.instagramSettings?.caption ?? review.description ?? review.title ?? reel.title ?? reel.hook ?? "").slice(0, 2200);
+    // Instagram copy is deliberately independent from the YouTube review
+    // package. An absent Instagram caption means an intentionally blank
+    // Instagram caption; it must never inherit a YouTube description/title.
+    const caption = (reel.instagramSettings?.caption ?? "").slice(0, 2200);
+    recordOperationLog({
+      scope: "system",
+      event: "publish.instagram_caption_selected",
+      message: "Selected the saved platform-specific Instagram caption",
+      reelId,
+      metadata: { channelId: channel.channelKey, source: "instagramSettings", length: caption.length },
+    });
     const token = await accessTokenFor(channel);
     let containerId = priorPublish?.containerId;
     if (containerId) {
@@ -125,7 +144,7 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
       // The current Vertical Cover is an overlay asset, not guaranteed to be a
       // flattened 9:16 image. Sending it as Meta's native cover can produce a
       // text-only cover, so let Instagram choose from the final MP4 for now.
-      const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media_type: "REELS", video_url: reel.outputUrl, caption, share_to_feed: reel.instagramSettings?.shareToFeed ?? true }) });
+      const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ media_type: "REELS", video_url: destination.outputUrl, caption, share_to_feed: reel.instagramSettings?.shareToFeed ?? true }) });
       containerId = create.id;
       // Persist this before polling. A worker restart or timeout can now
       // continue the accepted container without creating a duplicate post.
@@ -157,6 +176,15 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
       permalink = (await graph<{ permalink?: string }>(`/${published.id}?fields=permalink`, token)).permalink;
     } catch (error) {
       console.warn(`Instagram Reel ${published.id} published before permalink was available: ${getErrorMessage(error)}`);
+      recordOperationLog({
+        scope: "external",
+        level: "warn",
+        event: "instagram.permalink_pending",
+        message: "Instagram publish succeeded before its permalink was available",
+        reelId,
+        metadata: { mediaId: published.id },
+        error,
+      });
     }
     await setStatus("published", { containerId, mediaId: published.id, url: permalink, error: undefined, message: permalink ? "Published." : "Published — Instagram permalink is still becoming available.", publishedAt: new Date() }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
   } catch (error) { const message = getErrorMessage(error); await setStatus("failed", { error: message, message: `Failed: ${message}` }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastError: message, status: /token|access/i.test(message) ? "needs_reauth" : channel.status } }); throw error; }

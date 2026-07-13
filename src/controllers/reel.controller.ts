@@ -41,12 +41,18 @@ import {
   moveSeriesBoundary,
   mergePartIntoPrevious,
   updateRedditCard,
+  rescanReelUpdates,
+  applyReelUpdates,
+  restructureSeriesParts,
+  getSeriesStructureAdvice,
+  chooseSeriesStructure,
   listReelDestinations,
   addReelDestination,
   removeReelDestination,
   updateReelDestinationOutro,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
+import { resolveRenderedPublishDestination } from "../services/reel-outro.service";
 import { TTS_VOICE_CATALOG } from "../config/models";
 import { listStylePresets } from "../config/style-presets";
 import { listFonts, FONTS_DIR } from "../config/fonts";
@@ -74,6 +80,10 @@ import type {
   TReplanReelBody,
   TReplanReelSeriesBody,
   TMoveBoundaryBody,
+  TRescanUpdatesBody,
+  TApplyUpdatesBody,
+  TRestructurePartsBody,
+  TStructureDecisionBody,
   TDestinationInputBody,
   TDestinationParams,
   TUpdateDestinationOutroBody,
@@ -190,6 +200,8 @@ export async function createReelController({ body, set }: CreateReelContext) {
       ttsFormat: body.ttsFormat,
       selectedStoryId: body.selectedStoryId,
       selectedSeedUrl: body.selectedSeedUrl,
+      fetchUpdates: body.fetchUpdates,
+      manualUpdateUrls: body.manualUpdateUrls,
     });
     const primary = reel.reel;
     return {
@@ -213,6 +225,14 @@ export async function createReelController({ body, set }: CreateReelContext) {
     };
   } catch (error: unknown) {
     const mapped = httpErrorFromUnknown(error);
+    // Mutations used to return a structured error to the client without any
+    // server-side trace, making rejected guards indistinguishable from a UI
+    // no-op while diagnosing a live Studio session.
+    console.error("Reel mutation rejected", {
+      status: mapped.status,
+      code: mapped.body.code,
+      error: mapped.body.error,
+    });
     set.status = mapped.status;
     return mapped.body;
   }
@@ -247,6 +267,10 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       strategy: reel.strategy,
       status: reel.status,
       progress: reel.progress,
+      // This is the live worker label (for example, "Narration 3/12").
+      // Studio replaces its local reel with this polling response, so omitting
+      // it made active runs look like they had no logs or current activity.
+      currentStep: reel.currentStep,
       title: reel.title,
       source: reel.storySource,
       genre: reel.genre,
@@ -286,6 +310,10 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       outroChannelId: reel.outroChannelId,
       outroInstagramChannelId: reel.outroInstagramChannelId,
       outro: reel.outro,
+      // Studio replaces its local reel with this polling response. Keep the
+      // persisted destinations here so a save/poll cycle cannot make an
+      // already-added destination disappear from the panel or picker.
+      destinations: reel.destinations,
       skipPartOutro: reel.skipPartOutro,
       skipBrandedOutro: reel.skipBrandedOutro,
       thumbnailMode: reel.thumbnailMode,
@@ -400,6 +428,12 @@ export async function publishReelController({
       error: `Unknown YouTube channel: ${body.channelId}`,
     };
   }
+  try {
+    resolveRenderedPublishDestination(reel, "youtube", body?.channelId);
+  } catch (error) {
+    set.status = 409;
+    return { success: false, error: getErrorMessage(error) };
+  }
 
   reel.youtube = {
     status: reel.youtube?.status === "uploading" ? "uploading" : "pending",
@@ -431,6 +465,17 @@ export async function distributeReelController({ params, body, set }: PublishRee
   const [youtube, instagram] = await Promise.all([listAllYouTubePublishChannels(), listInstagramChannels()]);
   const unknown = [...youtubeIds.filter((id) => !youtube.some((c) => c.id === id)), ...instagramIds.filter((id) => !instagram.some((c) => c.id === id))];
   if (unknown.length) { set.status = 400; return { success: false, error: `Unknown distribution account(s): ${unknown.join(", ")}` }; }
+  const unavailable: string[] = [];
+  for (const id of youtubeIds) {
+    try { resolveRenderedPublishDestination(reel, "youtube", id); } catch (error) { unavailable.push(`${id}: ${getErrorMessage(error)}`); }
+  }
+  for (const id of instagramIds) {
+    try { resolveRenderedPublishDestination(reel, "instagram", id); } catch (error) { unavailable.push(`${id}: ${getErrorMessage(error)}`); }
+  }
+  if (unavailable.length) {
+    set.status = 409;
+    return { success: false, error: `Only ready destination renders can be published. ${unavailable.join(" ")}` };
+  }
   const active = instagramIds.filter((id) => {
     const state = reel.instagram.find((publish) => publish.channelId === id)?.status;
     return state === "pending" || state === "uploading";
@@ -740,6 +785,25 @@ interface MoveBoundaryContext extends Context {
   params: TIdParams;
   body: TMoveBoundaryBody;
 }
+interface RescanUpdatesContext extends Context {
+  params: TIdParams;
+  body: TRescanUpdatesBody;
+}
+interface ApplyUpdatesContext extends Context {
+  params: TIdParams;
+  body: TApplyUpdatesBody;
+}
+interface RestructurePartsContext extends Context {
+  params: TIdParams;
+  body: TRestructurePartsBody;
+}
+interface StructureAdviceContext extends Context {
+  params: TIdParams;
+}
+interface StructureDecisionContext extends Context {
+  params: TIdParams;
+  body: TStructureDecisionBody;
+}
 interface AddDestinationContext extends Context {
   params: TIdParams;
   body: TDestinationInputBody;
@@ -908,6 +972,30 @@ export async function moveSeriesBoundaryController({
 /** Merge this part's lines into the previous part, then delete this part. */
 export async function mergePartController({ params, set }: GetReelContext) {
   return runEdit(set, () => mergePartIntoPrevious(params.id));
+}
+
+/** Re-scan the OP's followups/updates; optionally add a manual followup link. */
+export async function rescanReelUpdatesController({ params, body, set }: RescanUpdatesContext) {
+  return runEdit(set, () => rescanReelUpdates(params.id, { manualUrl: body.manualUrl }));
+}
+
+/** Fold the chosen updates into the story and recompute parts (append/recut). */
+export async function applyReelUpdatesController({ params, body, set }: ApplyUpdatesContext) {
+  return runEdit(set, () => applyReelUpdates(params.id, { includedKeys: body.includedKeys, mode: body.mode }));
+}
+
+/** Manually restructure the Reddit series into a chosen number of parts. */
+export async function restructureSeriesPartsController({ params, body, set }: RestructurePartsContext) {
+  return runEdit(set, () => restructureSeriesParts(params.id, body.parts));
+}
+
+/** Read-only recommendation before the user commits to a re-split. */
+export async function getSeriesStructureAdviceController({ params, set }: StructureAdviceContext) {
+  return runEdit(set, () => getSeriesStructureAdvice(params.id));
+}
+
+export async function chooseSeriesStructureController({ params, body, set }: StructureDecisionContext) {
+  return runEdit(set, () => chooseSeriesStructure(params.id, body.choice));
 }
 
 // ---- Multi-channel destinations ----

@@ -24,7 +24,7 @@ import {
   frameFileName,
   s3PrefixFor,
 } from "../services/yt-import.service";
-import { YtImport } from "../models";
+import { YtImport, type IYtImport } from "../models";
 import { enqueueYtImport, enqueueYtImportFrames } from "../queue/queues";
 import { fileExists } from "../utils";
 
@@ -63,7 +63,6 @@ interface ExtractFramesContext extends Context {
   body: TExtractFramesBody;
 }
 
-import type { IYtImport } from "../models";
 
 function serializeImport(doc: IYtImport | null) {
   if (!doc) return null;

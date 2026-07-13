@@ -110,6 +110,57 @@ export async function renderRedditCard(
   return { path, width: CARD_W, height };
 }
 
+/**
+ * Render the default vertical opening treatment for Reddit Shorts. It is a
+ * transparent 1080x1920 foreground layer, deliberately confined to the
+ * lower title band. The gameplay stays live underneath; the Reddit card keeps
+ * its upper opening position, so this layer never competes with it.
+ */
+export async function renderRedditOpeningShortsCover(
+  title: string,
+  opts: { partNumber?: number; partCount?: number } = {}
+): Promise<string> {
+  await ensureDir(config.processingPath);
+  const headline = redditShortsCoverHeadline(title);
+  const lines = wrap(headline, 20).slice(0, 4);
+  const lineHeight = lines.length >= 4 ? 105 : lines.length === 3 ? 122 : 138;
+  const fontSize = lines.length >= 4 ? 88 : lines.length === 3 ? 102 : 118;
+  const blockH = lines.length * lineHeight + 96;
+  // The regular Reddit card is anchored at y=250. Keep the cover's panel in
+  // the lower half even for a long card so the two title treatments never
+  // overlap. The bottom cap leaves room for the Shorts UI safe area.
+  const blockY = Math.min(1_420 - blockH, Math.max(900, redditCardBottom(title) + 90));
+  const titleLines = lines
+    .map((line, index) => `<text x="540" y="${blockY + 70 + index * lineHeight}" text-anchor="middle" font-family="Impact, Arial Black, sans-serif" font-size="${fontSize}" font-weight="900" letter-spacing="1" fill="#ffffff" stroke="#000000" stroke-width="13" paint-order="stroke">${esc(line.toUpperCase())}</text>`)
+    .join("");
+  const part = opts.partCount && opts.partCount > 1 && opts.partNumber
+    ? `<text x="540" y="${blockY + blockH - 27}" text-anchor="middle" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="#ffb000">PART ${opts.partNumber} OF ${opts.partCount}</text>`
+    : "";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+    <defs><filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="12" stdDeviation="12" flood-color="#000000" flood-opacity="0.72"/></filter></defs>
+    <g filter="url(#shadow)"><rect x="72" y="${blockY - 58}" width="936" height="${blockH + 30}" rx="36" fill="#050505" fill-opacity="0.64"/></g>
+    ${titleLines}${part}
+  </svg>`;
+  const png = new Resvg(svg, { fitTo: { mode: "width", value: 1080 }, font: { loadSystemFonts: true } }).render().asPng();
+  const path = join(config.processingPath, generateFilename("reddit-opening-cover", "png"));
+  await writeFile(path, png);
+  return path;
+}
+
+/** Keep an opening headline readable instead of turning a long Reddit title
+ * into an unreadable five-line wall. The full title remains in the story. */
+export function redditShortsCoverHeadline(title: string): string {
+  const compact = title.replace(/\s+/g, " ").trim();
+  return compact.length <= 60 ? compact : `${compact.slice(0, 57).replace(/\s+\S*$/, "").trim()}…`;
+}
+
+/** Bottom edge of the card as composited by renderGameplayReel. */
+function redditCardBottom(title: string): number {
+  const lineCount = wrap(title, 32).length;
+  const cardHeight = 158 + Math.max(0, lineCount - 1) * 52 + 66 + 46;
+  return 250 + cardHeight;
+}
+
 /** Render a bold end card for multipart Reddit reels. */
 export async function renderPartOutroCard(
   nextPart: number

@@ -26,6 +26,10 @@ import {
   ReplanReelBody,
   ReplanReelSeriesBody,
   MoveBoundaryBody,
+  RescanUpdatesBody,
+  ApplyUpdatesBody,
+  RestructurePartsBody,
+  StructureDecisionBody,
   DestinationInputBody,
   DestinationParams,
   UpdateDestinationOutroBody,
@@ -69,6 +73,11 @@ import {
   replanReelSeriesController,
   moveSeriesBoundaryController,
   mergePartController,
+  rescanReelUpdatesController,
+  applyReelUpdatesController,
+  restructureSeriesPartsController,
+  getSeriesStructureAdviceController,
+  chooseSeriesStructureController,
   listReelDestinationsController,
   addReelDestinationController,
   removeReelDestinationController,
@@ -261,6 +270,33 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   // Merge this part's lines into the previous part, then delete this part
   .post("/:id/merge-into-previous", mergePartController, {
     params: IdParams,
+  })
+
+  // Re-scan the OP's followups/updates (optionally add a manual followup link)
+  .post("/:id/updates/rescan", rescanReelUpdatesController, {
+    params: IdParams,
+    body: RescanUpdatesBody,
+  })
+
+  // Fold the chosen updates into the story and recompute parts (append/recut)
+  .put("/:id/updates", applyReelUpdatesController, {
+    params: IdParams,
+    body: ApplyUpdatesBody,
+  })
+
+  // Manually restructure the series into N parts (split/add/rebalance)
+  .post("/:id/restructure-parts", restructureSeriesPartsController, {
+    params: IdParams,
+    body: RestructurePartsBody,
+  })
+
+  // Read-only duration/cliffhanger recommendation for the assembled story
+  .get("/:id/structure-advice", getSeriesStructureAdviceController, {
+    params: IdParams,
+  })
+  .post("/:id/structure-decision", chooseSeriesStructureController, {
+    params: IdParams,
+    body: StructureDecisionBody,
   })
 
   // Multi-channel destinations

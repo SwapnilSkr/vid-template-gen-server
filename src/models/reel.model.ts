@@ -237,6 +237,9 @@ export interface IShortsCover {
   sceneIndex?: number;
   atSeconds?: number;
   placement: "opening" | "source_scene";
+  /** Opening covers made with the current compositor own the opening title;
+   * when true the separate Reddit card is intentionally not drawn underneath. */
+  replacesTitleCard?: boolean;
   holdSeconds?: number;
   editorState?: Record<string, unknown>;
   sourceFingerprint?: string;
@@ -326,6 +329,40 @@ export interface IRedditStoryPayload {
   seedUrl?: string;
   partNumber?: number;
   partCount?: number;
+  /** Discovered followups/updates for this story (verbatim/hybrid Reddit). */
+  updateDiscovery?: IUpdateDiscoveryPayload;
+  /** Which source this part derives from: "original" or a candidate key (append mode). */
+  sourceSegment?: string;
+  /** Cached paid editorial assessment for the full assembled series body. */
+  structureAdvice?: ISeriesStructureAdvicePayload;
+  /** Explicit user choice after reviewing the editorial assessment. */
+  structureDecision?: ISeriesStructureDecisionPayload;
+}
+
+export interface ISeriesStructureAdvicePayload {
+  fingerprint: string;
+  wordCount: number;
+  sentenceCount: number;
+  estimatedDurationSeconds: number;
+  minimumParts: number;
+  recommendedParts: number;
+  reason: string;
+  hasWeakBreaks: boolean;
+  breaks: {
+    partNumber: number;
+    sentenceNumber: number;
+    ending: string;
+    score: number;
+    quality: "strong" | "serviceable" | "weak";
+    rationale?: string;
+  }[];
+  assessedAt: Date;
+}
+
+export interface ISeriesStructureDecisionPayload {
+  fingerprint: string;
+  choice: "recommended" | "manual";
+  decidedAt: Date;
 }
 
 export interface IHorrorReferencePayload {
@@ -334,6 +371,29 @@ export interface IHorrorReferencePayload {
   author?: string;
   sourceUrl: string;
   license?: "public_domain" | "unknown";
+}
+
+/** One discovered followup/update candidate (see reddit-update-discovery.service). */
+export interface IUpdateCandidatePayload {
+  key: string;
+  kind: "embedded_link" | "author_post" | "manual";
+  title: string;
+  body: string;
+  url: string;
+  createdUtc: number;
+  matchedSignals: string[];
+  signalScore: number;
+  aiConfidence?: number;
+  aiReason?: string;
+  decision: "include" | "candidate" | "rejected";
+}
+
+/** Persisted result of followup discovery so Studio can review without re-scanning. */
+export interface IUpdateDiscoveryPayload {
+  scannedAt: Date;
+  method: "ai" | "signals" | "hybrid";
+  candidates: IUpdateCandidatePayload[];
+  includedKeys: string[]; // candidates woven into the current body
 }
 
 /** One beat: a generated visual + its narration + motion + caption timing. */
@@ -364,6 +424,8 @@ export interface IReel extends Document {
   editEffects?: IEditEffects; // cinematic edit FX (rain/grain/vignette/letterbox), render-only
   pipelineMode?: ReelPipelineMode; // gate after planning ("review") or run through ("auto")
   providedScript?: string; // user-pasted story, structured into scenes at plan time
+  fetchUpdates?: boolean; // auto-discover the OP's followups/updates (Reddit)
+  manualUpdateUrls?: string[]; // user-pasted followup URLs, force-included
   tier: "cheap" | "value" | "premium";
   storySource?: "llm" | "hybrid" | "verbatim";
   genre?: string;
@@ -566,6 +628,37 @@ const reelDestinationSchema = new Schema<IReelDestination>(
   { _id: false }
 );
 
+const updateCandidateSchema = new Schema<IUpdateCandidatePayload>(
+  {
+    key: { type: String, required: true },
+    kind: {
+      type: String,
+      enum: ["embedded_link", "author_post", "manual"],
+      required: true,
+    },
+    title: String,
+    body: String,
+    url: String,
+    createdUtc: Number,
+    matchedSignals: [String],
+    signalScore: Number,
+    aiConfidence: Number,
+    aiReason: String,
+    decision: { type: String, enum: ["include", "candidate", "rejected"] },
+  },
+  { _id: false }
+);
+
+const updateDiscoverySchema = new Schema<IUpdateDiscoveryPayload>(
+  {
+    scannedAt: Date,
+    method: { type: String, enum: ["ai", "signals", "hybrid"] },
+    candidates: [updateCandidateSchema],
+    includedKeys: [String],
+  },
+  { _id: false }
+);
+
 const redditStorySchema = new Schema<IRedditStoryPayload>(
   {
     title: { type: String, required: true },
@@ -582,6 +675,34 @@ const redditStorySchema = new Schema<IRedditStoryPayload>(
     seedUrl: String,
     partNumber: Number,
     partCount: Number,
+    updateDiscovery: updateDiscoverySchema,
+    sourceSegment: String,
+    structureAdvice: {
+      fingerprint: String,
+      wordCount: Number,
+      sentenceCount: Number,
+      estimatedDurationSeconds: Number,
+      minimumParts: Number,
+      recommendedParts: Number,
+      reason: String,
+      hasWeakBreaks: Boolean,
+      breaks: [
+        {
+          partNumber: Number,
+          sentenceNumber: Number,
+          ending: String,
+          score: Number,
+          quality: { type: String, enum: ["strong", "serviceable", "weak"] },
+          rationale: String,
+        },
+      ],
+      assessedAt: Date,
+    },
+    structureDecision: {
+      fingerprint: String,
+      choice: { type: String, enum: ["recommended", "manual"] },
+      decidedAt: Date,
+    },
   },
   { _id: false }
 );
@@ -696,6 +817,7 @@ const shortsCoverSchema = new Schema<IShortsCover>(
     sceneIndex: Number,
     atSeconds: Number,
     placement: { type: String, enum: ["opening", "source_scene"], default: "opening" },
+    replacesTitleCard: Boolean,
     holdSeconds: { type: Number, min: 0.25, max: 5, default: 0.75 },
     editorState: Schema.Types.Mixed,
     sourceFingerprint: String,
@@ -827,6 +949,8 @@ const reelSchema = new Schema<IReel>(
     editEffects: editEffectsSchema,
     pipelineMode: { type: String, enum: ["auto", "review"], default: "auto" },
     providedScript: String,
+    fetchUpdates: Boolean,
+    manualUpdateUrls: [String],
     tier: { type: String, enum: ["cheap", "value", "premium"], default: "cheap" },
     storySource: { type: String, enum: ["llm", "hybrid", "verbatim"] },
     genre: String,

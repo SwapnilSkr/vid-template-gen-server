@@ -1,10 +1,15 @@
 import type { Context } from "elysia";
 import { config } from "../config";
-import { listRedditCandidates, listStoryBank, REDDIT_GENRES } from "../services";
+import { listRedditCandidates, listStoryBank, REDDIT_GENRES, fetchPostByUrl } from "../services";
+import { discoverStoryUpdates } from "../services/reddit-update-discovery.service";
 import type { StorySource } from "../models";
 import { getErrorMessage } from "../types";
 import { httpErrorFromUnknown } from "../services/ffmpeg-capability.service";
-import type { TListStoryBankQuery, TListStoryCandidatesQuery } from "../types/guards";
+import type {
+  TListStoryBankQuery,
+  TListStoryCandidatesQuery,
+  TResolveStoryBody,
+} from "../types/guards";
 
 interface ListCandidatesContext extends Context {
   query: TListStoryCandidatesQuery;
@@ -12,6 +17,10 @@ interface ListCandidatesContext extends Context {
 
 interface ListBankContext extends Context {
   query: TListStoryBankQuery;
+}
+
+interface ResolveStoryContext extends Context {
+  body: TResolveStoryBody;
 }
 
 function parseExcludeUrls(raw?: string): string[] | undefined {
@@ -99,6 +108,36 @@ export async function listStoryBankController({ query, set }: ListBankContext) {
   } catch (error: unknown) {
     set.status = 400;
     return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Resolve a pasted Reddit permalink / share link into a source-post preview. */
+export async function resolveStoryController({ body, set }: ResolveStoryContext) {
+  try {
+    const post = await fetchPostByUrl(body.url);
+    if (!post) {
+      set.status = 404;
+      return { success: false, error: `Could not resolve that Reddit link: ${body.url}` };
+    }
+    const discovery = body.fetchUpdates
+      ? await discoverStoryUpdates(post).catch(() => undefined)
+      : undefined;
+    return {
+      success: true,
+      data: {
+        title: post.title,
+        author: post.author,
+        subreddit: post.subreddit,
+        url: post.url,
+        wordCount: post.body.trim().split(/\s+/).filter(Boolean).length,
+        updateCandidates: discovery?.candidates.length ?? 0,
+        updateDiscovery: discovery,
+      },
+    };
+  } catch (error: unknown) {
+    const mapped = httpErrorFromUnknown(error);
+    set.status = mapped.status;
+    return mapped.body;
   }
 }
 

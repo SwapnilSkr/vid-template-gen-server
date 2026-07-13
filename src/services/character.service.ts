@@ -1,5 +1,5 @@
 import { Character, type ICharacter } from "../models";
-import { deleteFromS3 } from "./s3.service";
+import { deleteS3Urls } from "./s3.service";
 
 /**
  * Create a new character
@@ -60,7 +60,7 @@ export async function updateCharacter(
   if (updates.imageUrl) {
     const existing = await Character.findById(id);
     if (existing?.imageUrl && existing.imageUrl !== updates.imageUrl) {
-      await deleteFromS3(existing.imageUrl).catch(console.error);
+      await deleteS3Urls([existing.imageUrl]);
     }
   }
 
@@ -82,7 +82,7 @@ export async function deleteCharacter(id: string): Promise<boolean> {
 
   // Delete image from S3
   if (character.imageUrl) {
-    await deleteFromS3(character.imageUrl).catch(console.error);
+    await deleteS3Urls([character.imageUrl]);
   }
 
   await Character.findByIdAndDelete(id);

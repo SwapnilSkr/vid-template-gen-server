@@ -29,6 +29,8 @@ export {
   type IStoryBible,
   type IHorrorReferencePayload,
   type IRedditStoryPayload,
+  type IUpdateDiscoveryPayload,
+  type IUpdateCandidatePayload,
   type IReelDestination,
   type IOutroSettings,
   type IEditDraftBaseline,
@@ -39,6 +41,12 @@ export {
   type ReelPipelineMode,
 } from "./reel.model";
 export { Story, type IStory, type StorySource } from "./story.model";
+export {
+  OperationLog,
+  type IOperationLog,
+  type OperationLogLevel,
+  type OperationLogScope,
+} from "./operation-log.model";
 export {
   HorrorReference,
   type IHorrorReference,

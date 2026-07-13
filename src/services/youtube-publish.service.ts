@@ -11,7 +11,9 @@ import { pipeline } from "node:stream/promises";
 import { config } from "../config";
 import { OAuthState, Reel, YouTubeChannel } from "../models";
 import { getErrorMessage } from "../types";
+import { recordOperationLog } from "./operation-log.service";
 import { ensureReelReviewPackage } from "./reel-review.service";
+import { resolveRenderedPublishDestination } from "./reel-outro.service";
 import { applyOutputOptions } from "../utils";
 
 export interface YouTubePublishChannel {
@@ -166,8 +168,8 @@ async function downloadVideoToTempFile(url: string): Promise<{ dir: string; path
 // YouTube Data API v3 publishing. Uses a single pre-authorized channel
 // (refresh token minted once via `scripts/youtube-authorize.ts`) — matches
 // the "content farm first, one channel/niche at a time" model, not
-// multi-tenant SaaS. Publish is a separate stage from rendering: it reads
-// the already-rendered `reel.outputUrl` (S3/CDN) and never touches the
+// multi-tenant SaaS. Publish is a separate stage from rendering: it reads the
+// exact already-rendered destination output (S3/CDN) and never touches the
 // render pipeline, so a failed/retried publish never re-spends on assets.
 // ============================================
 
@@ -345,19 +347,35 @@ async function enrichEnvChannel(
         profile.snippet?.thumbnails?.default?.url ??
         undefined,
     };
-  } catch {
+  } catch (error: unknown) {
+    recordOperationLog({
+      scope: "external",
+      level: "warn",
+      event: "youtube.channel_metadata_fallback",
+      message: "Could not enrich an environment YouTube channel; keeping its configured label",
+      metadata: { channelId: channel.id },
+      error,
+    });
     return fallback;
   }
 }
 
 export async function listAllYouTubePublishChannels(): Promise<PublicYouTubePublishChannel[]> {
   const envConfiguredChannels = parseYouTubeChannels();
-  const envChannels = await Promise.all(
-    envConfiguredChannels.map((channel, index) => enrichEnvChannel(channel, index))
-  );
   const dbChannels = await YouTubeChannel.find({ status: { $ne: "disabled" } })
     .sort({ createdAt: 1 })
     .lean();
+  const databaseByKey = new Map(dbChannels.map((channel) => [channel.channelKey, channel]));
+  // A channel re-authorized from the Accounts UI is deliberately stored in the
+  // database, even when it was originally configured via YOUTUBE_CHANNELS_JSON.
+  // The database credential must shadow the stale environment token everywhere:
+  // publishing already resolves database channels first, and this keeps the
+  // Accounts screen from rendering two copies of the same destination.
+  const envChannels = await Promise.all(
+    envConfiguredChannels
+      .filter((channel) => !databaseByKey.has(channel.id))
+      .map((channel, index) => enrichEnvChannel(channel, index))
+  );
   return [
     ...envChannels,
     ...dbChannels.map((channel) => ({
@@ -514,8 +532,15 @@ export async function updateYouTubeChannel(
 export async function publishReelToYouTube(reelId: string, channelId?: string): Promise<void> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
-  if (!reel.outputUrl) throw new Error("Reel has no rendered video yet");
-  const channel = await resolveYouTubePublishChannel(channelId ?? reel.outroChannelId);
+  const destination = resolveRenderedPublishDestination(reel, "youtube", channelId);
+  const channel = await resolveYouTubePublishChannel((channelId ?? destination.channelId) || reel.outroChannelId);
+  recordOperationLog({
+    scope: "system",
+    event: "publish.destination_output_selected",
+    message: "Selected the destination-specific rendered output for YouTube publishing",
+    reelId,
+    metadata: { platform: "youtube", channelId: channel.id, destinationId: destination.id },
+  });
 
   const previousPublish = {
     videoId: reel.youtube?.videoId,
@@ -545,7 +570,7 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
     );
     const youtube = google.youtube({ version: "v3", auth, ...YOUTUBE_API_OPTIONS });
 
-    const tempVideo = await downloadVideoToTempFile(reel.outputUrl);
+    const tempVideo = await downloadVideoToTempFile(destination.outputUrl!);
     let res;
     try {
       res = await youtube.videos.insert(
@@ -606,6 +631,14 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
             `⚠️  Custom thumb API-accepted for ${reelId} (${videoId}) but Shorts cover (oar2) did not change — ` +
               `shelf may keep an auto video frame. Check YouTube Studio → Shorts cover / select a frame.`
           );
+          recordOperationLog({
+            scope: "external",
+            level: "warn",
+            event: "youtube.shorts_cover_unchanged",
+            message: "YouTube accepted the thumbnail but did not update the observed Shorts shelf cover",
+            reelId,
+            metadata: { videoId },
+          });
         } else {
           console.log(
             `🖼️  Custom thumbnail accepted for ${reelId} (${videoId}) — Shorts cover verify skipped (no prior oar2)`
@@ -614,6 +647,15 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
       } catch (error: unknown) {
         thumbnailError = getErrorMessage(error);
         console.warn(`⚠️  Thumbnail upload failed for reel ${reelId}: ${thumbnailError}`);
+        recordOperationLog({
+          scope: "external",
+          level: "warn",
+          event: "youtube.thumbnail_upload_failed",
+          message: "YouTube publish succeeded, but custom thumbnail upload failed",
+          reelId,
+          metadata: { videoId },
+          error,
+        });
       }
     }
 

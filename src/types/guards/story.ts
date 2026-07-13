@@ -23,3 +23,11 @@ export const ListStoryBankQuery = t.Object({
   tier: t.Optional(t.Union([t.Literal("cheap"), t.Literal("value"), t.Literal("premium")])),
 });
 export type TListStoryBankQuery = typeof ListStoryBankQuery.static;
+
+/** Resolve a pasted Reddit permalink / share link into a source-post preview. */
+export const ResolveStoryBody = t.Object({
+  url: t.String(),
+  /** also return a preview of discovered followups/updates */
+  fetchUpdates: t.Optional(t.Boolean()),
+});
+export type TResolveStoryBody = typeof ResolveStoryBody.static;

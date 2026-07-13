@@ -13,7 +13,10 @@ import {
   hasEditEffects,
   type RenderScene,
 } from "./reel-render.service";
-import { appendBrandedOutro } from "./reel-outro.service";
+import {
+  appendBrandedOutro,
+  invalidateFinalDestinationRenders,
+} from "./reel-outro.service";
 import { generateImage, generateNarration } from "./openrouter-media.service";
 import {
   applyMeasuredCostsToReel,
@@ -202,7 +205,7 @@ async function commitRenderOutputs(
     subtitlesPath?: string;
     sceneAssets: NonNullable<IReel["editDraft"]>["sceneAssets"];
   },
-): Promise<void> {
+): Promise<string[]> {
   const reelKey = reel._id.toString();
   const superseded: string[] = [];
 
@@ -233,6 +236,16 @@ async function commitRenderOutputs(
       "reels",
       `${reelKey}.mp4`,
     );
+    // This draft has rebuilt the shared body and primary final. Any sibling
+    // destination still points at the old body, so make it unpublishable until
+    // the queued outro-only pass rebuilds its channel-specific final.
+    superseded.push(
+      ...invalidateFinalDestinationRenders(reel, {
+        reason: "A studio image/caption draft rebuilt the shared body",
+        includePrimary: false,
+        includeExtras: true,
+      }),
+    );
   }
 
   if (preview.subtitlesPath) {
@@ -245,7 +258,10 @@ async function commitRenderOutputs(
   reel.status = "completed";
   reel.progress = 100;
   reel.markModified("scenes");
-  await deleteS3Urls(superseded);
+  // Callers save the new references first, then delete these objects. That
+  // ordering prevents a concurrent publish/read from observing a "ready" URL
+  // which has already been deleted from S3.
+  return [...new Set(superseded)];
 }
 
 export async function getDraftAssetPath(
@@ -816,7 +832,7 @@ export async function saveEditDraft(reelId: string): Promise<IReel> {
     throw new Error("No pending edit draft to save");
   }
 
-  await commitRenderOutputs(reel, {
+  const superseded = await commitRenderOutputs(reel, {
     outputPath: draft.outputPath,
     subtitlesPath: draft.subtitlesPath,
     sceneAssets: draft.sceneAssets,
@@ -825,6 +841,11 @@ export async function saveEditDraft(reelId: string): Promise<IReel> {
   await cleanupExistingDraft(reel, { strict: true, restore: false });
   await cleanupRenderScratch(`draft_${draft.id}`);
   await reel.save();
+  await deleteS3Urls(superseded);
+  if ((reel.destinations ?? []).length) {
+    const { regenerateReel } = await import("./reel-edit.service");
+    return regenerateReel(reelId, "outro_only");
+  }
   return reel;
 }
 
@@ -843,10 +864,15 @@ export async function applyCaptionsAndRender(
   reel.captionStyle = mergeCaptionStyle(reel.captionStyle, patch);
   reel.markModified("captionStyle");
   // Captions are burned into body; assembly stays reusable.
-  const staleBody = reel.bodyVideoUrl;
+  const staleBody = [
+    reel.bodyVideoUrl,
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "Captions changed",
+    }),
+  ];
   reel.bodyVideoUrl = undefined;
   await reel.save();
-  await deleteS3Urls([staleBody]);
+  await deleteS3Urls(staleBody);
 
   const { regenerateReel } = await import("./reel-edit.service");
   if (reel.strategy === "gameplay_overlay") {
@@ -873,9 +899,14 @@ export async function applyCaptionsAndRender(
   const measuredCosts: MeasuredCostInput[] = [];
   try {
     const preview = await buildDraftPreview(reel, draftId, rootDir, localFiles, measuredCosts);
-    await commitRenderOutputs(reel, preview);
+    const superseded = await commitRenderOutputs(reel, preview);
     applyMeasuredCostsToReel(reel, measuredCosts, "Studio draft");
     await reel.save();
+    await deleteS3Urls(superseded);
+    if ((reel.destinations ?? []).length) {
+      const { regenerateReel } = await import("./reel-edit.service");
+      return regenerateReel(reelId, "outro_only");
+    }
     return reel;
   } finally {
     await cleanupDirectory(rootDir).catch(() => {});

@@ -53,7 +53,10 @@ export async function completeYouTubeConnectController({
   try {
     const channel = await completeYouTubeChannelConnect(query.code, query.state);
     set.headers["content-type"] = "text/html; charset=utf-8";
-    return renderCallbackHtml(true, `Connected ${channel.label}. You can close this tab.`);
+    return renderCallbackHtml(
+      true,
+      `Connected ${channel.googleChannelTitle || channel.label}. You can close this tab.`
+    );
   } catch (error) {
     set.headers["content-type"] = "text/html; charset=utf-8";
     const message = error instanceof Error ? error.message : "YouTube connection failed.";

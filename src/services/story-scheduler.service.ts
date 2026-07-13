@@ -2,6 +2,7 @@ import { config } from "../config";
 import { storyBankStats, topUpStoryBank } from "./story.service";
 import { getErrorMessage } from "../types";
 import type { StorySource } from "../models";
+import { recordOperationLog } from "./operation-log.service";
 
 // ============================================
 // In-process scheduler that keeps the Reddit story bank topped up so
@@ -39,6 +40,13 @@ export function startStoryTopUpScheduler(): void {
       await topUpStoryBank(config.storyTopUpCount, config.storyTopUpMode as StorySource, "value");
     } catch (error: unknown) {
       console.error("Story bank top-up check failed:", getErrorMessage(error));
+      recordOperationLog({
+        scope: "system",
+        level: "error",
+        event: "scheduler.story_topup_failed",
+        message: "Story-bank top-up scheduler failed",
+        error,
+      });
     }
   };
 

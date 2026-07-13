@@ -92,6 +92,10 @@ export const CreateReelBody = t.Object({
   selectedStoryId: t.Optional(t.String()),
   /** pre-selected Reddit permalink (browse/select flow) */
   selectedSeedUrl: t.Optional(t.String()),
+  /** auto-discover the OP's followups/updates (default on for verbatim) */
+  fetchUpdates: t.Optional(t.Boolean()),
+  /** user-pasted canonical followup URLs, sourced directly (force-included) */
+  manualUpdateUrls: t.Optional(t.Array(t.String())),
 });
 
 export type TCreateReelBody = typeof CreateReelBody.static;
@@ -284,6 +288,31 @@ export const ReplanReelSeriesBody = t.Object({
 });
 export type TReplanReelSeriesBody = typeof ReplanReelSeriesBody.static;
 
+/** Re-scan the OP's followups/updates; optionally add a manual followup link. */
+export const RescanUpdatesBody = t.Object({
+  manualUrl: t.Optional(t.String()),
+});
+export type TRescanUpdatesBody = typeof RescanUpdatesBody.static;
+
+/** Fold the chosen updates into the story and recompute parts. */
+export const ApplyUpdatesBody = t.Object({
+  includedKeys: t.Array(t.String()),
+  mode: t.Union([t.Literal("append"), t.Literal("recut")]),
+});
+export type TApplyUpdatesBody = typeof ApplyUpdatesBody.static;
+
+/** Manually restructure a Reddit series into a chosen number of parts. */
+export const RestructurePartsBody = t.Object({
+  parts: t.Union([t.Literal("auto"), t.Number({ minimum: 1, maximum: 12 })]),
+});
+export type TRestructurePartsBody = typeof RestructurePartsBody.static;
+
+/** Explicit accept/override after the paid AI series assessment. */
+export const StructureDecisionBody = t.Object({
+  choice: t.Union([t.Literal("recommended"), t.Literal("manual")]),
+});
+export type TStructureDecisionBody = typeof StructureDecisionBody.static;
+
 export const RevoiceReelBody = t.Object({
   variants: t.Array(
     t.Object({
@@ -354,6 +383,12 @@ export const ThumbnailSourceBody = t.Object({
   aspectRatio: ThumbnailAspectRatio,
   /** Pull from the original gameplay clip, not the already-composited reel. */
   cleanGameplay: t.Optional(t.Boolean()),
+  /** In Shorts-cover editing, show the moving gameplay without the legacy
+   * Reddit card when the cover itself owns that opening title treatment. */
+  includeTitleCard: t.Optional(t.Boolean()),
+  /** Composite the saved transparent Reddit Shorts-cover layer into this
+   * static plan-stage preview. */
+  includeShortsCover: t.Optional(t.Boolean()),
 });
 
 export type TThumbnailSourceBody = typeof ThumbnailSourceBody.static;
@@ -374,6 +409,7 @@ export const SaveShortsCoverBody = t.Object({
   sceneIndex: t.Optional(t.Number({ minimum: 0 })),
   atSeconds: t.Optional(t.Number({ minimum: 0 })),
   placement: t.Optional(t.Union([t.Literal("opening"), t.Literal("source_scene")])),
+  replacesTitleCard: t.Optional(t.Boolean()),
   holdSeconds: t.Optional(t.Number({ minimum: 0.25, maximum: 5 })),
   editorState: t.Optional(t.Record(t.String(), t.Unknown())),
   sourceFingerprint: t.Optional(t.String()),

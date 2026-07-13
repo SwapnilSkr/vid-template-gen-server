@@ -2,6 +2,7 @@ import { config } from "../config";
 import { TrendReference, type TrendScanWindow } from "../models";
 import { REDDIT_GENRES } from "./story.service";
 import { getErrorMessage } from "../types";
+import { recordOperationLog } from "./operation-log.service";
 
 // ============================================
 // Trend scout — pulls top-performing YouTube Shorts per niche/genre via the
@@ -213,6 +214,14 @@ export async function scoutAllGenres(opts: ScoutOptions, niche?: string): Promis
     } catch (error: unknown) {
       const message = getErrorMessage(error);
       console.error(`🔎 trend-scout: ${target.niche}/${target.genre} failed: ${message}`);
+      recordOperationLog({
+        scope: "external",
+        level: "warn",
+        event: "trend_scout.target_failed",
+        message: "A trend-scout target failed; the remaining targets will continue",
+        metadata: { niche: target.niche, genre: target.genre },
+        error,
+      });
       results.push({ niche: target.niche, genre: target.genre, found: 0, upserted: 0, error: message });
     }
     await sleep(300);

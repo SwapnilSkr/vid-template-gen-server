@@ -5,6 +5,7 @@ import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type TtsChoice } from "../config/models";
 import { getErrorMessage } from "../types";
 import { ensureDir, generateFilename } from "../utils";
+import { recordOperationLog } from "./operation-log.service";
 
 // ============================================
 // OpenRouter media generation — single-provider stack.
@@ -26,6 +27,17 @@ const TTS_FALLBACK: TtsChoice = {
 };
 const IMAGE_FALLBACK_MODEL = "google/gemini-3.1-flash-lite-image";
 
+/**
+ * TTS is charged per input character. Normally this comes from OpenRouter's
+ * models endpoint; this conservative fallback keeps accounting visible if that
+ * endpoint is briefly unavailable. It matches Grok Voice TTS 1.0's published
+ * $15 / million character price, rather than silently dropping audio spend.
+ */
+const DEFAULT_TTS_CHARACTER_PRICE_USD = 0.000015;
+const TTS_CHARACTER_PRICE_FALLBACKS: Record<string, number> = {
+  "x-ai/grok-voice-tts-1.0": 0.000015,
+};
+
 export interface MediaUsageCost {
   costUsd?: number;
   source: "openrouter_usage" | "openrouter_generation" | "estimated";
@@ -40,6 +52,7 @@ interface ImageModelCapability {
 }
 
 let imageCapabilityCache: Map<string, ImageModelCapability> | undefined;
+let ttsCharacterPriceCache: Promise<Map<string, number>> | undefined;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,6 +65,40 @@ function isRetryableStatus(status: number): boolean {
 function parseCost(value: unknown): number | undefined {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Fetch OpenRouter's current per-character TTS pricing once per process. */
+async function getTtsCharacterPrice(model: string): Promise<number> {
+  if (!ttsCharacterPriceCache) {
+    ttsCharacterPriceCache = (async () => {
+      try {
+        const res = await fetch(`${config.openRouterBaseUrl}/models?output_modalities=speech`, {
+          headers: { Authorization: `Bearer ${config.openRouterApiKey}` },
+        });
+        if (!res.ok) throw new Error(`Models API ${res.status}`);
+        const data = (await res.json()) as {
+          data?: { id?: string; pricing?: { prompt?: number | string } }[];
+        };
+        return new Map(
+          (data.data ?? [])
+            .flatMap((item) => {
+              const price = parseCost(item.pricing?.prompt);
+              return item.id && price !== undefined ? [[item.id, price] as const] : [];
+            }),
+        );
+      } catch (error) {
+        console.warn(`⚠️ TTS pricing lookup unavailable: ${getErrorMessage(error)}`);
+        return new Map<string, number>();
+      }
+    })();
+  }
+
+  const prices = await ttsCharacterPriceCache;
+  return prices.get(model) ?? TTS_CHARACTER_PRICE_FALLBACKS[model] ?? DEFAULT_TTS_CHARACTER_PRICE_USD;
+}
+
+async function estimateTtsCost(model: string, text: string): Promise<number> {
+  return text.length * (await getTtsCharacterPrice(model));
 }
 
 async function fetchGenerationCost(generationId?: string): Promise<number | undefined> {
@@ -183,6 +230,14 @@ export async function generateImage(
         lastError = error;
         if (activeModel !== modelsToTry[modelsToTry.length - 1]) {
           console.warn(`Image model failed for ${activeModel}; falling back to ${IMAGE_FALLBACK_MODEL}: ${getErrorMessage(error)}`);
+          recordOperationLog({
+            scope: "external",
+            level: "warn",
+            event: "openrouter.image_fallback",
+            message: `Image generation failed on ${activeModel}; retrying with ${IMAGE_FALLBACK_MODEL}`,
+            metadata: { failedModel: activeModel, fallbackModel: IMAGE_FALLBACK_MODEL },
+            error,
+          });
         }
       }
     }
@@ -197,6 +252,14 @@ export async function generateImage(
     // whole paid reel — retry once prompt-only before giving up.
     if (opts.referenceImageUrls?.length) {
       console.warn(`Reference-art image gen failed (${getErrorMessage(error)}); retrying prompt-only`);
+      recordOperationLog({
+        scope: "external",
+        level: "warn",
+        event: "openrouter.image_reference_retry",
+        message: "Reference-art image generation failed; retrying without references",
+        metadata: { referenceCount: opts.referenceImageUrls.length, model },
+        error,
+      });
       try {
         return await attempt(undefined);
       } catch (retryError: unknown) {
@@ -343,6 +406,19 @@ export async function generateNarration(
         console.warn(
           `TTS failed for ${choice.model}/${choice.voice}; falling back to ${fallback.model}/${fallback.voice}: ${getErrorMessage(error)}`
         );
+        recordOperationLog({
+          scope: "external",
+          level: "warn",
+          event: "openrouter.tts_fallback",
+          message: `TTS failed for ${choice.model}/${choice.voice}; retrying with ${fallback.model}/${fallback.voice}`,
+          metadata: {
+            failedModel: choice.model,
+            failedVoice: choice.voice,
+            fallbackModel: fallback.model,
+            fallbackVoice: fallback.voice,
+          },
+          error,
+        });
       }
     }
   }
@@ -397,8 +473,18 @@ async function generateNarrationWithChoice(
     }
     const generationId = res.headers.get("x-openrouter-generation-id") ?? undefined;
     const generationCost = await fetchGenerationCost(generationId);
+    const estimatedCost = generationCost === undefined ? await estimateTtsCost(model, text) : undefined;
+    if (generationCost === undefined) {
+      recordOperationLog({
+        scope: "external",
+        level: "warn",
+        event: "openrouter.tts_cost_estimated",
+        message: "OpenRouter generation receipt was delayed; stored an estimated TTS cost",
+        metadata: { model, voice, generationId, characters: text.length, estimatedCost },
+      });
+    }
     onUsage?.({
-      costUsd: generationCost,
+      costUsd: generationCost ?? estimatedCost,
       source: generationCost !== undefined ? "openrouter_generation" : "estimated",
       generationId,
     });

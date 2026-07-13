@@ -9,7 +9,7 @@ export interface MeasuredCostInput {
 }
 
 const COST_NOTE =
-  "OpenRouter AI spend only (LLM, image, TTS, video). Lines appear when OpenRouter reports usage for that step.";
+  "OpenRouter AI spend only (LLM, image, TTS, video). Actual usage is recorded when OpenRouter reports it; fallback estimates are clearly labelled.";
 
 /** Legacy infra lines that should never appear in the AI ledger. */
 const NON_AI_COST_LABEL = /Render \+ storage/i;
@@ -130,9 +130,9 @@ export async function buildReelCostBreakdown(
 }
 
 /**
- * Merge a new produce/re-render run into the existing breakdown so re-renders
- * accumulate OpenRouter spend instead of wiping prior actuals. Keeps prior
- * lines and appends this run's lines with a `[Re-render]` prefix.
+ * Merge any completed run into the existing breakdown. Planning and initial
+ * production can both spend credits before a reel has an output URL, so using
+ * output presence as the ledger boundary would erase legitimate earlier spend.
  */
 export function accumulateReelCostBreakdown(
   previous: ICostBreakdown | undefined,

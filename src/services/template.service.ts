@@ -1,6 +1,6 @@
 import { Types } from "mongoose";
 import { Template, type ITemplate, Character } from "../models";
-import { uploadVideo, deleteFromS3 } from "./s3.service";
+import { uploadVideo, deleteS3Urls } from "./s3.service";
 import { getVideoMetadata, trimVideo } from "./ffmpeg.service";
 import { unlink, readFile } from "node:fs/promises";
 import { getErrorMessage } from "../types";
@@ -235,7 +235,7 @@ export async function updateTemplate(
   const finalUpdates: TemplateUpdateData = { ...updates };
 
   if (updates.videoUrl && updates.videoUrl !== existing.videoUrl) {
-    await deleteFromS3(existing.videoUrl).catch(console.error);
+    await deleteS3Urls([existing.videoUrl]);
     const metadata = await getVideoMetadata(updates.videoUrl);
     finalUpdates.duration = metadata.duration;
     finalUpdates.dimensions = {
@@ -247,7 +247,7 @@ export async function updateTemplate(
 
   if (updates.thumbnailUrl && updates.thumbnailUrl !== existing.thumbnailUrl) {
     if (existing.thumbnailUrl) {
-      await deleteFromS3(existing.thumbnailUrl).catch(console.error);
+      await deleteS3Urls([existing.thumbnailUrl]);
     }
   }
 
@@ -262,10 +262,10 @@ export async function deleteTemplate(id: string): Promise<boolean> {
   if (!template) return false;
 
   if (template.videoUrl) {
-    await deleteFromS3(template.videoUrl).catch(console.error);
+    await deleteS3Urls([template.videoUrl]);
   }
   if (template.thumbnailUrl) {
-    await deleteFromS3(template.thumbnailUrl).catch(console.error);
+    await deleteS3Urls([template.thumbnailUrl]);
   }
 
   await Template.findByIdAndDelete(id);

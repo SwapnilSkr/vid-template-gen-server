@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import ffmpeg from "fluent-ffmpeg";
 import { join } from "node:path";
-import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion, type IRedditStoryPayload, type IReelDestination } from "../models";
+import { Reel, type IReel, type StorySource, type ReelMotionMode, type ISceneMotion, type IRedditStoryPayload, type IUpdateDiscoveryPayload, type IReelDestination } from "../models";
 import { config } from "../config";
 import { resolveModels, resolveTtsChoice, type Tier } from "../config/models";
 import { ensureDir, cleanupDirectory, cleanupFiles, cleanupRenderScratch } from "../utils";
@@ -22,8 +22,8 @@ import {
   DEFAULT_BOUNCE_CAPTION_STYLE,
   type GameplayRenderOpts,
 } from "./reel-gameplay.service";
+import { ensureDefaultRedditOpeningCover } from "./reel-shorts-cover.service";
 import {
-  generateStory,
   generateStorySeries,
   markStoryReel,
   takeNextStory,
@@ -32,10 +32,15 @@ import {
   type StoryDraft,
   type StoryPartDraft,
 } from "./story.service";
-import { generateImage, generateNarration } from "./openrouter-media.service";
+import { includedUpdateKeys, type UpdateDiscovery } from "./reddit-update-discovery.service";
+import { generateImage, generateNarration, type MediaUsageCost } from "./openrouter-media.service";
 import { renderImageKenBurns, applyEditEffects, hasEditEffects, finishFromAssembly, type RenderScene } from "./reel-render.service";
 import { renderHybridScene, type HybridScene } from "./reel-hybrid.service";
-import { appendBrandedOutro, type OutroTts } from "./reel-outro.service";
+import {
+  appendBrandedOutro,
+  invalidateFinalDestinationRenders,
+  type OutroTts,
+} from "./reel-outro.service";
 import { assertFfmpegReady, isCaptionBurnError } from "./ffmpeg-capability.service";
 import { getScoutTargets } from "./trend-scout.service";
 import { buildReelReviewPackage } from "./reel-review.service";
@@ -47,13 +52,13 @@ import {
   type MeasuredCostInput,
 } from "./reel-cost.service";
 import { markHorrorReferenceUsed } from "./horror-reference.service";
+import { recordOperationLog } from "./operation-log.service";
 import { resolveStoryMatchedTts } from "./reel-voice-match.service";
 import {
   uploadImage,
   uploadAudio,
   uploadVideo,
   uploadSubtitles,
-  deleteFromS3,
   deleteS3Urls,
   cdnUrlFor,
   downloadFromUrl,
@@ -93,6 +98,10 @@ interface CreateReelOptions {
   ttsFormat?: "mp3" | "pcm";
   selectedStoryId?: string;
   selectedSeedUrl?: string;
+  /** Auto-discover the OP's later updates/followups (default on for verbatim). */
+  fetchUpdates?: boolean;
+  /** User-pasted canonical followup URLs, sourced directly (force-included). */
+  manualUpdateUrls?: string[];
 }
 
 /** Build the initial destinations[] for a new reel from create-flow input. */
@@ -232,6 +241,8 @@ export async function createReel(options: CreateReelOptions): Promise<CreateReel
     editEffects: options.editEffects,
     pipelineMode,
     providedScript: options.providedScript,
+    fetchUpdates: options.fetchUpdates,
+    manualUpdateUrls: options.manualUpdateUrls,
     horrorReferenceId: options.horrorReferenceId,
     gameplayKey: options.gameplayKey,
     horrorAudioKey: options.horrorAudioKey,
@@ -258,7 +269,9 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
   const { niche, topic, tier = "cheap" } = options;
   const autoTopic = !topic?.trim() || topic.trim().toLowerCase() === "auto";
   const source = options.source ?? (autoTopic ? (config.storyMode as StorySource) : "llm");
-  const pipelineMode = options.pipelineMode ?? "review";
+  // A sourced Reddit story requires an explicit structure choice before paid
+  // production; do not let the auto pipeline bypass that editorial review.
+  const pipelineMode = "review";
   let genre = options.genre;
   let title: string | undefined;
   let hook: string | undefined;
@@ -281,6 +294,8 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     const deferHybrid = source === "hybrid";
     const story = await materializeFromSeed(options.selectedSeedUrl, source, genre, tier as Tier, {
       seedOnly: deferHybrid,
+      fetchUpdates: options.fetchUpdates,
+      manualUpdateUrls: options.manualUpdateUrls,
     });
     redditStory = deferHybrid
       ? {
@@ -345,6 +360,8 @@ async function createGameplayReelFromStory(options: CreateReelOptions): Promise<
     voiceOverride: toVoiceOverride(options),
     captionStyle: DEFAULT_BOUNCE_CAPTION_STYLE,
     pipelineMode,
+    fetchUpdates: options.fetchUpdates,
+    manualUpdateUrls: options.manualUpdateUrls,
     status: "pending",
     progress: 0,
     title,
@@ -387,6 +404,8 @@ async function createGameplayReelSeries(
     parts: parts === "off" ? (source === "verbatim" ? 1 : "auto") : parts,
     selectedStoryId: options.selectedStoryId,
     selectedSeedUrl: options.selectedSeedUrl,
+    fetchUpdates: options.fetchUpdates,
+    manualUpdateUrls: options.manualUpdateUrls,
     onLlmUsage: (usage) =>
       storyCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" }),
   });
@@ -396,7 +415,9 @@ async function createGameplayReelSeries(
 
   const seriesId = plannedParts.length > 1 ? randomUUID() : undefined;
   const reels: IReel[] = [];
-  const pipelineMode = options.pipelineMode ?? "review";
+  // See createGameplayReelFromStory: sourced Reddit narratives always stop for
+  // update selection and an explicit AI/manual structure decision.
+  const pipelineMode = "review";
 
   for (const part of plannedParts) {
     const reel = new Reel({
@@ -417,6 +438,8 @@ async function createGameplayReelSeries(
       voiceOverride: toVoiceOverride(options),
       captionStyle: DEFAULT_BOUNCE_CAPTION_STYLE,
       pipelineMode,
+      fetchUpdates: options.fetchUpdates,
+      manualUpdateUrls: options.manualUpdateUrls,
       status: "pending",
       progress: 0,
       title: part.title,
@@ -547,6 +570,31 @@ async function createHorrorReelSeries(
   return { reel: reels[0], reels, seriesId };
 }
 
+/** Convert the discovery-service result into the persisted subdoc shape. */
+function toUpdateDiscoveryPayload(
+  discovery: UpdateDiscovery | undefined
+): IUpdateDiscoveryPayload | undefined {
+  if (!discovery) return undefined;
+  return {
+    scannedAt: new Date(discovery.scannedAt),
+    method: discovery.method,
+    candidates: discovery.candidates.map((c) => ({
+      key: c.key,
+      kind: c.kind,
+      title: c.title,
+      body: c.body,
+      url: c.url,
+      createdUtc: c.createdUtc,
+      matchedSignals: c.matchedSignals,
+      signalScore: c.signalScore,
+      aiConfidence: c.aiConfidence,
+      aiReason: c.aiReason,
+      decision: c.decision,
+    })),
+    includedKeys: includedUpdateKeys(discovery),
+  };
+}
+
 function toRedditStoryPayload(part: StoryPartDraft): NonNullable<IReel["redditStory"]> {
   return {
     title: part.title,
@@ -562,6 +610,8 @@ function toRedditStoryPayload(part: StoryPartDraft): NonNullable<IReel["redditSt
     seedUrl: part.seedUrl,
     partNumber: part.partNumber,
     partCount: part.partCount,
+    updateDiscovery: toUpdateDiscoveryPayload(part.updateDiscovery),
+    sourceSegment: part.updateDiscovery ? "original" : undefined,
   };
 }
 
@@ -580,6 +630,8 @@ function toSingleRedditStoryPayload(story: StoryDraft & { source: StorySource })
     seedUrl: story.seedUrl,
     partNumber: 1,
     partCount: 1,
+    updateDiscovery: toUpdateDiscoveryPayload(story.updateDiscovery),
+    sourceSegment: story.updateDiscovery ? "original" : undefined,
   };
 }
 
@@ -781,10 +833,14 @@ export async function processReel(reelId: string): Promise<void> {
   if (recipe.strategy === "gameplay_overlay") return processGameplayReel(reel, recipe);
 
   const localFiles: string[] = [];
-  const measuredCosts: MeasuredCostInput[] = [];
+  const planCosts: MeasuredCostInput[] = [];
   try {
-    await planImageReel(reel, recipe, measuredCosts);
-    await produceImageReel(reel, recipe, measuredCosts, localFiles);
+    await planImageReel(reel, recipe, planCosts);
+    // Auto pipelines do not pass through processReelPlan, so persist planning
+    // spend before attempting production. It must survive a later render error.
+    applyMeasuredCostsToReel(reel, planCosts, "Plan");
+    await reel.save();
+    await produceImageReel(reel, recipe, [], localFiles);
   } catch (error: unknown) {
     await cleanupFiles(localFiles);
     await cleanupRenderScratch(reelId);
@@ -873,7 +929,7 @@ async function replaceCachedMediaUrl(
   if (nextUrl) reel[field] = nextUrl;
   else delete reel[field];
   if (prev && prev !== nextUrl) {
-    await deleteFromS3(prev).catch(() => {});
+    await deleteS3Urls([prev]);
   }
 }
 
@@ -919,7 +975,7 @@ async function renderReelDestinations(
     backgroundVideo?: string;
     localFiles: string[];
     forceFreshOutroAudio?: boolean;
-    onOutroUsage?: (usage: { costUsd?: number }) => void;
+    onOutroUsage?: (usage: MediaUsageCost) => void;
   }
 ): Promise<{
   primaryDurationAdded: number;
@@ -935,11 +991,22 @@ async function renderReelDestinations(
   let primaryOutro: Awaited<ReturnType<typeof appendBrandedOutro>> = undefined;
 
   for (const { dest, isPrimary } of targets) {
-    const outroResult = await appendBrandedOutro(bodyPath, reel, tts, opts.onOutroUsage, {
-      backgroundVideo: opts.backgroundVideo,
-      forceFreshOutroAudio: opts.forceFreshOutroAudio,
-      destination: dest,
-    });
+    let outroResult: Awaited<ReturnType<typeof appendBrandedOutro>>;
+    try {
+      outroResult = await appendBrandedOutro(bodyPath, reel, tts, opts.onOutroUsage, {
+        backgroundVideo: opts.backgroundVideo,
+        forceFreshOutroAudio: opts.forceFreshOutroAudio,
+        destination: dest,
+      });
+    } catch (error) {
+      if (dest) {
+        await Reel.updateOne(
+          { _id: reel._id, "destinations.id": dest.id },
+          { $set: { "destinations.$.status": "failed", "destinations.$.error": getErrorMessage(error) } }
+        );
+      }
+      throw error;
+    }
     const videoPath = outroResult?.videoPath ?? bodyPath; // skip/failed outro → bare body
     const durationAdded = outroResult?.durationAdded ?? 0;
     if (outroResult) opts.localFiles.push(outroResult.videoPath);
@@ -948,7 +1015,7 @@ async function renderReelDestinations(
     const videoKey = isPrimary ? `${reelId}.mp4` : `${reelId}_${destId}.mp4`;
     const prevVideo = isPrimary ? reel.outputUrl : dest?.outputUrl;
     const outputUrl = await uploadVideo(await readFile(videoPath), "reels", videoKey);
-    if (prevVideo && prevVideo !== outputUrl) await deleteFromS3(prevVideo).catch(() => {});
+    if (prevVideo && prevVideo !== outputUrl) await deleteS3Urls([prevVideo]);
 
     // Persist outro narration; reuse cached URL when nothing was regenerated.
     let outroAudioUrl = isPrimary ? reel.outroAudioUrl : dest?.outroAudioUrl;
@@ -957,7 +1024,7 @@ async function renderReelDestinations(
       const audioKey = isPrimary ? `${reelId}_outro.mp3` : `${reelId}_${destId}_outro.mp3`;
       const prevAudio = outroAudioUrl;
       outroAudioUrl = await uploadAudio(await readFile(outroResult.outroAudioPath), audioKey);
-      if (prevAudio && prevAudio !== outroAudioUrl) await deleteFromS3(prevAudio).catch(() => {});
+      if (prevAudio && prevAudio !== outroAudioUrl) await deleteS3Urls([prevAudio]);
     }
 
     if (isPrimary) {
@@ -972,6 +1039,18 @@ async function renderReelDestinations(
       dest.durationAdded = durationAdded;
       dest.error = undefined;
     }
+    recordOperationLog({
+      scope: "system",
+      event: "outro.destination_rendered",
+      message: "Destination-specific final reel output rendered",
+      reelId,
+      metadata: {
+        destinationId: isPrimary ? "primary" : dest?.id,
+        platform: isPrimary ? (reel.outroInstagramChannelId ? "instagram" : "youtube") : dest?.platform,
+        channelId: isPrimary ? (reel.outroInstagramChannelId || reel.outroChannelId) : dest?.channelId,
+        durationAdded,
+      },
+    });
   }
 
   if (extras.length) reel.markModified("destinations");
@@ -1091,7 +1170,6 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
     await persistBodyVideo(reel, result.videoPath, localFiles);
 
     const tts = resolveTtsChoice(models.tts, recipe.voice ?? {}, reel.voiceOverride ?? {});
-    const hadPriorOutput = Boolean(reel.outputUrl);
     const outroResult = await appendBrandedOutro(result.videoPath, reel, tts, (usage) => {
       measuredCosts.push({
         label: "Outro narration",
@@ -1119,7 +1197,7 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
     const prevOutput = reel.outputUrl;
     reel.outputUrl = await uploadVideo(await readFile(result.videoPath), "reels", `${reelId}.mp4`);
     if (prevOutput && prevOutput !== reel.outputUrl) {
-      await deleteFromS3(prevOutput).catch(() => {});
+      await deleteS3Urls([prevOutput]);
     }
     reel.subtitlesUrl = await uploadSubtitles(await readFile(result.assPath, "utf-8"), reelId);
 
@@ -1128,9 +1206,11 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
       tts,
       measuredCosts,
     });
-    reel.costBreakdown = hadPriorOutput
-      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Composite re-render")
-      : runBreakdown;
+    reel.costBreakdown = accumulateReelCostBreakdown(
+      reel.costBreakdown,
+      runBreakdown,
+      "Composite re-render"
+    );
     reel.costUsd = reel.costBreakdown.totalUsd;
     reel.status = "completed";
     reel.progress = 100;
@@ -1202,7 +1282,6 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
       localFiles.push(gameplayPath);
     }
 
-    const hadPriorOutput = Boolean(reel.outputUrl);
     await updateStatus(reelId, "uploading", 90, { currentStep: "Uploading video" });
     // Re-render every destination's outro onto the cached body.
     const { primaryOutro } = await renderReelDestinations(reel, bodyPath, tts, {
@@ -1213,7 +1292,7 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
           label: "Outro narration",
           model: `${tts.model}/${tts.voice}`,
           costUsd: usage.costUsd,
-          source: usage.costUsd !== undefined ? "actual" : "estimated",
+          source: usage.source === "estimated" ? "estimated" : "actual",
         });
       },
     });
@@ -1229,8 +1308,15 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
           await appendBouncingCaptionCues(assPath, [primaryOutro.subtitle]);
           localFiles.push(assPath);
         }
-      } catch {
-        /* keep prior subtitles */
+      } catch (error: unknown) {
+        recordOperationLog({
+          scope: "system",
+          level: "warn",
+          event: "reel.outro_caption_update_skipped",
+          message: "Could not update subtitles after an outro-only render; retained the prior subtitle file",
+          reelId,
+          error,
+        });
       }
     }
 
@@ -1239,7 +1325,7 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
       const prevSubs = reel.subtitlesUrl;
       reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
       if (prevSubs && prevSubs !== reel.subtitlesUrl) {
-        await deleteFromS3(prevSubs).catch(() => {});
+        await deleteS3Urls([prevSubs]);
       }
     }
 
@@ -1248,9 +1334,7 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
       tts,
       measuredCosts,
     });
-    reel.costBreakdown = hadPriorOutput
-      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Outro re-render")
-      : runBreakdown;
+    reel.costBreakdown = accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Outro re-render");
     reel.costUsd = reel.costBreakdown.totalUsd;
     reel.status = "completed";
     reel.progress = 100;
@@ -1315,6 +1399,8 @@ async function planGameplayReel(
       body: stabilized.body,
     });
     reel.narrationVoice = tts;
+    if (!reel.gameplayKey) reel.gameplayKey = (await pickGameplay()).key;
+    await ensureDefaultRedditOpeningCover(reel);
     console.log(`♻️  Reusing existing Reddit plan for reel ${reelId}`);
     await reel.save();
     return;
@@ -1360,6 +1446,9 @@ async function planGameplayReel(
     const drafted = await materializeFromSeed(seedUrl, storySource, reel.genre, reel.tier as Tier, {
       onLlmUsage: onStoryUsage,
       excludeReelId: reelId,
+      fetchUpdates: reel.fetchUpdates,
+      manualUpdateUrls: reel.manualUpdateUrls,
+      stageAutoUpdates: storySource === "verbatim",
     });
     story = redditPayloadFromStoryDraft(drafted);
     story.partNumber = reel.partNumber ?? story.partNumber ?? 1;
@@ -1383,6 +1472,8 @@ async function planGameplayReel(
     body: story.body,
   });
   reel.narrationVoice = tts;
+  if (!reel.gameplayKey) reel.gameplayKey = (await pickGameplay()).key;
+  await ensureDefaultRedditOpeningCover(reel);
   await reel.save();
   console.log(`📝 Planned Reddit reel ${reelId}: ${reel.scenes.length} sentence scene(s)`);
 }
@@ -1735,7 +1826,7 @@ async function produceImageReel(
     const hadPriorOutput = Boolean(prevOutput);
     reel.outputUrl = await uploadVideo(videoBuffer, "reels", `${reelId}.mp4`);
     if (prevOutput && prevOutput !== reel.outputUrl) {
-      await deleteFromS3(prevOutput).catch(() => {});
+      await deleteS3Urls([prevOutput]);
     }
     const assContent = await readFile(result.assPath, "utf-8");
     reel.subtitlesUrl = await uploadSubtitles(assContent, reelId);
@@ -1754,9 +1845,11 @@ async function produceImageReel(
       heroVideoModel: isHybrid ? models.video : undefined,
       heroDurationSec: heroScene ? Math.min(Math.max(Math.round(heroScene.duration), 4), 8) : undefined,
     });
-    const costBreakdown = hadPriorOutput
-      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Re-render")
-      : runBreakdown;
+    const costBreakdown = accumulateReelCostBreakdown(
+      reel.costBreakdown,
+      runBreakdown,
+      hadPriorOutput ? "Re-render" : "Produce"
+    );
     reel.costBreakdown = costBreakdown;
     reel.costUsd = costBreakdown.totalUsd;
 
@@ -1797,11 +1890,18 @@ async function processGameplayReel(
 
     // Ensure a plan exists (auto pipeline may skip plan_review).
     if (!reel.redditStory?.body || reel.scenes.length === 0) {
-      await planGameplayReel(reel, recipe);
+      const planCosts: MeasuredCostInput[] = [];
+      await planGameplayReel(reel, recipe, planCosts);
+      // Auto gameplay jobs bypass the plan-review worker, so record this spend
+      // now instead of dropping it when the produce ledger is written later.
+      applyMeasuredCostsToReel(reel, planCosts, "Plan");
       await reel.save();
     } else {
       reel.redditStory = stabilizeRedditCard(reel.redditStory);
       syncRedditBodyFromScenes(reel);
+      // Covers introduced after this reel was planned (or refreshed after a
+      // title edit) must still be present before the first production frame.
+      await ensureDefaultRedditOpeningCover(reel);
     }
 
     const story = reel.redditStory!;
@@ -1879,7 +1979,8 @@ async function processGameplayReel(
     });
     const gameplayMeasuredCosts: MeasuredCostInput[] = [];
     const hadPriorOutput = Boolean(reel.outputUrl);
-    let narrationSpendUsd = 0;
+    let narrationActualSpendUsd = 0;
+    let narrationEstimatedSpendUsd = 0;
     let narrationCalls = 0;
     const result = await renderGameplayReel(reelId, story, gameplayPath, {
       ...tts,
@@ -1891,7 +1992,9 @@ async function processGameplayReel(
       skipPartOutro: reel.skipPartOutro,
       onNarrationUsage: (usage) => {
         narrationCalls += 1;
-        if (usage.costUsd !== undefined) narrationSpendUsd += usage.costUsd;
+        if (usage.costUsd === undefined) return;
+        if (usage.source === "estimated") narrationEstimatedSpendUsd += usage.costUsd;
+        else narrationActualSpendUsd += usage.costUsd;
       },
       onNarrationProgress: async ({ index, total, label, generated }) => {
         const progress = 25 + Math.round(((index + 1) / total) * 20);
@@ -1920,7 +2023,7 @@ async function processGameplayReel(
       const prev = reel.scenes[i].audioUrl;
       const url = await uploadAudio(await readFile(segs.bodyPaths[i]), `${reelId}_body_${i}.mp3`);
       reel.scenes[i].audioUrl = url;
-      if (prev && prev !== url) await deleteFromS3(prev).catch(() => {});
+      if (prev && prev !== url) await deleteS3Urls([prev]);
     }
     if (segs.partOutroPath && segs.partOutroGenerated) {
       const url = await uploadAudio(await readFile(segs.partOutroPath), `${reelId}_part_outro.mp3`);
@@ -1931,14 +2034,24 @@ async function processGameplayReel(
     reel.markModified("scenes");
 
     if (narrationCalls > 0) {
-      gameplayMeasuredCosts.push({
-        label: "Narration",
-        model: `${tts.model}/${tts.voice}`,
-        costUsd: narrationSpendUsd > 0 ? narrationSpendUsd : undefined,
-        source: narrationSpendUsd > 0 ? "actual" : "estimated",
-      });
-      if (!(narrationSpendUsd > 0)) {
-        gameplayMeasuredCosts.pop();
+      if (narrationActualSpendUsd > 0) {
+        gameplayMeasuredCosts.push({
+          label: "Narration",
+          model: `${tts.model}/${tts.voice}`,
+          costUsd: narrationActualSpendUsd,
+          source: "actual",
+        });
+      }
+      if (narrationEstimatedSpendUsd > 0) {
+        gameplayMeasuredCosts.push({
+          label: "Narration",
+          model: `${tts.model}/${tts.voice}`,
+          costUsd: narrationEstimatedSpendUsd,
+          source: "estimated",
+        });
+      }
+      if (narrationActualSpendUsd === 0 && narrationEstimatedSpendUsd === 0) {
+        console.warn(`⚠️ Gameplay reel ${reelId}: TTS completed but no usage callback reported a cost`);
       }
     } else if (segs.generatedCount === 0) {
       console.log(`♻️  Gameplay reel ${reelId}: reused all narration segments (0 TTS calls)`);
@@ -1957,7 +2070,7 @@ async function processGameplayReel(
           label: "Outro narration",
           model: `${tts.model}/${tts.voice}`,
           costUsd: usage.costUsd,
-          source: usage.costUsd !== undefined ? "actual" : "estimated",
+          source: usage.source === "estimated" ? "estimated" : "actual",
         });
       },
     });
@@ -1980,9 +2093,11 @@ async function processGameplayReel(
       tts,
       measuredCosts: gameplayMeasuredCosts,
     });
-    const costBreakdown = hadPriorOutput
-      ? accumulateReelCostBreakdown(reel.costBreakdown, runBreakdown, "Re-render")
-      : runBreakdown;
+    const costBreakdown = accumulateReelCostBreakdown(
+      reel.costBreakdown,
+      runBreakdown,
+      hadPriorOutput ? "Re-render" : "Produce"
+    );
     reel.costBreakdown = costBreakdown;
     reel.costUsd = costBreakdown.totalUsd;
 
@@ -2017,7 +2132,8 @@ export async function getReel(id: string): Promise<IReel | null> {
   const changed =
     !sanitized
     || sanitized.totalUsd !== reel.costBreakdown.totalUsd
-    || sanitized.lines.length !== reel.costBreakdown.lines.length;
+    || sanitized.lines.length !== reel.costBreakdown.lines.length
+    || sanitized.note !== reel.costBreakdown.note;
   if (!changed) return reel;
 
   if (sanitized) {
@@ -2051,6 +2167,7 @@ export function collectReelS3AssetUrls(reel: IReel): string[] {
     reel.outroAudioUrl,
     reel.review?.thumbnailUrl,
     reel.shortsCover?.imageUrl,
+    ...(reel.destinations ?? []).flatMap((destination) => [destination.outputUrl, destination.outroAudioUrl]),
     ...reel.scenes.flatMap((scene) => [scene.assetUrl, scene.audioUrl]),
     ...reel.voiceVariants.map((variant) => variant.videoUrl),
   ];
@@ -2121,14 +2238,16 @@ function hasPartTeaser(partNumber: number, partCount: number): boolean {
  *  re-generate rebuilds them; keep scenes + per-scene audio for a cheap redo. */
 function invalidatePartTeaserRender(reel: IReel): string[] {
   const stale = [
-    reel.outputUrl,
     reel.bodyVideoUrl,
     reel.assemblyVideoUrl,
     reel.subtitlesUrl,
     reel.partOutroAudioUrl,
     reel.outroAudioUrl,
+    ...invalidateFinalDestinationRenders(reel, {
+      reason: "Series part numbering changed the spoken part teaser",
+      clearOutroAudio: true,
+    }),
   ].filter((url): url is string => Boolean(url));
-  reel.outputUrl = undefined;
   reel.bodyVideoUrl = undefined;
   reel.assemblyVideoUrl = undefined;
   reel.subtitlesUrl = undefined;

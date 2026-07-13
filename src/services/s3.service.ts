@@ -9,6 +9,7 @@ import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "../config";
 import { generateFilename } from "../utils";
+import { recordOperationLog } from "./operation-log.service";
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -270,7 +271,20 @@ export async function deleteFromS3(url: string): Promise<void> {
 /** Best-effort GC for superseded media URLs. Failures never block the caller. */
 export async function deleteS3Urls(urls: (string | undefined)[]): Promise<void> {
   const unique = [...new Set(urls.filter((url): url is string => Boolean(url)))];
-  await Promise.all(unique.map((url) => deleteFromS3(url).catch(() => {})));
+  await Promise.all(
+    unique.map((url) =>
+      deleteFromS3(url).catch((error: unknown) => {
+        recordOperationLog({
+          scope: "external",
+          level: "warn",
+          event: "s3.superseded_asset_delete_failed",
+          message: "Could not delete a superseded S3 asset; the new reel state remains valid",
+          metadata: { url },
+          error,
+        });
+      })
+    )
+  );
 }
 
 /**

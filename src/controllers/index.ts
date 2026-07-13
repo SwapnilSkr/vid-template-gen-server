@@ -72,6 +72,11 @@ export {
   replanReelSeriesController,
   moveSeriesBoundaryController,
   mergePartController,
+  rescanReelUpdatesController,
+  applyReelUpdatesController,
+  restructureSeriesPartsController,
+  getSeriesStructureAdviceController,
+  chooseSeriesStructureController,
   listReelDestinationsController,
   addReelDestinationController,
   removeReelDestinationController,
@@ -139,11 +144,19 @@ export {
 } from "./youtube.controller";
 export { listInstagramChannelsController, startInstagramConnectController, completeInstagramConnectController, deleteInstagramChannelController, updateInstagramChannelController } from "./instagram.controller";
 
+export {
+  listOperationLogsController,
+  deleteOperationLogController,
+  deleteOperationLogsController,
+  deleteAllOperationLogsController,
+} from "./operation-log.controller";
+
 // Story browse/select controllers
 export {
   listStoryCandidatesController,
   listStoryBankController,
   listStoryGenresController,
+  resolveStoryController,
 } from "./story.controller";
 
 // Audio Test controllers

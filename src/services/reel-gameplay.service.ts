@@ -372,7 +372,7 @@ async function renderGameplayReelInner(
   const assPath = join(config.processingPath, `${reelId}.ass`);
   await writeFile(assPath, buildBouncingCaptions(capSegs, captionStyle), "utf-8");
 
-  // 5. Composite bg + captions + Reddit card overlay + narration.
+  // 5. Composite bg + captions + exactly one opening treatment + narration.
   const card = await renderRedditCard(clean(story.title), redditCardOpts(story));
   tmp.push(card.path);
   const outroCard = outroText ? await renderPartOutroCard((story.partNumber ?? 1) + 1) : undefined;
@@ -542,7 +542,7 @@ function composite(
   out: string,
   outro?: { card?: { path: string; width: number; height: number }; start?: number },
   shortsCoverPath?: string,
-  shortsCoverBackground?: GameplayRenderOpts["shortsCoverBackground"]
+  shortsCoverBackground?: GameplayRenderOpts["shortsCoverBackground"],
 ): Promise<string> {
   const ass = assFilenameFilter(assPath);
   const en = finiteSeconds(titleDur, "title duration").toFixed(2);

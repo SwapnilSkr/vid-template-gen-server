@@ -5,8 +5,15 @@ import { resolveModels, type Tier } from "../config/models";
 import { Story, type IStory, type StorySource } from "../models/story.model";
 import { Reel } from "../models/reel.model";
 import { getErrorMessage } from "../types";
+import { recordOperationLog } from "./operation-log.service";
 import { getTrendDigest } from "./trend-insight.service";
 import { reportLlmUsage, type LlmUsageCallback } from "./reel-script.service";
+import {
+  discoverStoryUpdates,
+  resolveManualUpdates,
+  updatesToContinuations,
+  type UpdateDiscovery,
+} from "./reddit-update-discovery.service";
 
 const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
 
@@ -31,6 +38,8 @@ export interface StoryDraft {
   seedUrl?: string;
   partNumber?: number;
   partCount?: number;
+  /** Discovered followups/updates for this story (verbatim/hybrid Reddit only). */
+  updateDiscovery?: UpdateDiscovery;
 }
 
 export interface StoryPartDraft extends StoryDraft {
@@ -251,7 +260,7 @@ async function redditToken(): Promise<string> {
   return j.access_token;
 }
 
-interface RedditPost {
+export interface RedditPost {
   id: string;
   title: string;
   body: string;
@@ -264,15 +273,15 @@ interface RedditPost {
   createdUtc: number;
 }
 
-interface RedditContinuation {
+export interface RedditContinuation {
   title: string;
   body: string;
   url: string;
-  source: "op_comment" | "author_post";
+  source: "author_post";
   createdUtc: number;
 }
 
-interface RedditListingJson {
+export interface RedditListingJson {
   data?: {
     children?: {
       data?: {
@@ -290,7 +299,7 @@ interface RedditListingJson {
   };
 }
 
-function parseRedditListing(j: RedditListingJson, subreddit: string): RedditPost[] {
+export function parseRedditListing(j: RedditListingJson, subreddit: string): RedditPost[] {
   return (j.data?.children ?? [])
     .map((c) => ({
       id: c.data?.id ?? "",
@@ -334,41 +343,7 @@ async function fetchPublicRedditPosts(
   return parseRedditListing((await res.json()) as RedditListingJson, subreddit);
 }
 
-interface RedditCommentNode {
-  kind?: string;
-  data?: {
-    body?: string;
-    author?: string;
-    permalink?: string;
-    created_utc?: number;
-    score?: number;
-    replies?: "" | { data?: { children?: RedditCommentNode[] } };
-  };
-}
-
-interface RedditCommentsJsonListing {
-  data?: { children?: RedditCommentNode[] };
-}
-
-function isRemovedText(body: string): boolean {
-  const normalized = body.trim().toLowerCase();
-  return normalized === "[removed]" || normalized === "[deleted]";
-}
-
-function flattenComments(nodes: RedditCommentNode[] = []): RedditCommentNode[] {
-  const out: RedditCommentNode[] = [];
-  for (const node of nodes) {
-    if (node.kind === "more") continue;
-    out.push(node);
-    const replies = node.data?.replies;
-    if (replies && typeof replies === "object") {
-      out.push(...flattenComments(replies.data?.children ?? []));
-    }
-  }
-  return out;
-}
-
-function continuationCue(text: string): boolean {
+export function continuationCue(text: string): boolean {
   return /\b(update|edit|final update|mini update|part\s*(?:two|three|four|\d+)|continued|continuation|follow[ -]?up|for everyone asking|since people asked|in the comments|comment update)\b/i.test(text);
 }
 
@@ -384,7 +359,7 @@ function significantTitleWords(title: string): Set<string> {
   );
 }
 
-function titleOverlap(a: string, b: string): number {
+export function titleOverlap(a: string, b: string): number {
   const aw = significantTitleWords(a);
   const bw = significantTitleWords(b);
   let count = 0;
@@ -392,7 +367,7 @@ function titleOverlap(a: string, b: string): number {
   return count;
 }
 
-async function redditFetchJson(path: string): Promise<unknown> {
+export async function redditFetchJson(path: string): Promise<unknown> {
   const token = await redditToken();
   const res = await fetch(`https://oauth.reddit.com${path}`, {
     headers: { Authorization: `Bearer ${token}`, "User-Agent": config.redditUserAgent },
@@ -400,6 +375,13 @@ async function redditFetchJson(path: string): Promise<unknown> {
   if (!res.ok) {
     const detail = await res.text();
     if (res.status === 403 || res.status === 429) {
+      recordOperationLog({
+        scope: "external",
+        level: "warn",
+        event: "reddit.oauth_public_fallback",
+        message: `Reddit OAuth returned ${res.status}; retrying through public JSON`,
+        metadata: { path, status: res.status },
+      });
       const [pathname, query] = path.split("?", 2);
       const jsonPath = pathname.endsWith(".json") ? pathname : `${pathname}.json`;
       const publicRes = await fetch(`https://www.reddit.com${jsonPath}${query ? `?${query}` : ""}`, {
@@ -417,57 +399,7 @@ async function redditFetchJson(path: string): Promise<unknown> {
   return res.json();
 }
 
-async function fetchOpCommentContinuations(post: RedditPost): Promise<RedditContinuation[]> {
-  if (!post.id || !post.author || post.author === "[deleted]") return [];
-  const json = (await redditFetchJson(`/comments/${post.id}?limit=500&sort=qa&raw_json=1`)) as [
-    unknown,
-    RedditCommentsJsonListing,
-  ];
-  const comments = flattenComments(json[1]?.data?.children ?? []);
-  return comments
-    .filter((node) => node.data?.author?.toLowerCase() === post.author.toLowerCase())
-    .map((node): RedditContinuation | undefined => {
-      const body = cleanRedditBody(node.data?.body ?? "");
-      if (wordCount(body) < 25 || isRemovedText(body)) return undefined;
-      if (!continuationCue(body) && wordCount(body) < 70) return undefined;
-      return {
-        title: "OP comment update",
-        body,
-        url: node.data?.permalink ? `https://reddit.com${node.data.permalink}` : post.url,
-        source: "op_comment",
-        createdUtc: node.data?.created_utc ?? post.createdUtc,
-      };
-    })
-    .filter((item): item is RedditContinuation => Boolean(item))
-    .sort((a, b) => a.createdUtc - b.createdUtc)
-    .slice(0, 4);
-}
-
-async function fetchAuthorPostContinuations(post: RedditPost): Promise<RedditContinuation[]> {
-  if (!post.author || post.author === "[deleted]") return [];
-  const json = (await redditFetchJson(
-    `/user/${encodeURIComponent(post.author)}/submitted?sort=new&limit=50&raw_json=1`
-  )) as RedditListingJson;
-  return parseRedditListing(json, post.subreddit)
-    .filter((candidate) => candidate.url !== post.url)
-    .filter((candidate) => candidate.createdUtc > post.createdUtc)
-    .filter((candidate) => candidate.createdUtc - post.createdUtc < 60 * 60 * 24 * 120)
-    .filter((candidate) => {
-      const combined = `${candidate.title}\n${candidate.body}`;
-      return continuationCue(combined) || titleOverlap(post.title, candidate.title) >= 2;
-    })
-    .map((candidate) => ({
-      title: candidate.title,
-      body: candidate.body,
-      url: candidate.url,
-      source: "author_post" as const,
-      createdUtc: candidate.createdUtc,
-    }))
-    .sort((a, b) => a.createdUtc - b.createdUtc)
-    .slice(0, 3);
-}
-
-function combinePostWithContinuations(post: RedditPost, continuations: RedditContinuation[]): RedditPost {
+export function combinePostWithContinuations(post: RedditPost, continuations: RedditContinuation[]): RedditPost {
   if (!continuations.length) return post;
   const unique = new Map<string, RedditContinuation>();
   for (const continuation of continuations) {
@@ -488,18 +420,72 @@ function combinePostWithContinuations(post: RedditPost, continuations: RedditCon
   };
 }
 
-async function resolveRedditStoryThread(post: RedditPost): Promise<RedditPost> {
-  const [comments, authorPosts] = await Promise.all([
-    fetchOpCommentContinuations(post).catch((error: unknown) => {
-      console.warn(`  reddit comments skipped for ${post.url}: ${getErrorMessage(error)}`);
-      return [];
-    }),
-    fetchAuthorPostContinuations(post).catch((error: unknown) => {
-      console.warn(`  reddit author updates skipped for u/${post.author}: ${getErrorMessage(error)}`);
-      return [];
-    }),
-  ]);
-  return combinePostWithContinuations(post, [...comments, ...authorPosts]);
+export interface ThreadOptions {
+  /** Run auto-discovery (author profile + embedded links). */
+  fetchUpdates?: boolean;
+  /** User-pasted followup URLs, always force-included. */
+  manualUpdateUrls?: string[];
+  /** Precomputed discovery to reuse (skips network) — Studio re-apply path. */
+  discovery?: UpdateDiscovery;
+  /** When reusing `discovery`, which candidate keys to weave in (defaults to decision==="include"). */
+  includedKeys?: string[];
+  /** Keep auto-discovered candidates for plan review; only manual URLs are woven now. */
+  stageAutoUpdates?: boolean;
+  tier?: Tier;
+  onLlmUsage?: LlmUsageCallback;
+}
+
+export interface ThreadResult {
+  post: RedditPost;
+  discovery?: UpdateDiscovery;
+}
+
+/**
+ * Weave the OP's later updates into a story body. Gated on `fetchUpdates`
+ * (default true = today's verbatim behavior). Manual URLs are always included.
+ * Returns the (possibly) combined post plus the discovery result to persist.
+ */
+async function resolveRedditStoryThread(
+  post: RedditPost,
+  opts: ThreadOptions = {}
+): Promise<ThreadResult> {
+  // Reuse a prior scan (e.g. from create-time), just re-weave the chosen set.
+  if (opts.discovery) {
+    const continuations = updatesToContinuations(opts.discovery, opts.includedKeys);
+    return { post: combinePostWithContinuations(post, continuations), discovery: opts.discovery };
+  }
+
+  const fetchUpdates = opts.fetchUpdates ?? true;
+  const manualUrls = (opts.manualUpdateUrls ?? []).filter((u) => u.trim());
+  if (!fetchUpdates && manualUrls.length === 0) return { post };
+
+  const manual = manualUrls.length ? await resolveManualUpdates(manualUrls, post) : [];
+
+  let discovery: UpdateDiscovery;
+  if (fetchUpdates) {
+    discovery = await discoverStoryUpdates(post, {
+      tier: opts.tier,
+      onLlmUsage: opts.onLlmUsage,
+      existing: manual,
+    }).catch((error: unknown) => {
+      console.warn(`  update discovery failed for ${post.url}: ${getErrorMessage(error)}`);
+      return { method: "signals" as const, candidates: manual, scannedAt: Date.now() };
+    });
+  } else {
+    // Manual links only — no auto scan.
+    discovery = { method: "signals", candidates: manual, scannedAt: Date.now() };
+  }
+
+  // Auto-discovery is reviewable input, not an implicit rewrite of the story.
+  // Manual links remain force-included because the user supplied them directly.
+  if (opts.stageAutoUpdates) {
+    for (const candidate of discovery.candidates) {
+      if (candidate.kind !== "manual" && candidate.decision === "include") candidate.decision = "candidate";
+    }
+  }
+
+  const continuations = updatesToContinuations(discovery);
+  return { post: combinePostWithContinuations(post, continuations), discovery };
 }
 
 async function fetchRedditPosts(
@@ -519,6 +505,13 @@ async function fetchRedditPosts(
     const detail = await res.text();
     if (res.status === 403 || res.status === 429) {
       console.warn(`  reddit oauth fetch ${res.status} for ${subreddit}; trying public JSON fallback`);
+      recordOperationLog({
+        scope: "external",
+        level: "warn",
+        event: "reddit.oauth_public_fallback",
+        message: `Reddit OAuth returned ${res.status}; retrying subreddit list through public JSON`,
+        metadata: { subreddit, status: res.status, limit, sort, timeRange: t },
+      });
       try {
         return await fetchPublicRedditPosts(subreddit, limit, t, sort);
       } catch (fallbackError: unknown) {
@@ -582,13 +575,66 @@ function normalizeRedditUrl(url: string): string {
   return url.trim().replace(/\/+$/, "").toLowerCase();
 }
 
-function parseRedditPostId(url: string): string | null {
+export function parseRedditPostId(url: string): string | null {
   const match = url.trim().match(/\/comments\/([a-z0-9]+)/i);
   return match?.[1] ?? null;
 }
 
-async function fetchPostByUrl(url: string): Promise<RedditPost | null> {
-  const postId = parseRedditPostId(url);
+function isRedditShareLink(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const isRedditHost = host === "reddit.com" || host.endsWith(".reddit.com");
+    return isRedditHost && /^\/(?:u|user)\/[^/]+\/s\/\w+\/?$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isApprovedRedditUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase();
+  return (url.protocol === "https:" || url.protocol === "http:") && (host === "reddit.com" || host.endsWith(".reddit.com"));
+}
+
+/**
+ * Reddit `/u/<user>/s/<code>` share links 302-redirect to the real permalink.
+ * Follow the redirect (browser UA — WAF blocks the descriptive UA) and return
+ * the canonical `/comments/<id>...` URL, or null if it can't be resolved.
+ */
+export async function resolveRedditShareLink(url: string): Promise<string | null> {
+  try {
+    let current = new URL(url.trim());
+    if (!isApprovedRedditUrl(current) || !isRedditShareLink(current.toString())) return null;
+    for (let hop = 0; hop < 5; hop++) {
+      const res = await fetch(current, {
+        method: "GET",
+        redirect: "manual",
+        headers: { "User-Agent": config.redditUserAgent },
+      });
+      const location = res.headers.get("location");
+      if (res.status >= 300 && res.status < 400 && location) {
+        const next = new URL(location, current);
+        if (!isApprovedRedditUrl(next)) return null;
+        current = next;
+        if (parseRedditPostId(current.toString())) return current.toString().split("?")[0];
+        continue;
+      }
+      // Non-redirect response — if the final URL is a permalink, use it.
+      return parseRedditPostId(current.toString()) ? current.toString().split("?")[0] : null;
+    }
+    return parseRedditPostId(current.toString()) ? current.toString().split("?")[0] : null;
+  } catch (error: unknown) {
+    console.warn(`  reddit share-link resolve failed for ${url}: ${getErrorMessage(error)}`);
+    return null;
+  }
+}
+
+export async function fetchPostByUrl(url: string): Promise<RedditPost | null> {
+  let postId = parseRedditPostId(url);
+  if (!postId && isRedditShareLink(url)) {
+    const resolved = await resolveRedditShareLink(url);
+    if (resolved) postId = parseRedditPostId(resolved);
+  }
   if (!postId) return null;
   try {
     const json = (await redditFetchJson(`/comments/${postId}?limit=1&raw_json=1`)) as [
@@ -779,13 +825,6 @@ async function resolvePostForSeries(
   return pickRedditPost(genre);
 }
 
-function parseSeriesParts(parts?: string): number | "auto" | undefined {
-  if (!parts || parts === "off") return undefined;
-  if (parts === "auto") return "auto";
-  const n = Number(parts);
-  return Number.isFinite(n) ? n : undefined;
-}
-
 function estimatePartsForWords(
   parts: number | "auto" | undefined,
   words: number
@@ -904,7 +943,15 @@ OUTPUT JSON ONLY:
   // the judge call fails, fall back to the free deterministic guard.
   try {
     parts = await judgeAndFixCliffhangers(parts, llm, onLlmUsage);
-  } catch {
+  } catch (error: unknown) {
+    recordOperationLog({
+      scope: "external",
+      level: "warn",
+      event: "openrouter.cliffhanger_judge_fallback",
+      message: "Cliffhanger judge failed; evaluating the deterministic repair path",
+      metadata: { model: llm },
+      error,
+    });
     const weak = parts.slice(0, -1).some((part) => endsFlat(part.body));
     if (weak) {
       try {
@@ -916,7 +963,15 @@ The previous draft ended a non-final part on a flat, resolvable line. Regenerate
         });
         reportLlmUsage(onLlmUsage, "Series script (cliffhanger repair)", llm, retry.usage);
         parts = parseAndValidate(retry.text);
-      } catch {
+      } catch (repairError: unknown) {
+        recordOperationLog({
+          scope: "external",
+          level: "warn",
+          event: "openrouter.cliffhanger_repair_skipped",
+          message: "Cliffhanger repair failed; retaining the original draft",
+          metadata: { model: llm },
+          error: repairError,
+        });
         // Keep the first draft if the repair pass also fails.
       }
     }
@@ -961,7 +1016,7 @@ OUTPUT JSON ONLY:
   return applyEndingVerdicts(parts, parsed.verdicts ?? []);
 }
 
-type EndingVerdict = { part?: number; score?: number; body?: string };
+interface EndingVerdict { part?: number; score?: number; body?: string }
 
 /**
  * Splice the judge's rewrites back into the series: apply a rewrite only when the
@@ -992,7 +1047,7 @@ function endsFlat(body: string): boolean {
 }
 
 /** Trim a verbatim reddit body to a narratable length at a sentence boundary. */
-function trimBody(body: string, maxWords = 160): string {
+export function trimBody(body: string, maxWords = 160): string {
   const clean = body.replace(/\s+/g, " ").replace(/&amp;/g, "&").trim();
   const words = clean.split(" ");
   if (words.length <= maxWords) return clean;
@@ -1001,7 +1056,7 @@ function trimBody(body: string, maxWords = 160): string {
   return lastStop > 60 ? cut.slice(0, lastStop + 1) : cut + "...";
 }
 
-function cleanRedditBody(body: string): string {
+export function cleanRedditBody(body: string): string {
   return body
     .replace(/&amp;/g, "&")
     .replace(/\r/g, "\n")
@@ -1011,7 +1066,7 @@ function cleanRedditBody(body: string): string {
     .trim();
 }
 
-function splitSentences(text: string): string[] {
+export function splitSentences(text: string): string[] {
   return (
     text
       .match(/[^.!?]+[.!?]+(?:["')\]]+)?|[^.!?]+$/g)
@@ -1020,41 +1075,74 @@ function splitSentences(text: string): string[] {
   );
 }
 
-function wordCount(text: string): number {
+export function wordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
-function resolvePartCount(requested: number | "auto" | undefined, words: number): number {
-  if (typeof requested === "number") {
-    // An explicit 1 (or lower) means "no split" — the whole story in one reel.
-    if (requested <= 1) return 1;
-    return Math.min(Math.max(Math.round(requested), 2), 4);
-  }
-  if (words < 220) return 1;
-  return Math.min(Math.max(Math.ceil(words / 145), 2), 4);
+// Keep each reel within ~1-2 minutes of narration. At Reddit gameplay pacing
+// (~150 wpm after tempo + sentence gaps) ~200 words ≈ 1.3 min, ~300 ≈ 2 min.
+export const MAX_WORDS_PER_PART = 300; // hard ceiling: a single reel never runs longer
+const TARGET_WORDS_PER_PART = 200; // aim per part on auto-split
+
+/**
+ * Preserve verbatim wording while making any unusually long sentence splittable
+ * at the hard reel limit. A mid-sentence split is a last resort, but is better
+ * than silently producing an overlong Short.
+ */
+export function splitSentencesForReelParts(text: string, maxWords = MAX_WORDS_PER_PART): string[] {
+  return splitSentences(text).flatMap((sentence) => {
+    const words = sentence.trim().split(/\s+/).filter(Boolean);
+    if (words.length <= maxWords) return [sentence];
+    const chunks: string[] = [];
+    for (let i = 0; i < words.length; i += maxWords) chunks.push(words.slice(i, i + maxWords).join(" "));
+    return chunks;
+  });
 }
 
-function titleWithPart(title: string, partNumber: number): string {
+/** Add sentence-boundary cuts wherever a selected range would exceed the hard limit. */
+function enforceMaxWordsPerPart(sentences: string[], cuts: number[], maxWords = MAX_WORDS_PER_PART): number[] {
+  const boundaries = [0, ...cuts, sentences.length];
+  const enforced: number[] = [];
+  for (let range = 0; range < boundaries.length - 1; range++) {
+    const start = boundaries[range];
+    const end = boundaries[range + 1];
+    let words = 0;
+    for (let index = start; index < end; index++) {
+      const nextWords = wordCount(sentences[index]);
+      if (words > 0 && words + nextWords > maxWords) {
+        enforced.push(index);
+        words = 0;
+      }
+      words += nextWords;
+    }
+    if (end < sentences.length) enforced.push(end);
+  }
+  return [...new Set(enforced)].sort((a, b) => a - b);
+}
+
+/**
+ * How many parts to split a story into. `capLength` (verbatim, where body length
+ * == narration length) forces extra parts so no single reel exceeds ~2 minutes —
+ * even when the caller asked for "1 (no split)".
+ */
+export function resolvePartCount(
+  requested: number | "auto" | undefined,
+  words: number,
+  opts: { capLength?: boolean } = {}
+): number {
+  const lengthFloor = opts.capLength ? Math.ceil(words / MAX_WORDS_PER_PART) : 1;
+  if (typeof requested === "number") {
+    // Explicit count, but the length cap can only ADD parts, never drop below it.
+    if (requested <= 1) return Math.max(1, lengthFloor);
+    return Math.max(Math.round(requested), 2, lengthFloor);
+  }
+  if (words < 220 && lengthFloor <= 1) return 1;
+  return Math.max(Math.ceil(words / TARGET_WORDS_PER_PART), 2, lengthFloor);
+}
+
+export function titleWithPart(title: string, partNumber: number): string {
   const stripped = title.replace(/\s+part\s+\d+\s*$/i, "").trim();
   return `${stripped} Part ${partNumber}`;
-}
-
-function fallbackCutAfter(sentences: string[], partCount: number): number[] {
-  const totalWords = sentences.reduce((sum, s) => sum + wordCount(s), 0);
-  const cuts: number[] = [];
-  let sentenceIndex = 0;
-  let runningWords = 0;
-
-  for (let part = 1; part < partCount; part++) {
-    const target = (totalWords * part) / partCount;
-    while (sentenceIndex < sentences.length - 1 && runningWords < target) {
-      runningWords += wordCount(sentences[sentenceIndex]);
-      sentenceIndex++;
-    }
-    cuts.push(sentenceIndex);
-  }
-
-  return cuts;
 }
 
 /** Running word total after each sentence (cum[i] = words through sentence i). */
@@ -1066,6 +1154,75 @@ function cumulativeWords(sentences: string[]): number[] {
     cum.push(running);
   }
   return cum;
+}
+
+/**
+ * A deterministic, duration-aware fallback. It balances both spoken words and
+ * scene count: a verbal-only cut can otherwise put 22 short visual beats in one
+ * part and a handful of long sentences in the other.
+ */
+function balancedCutAfter(sentences: string[], partCount: number): number[] {
+  const n = sentences.length;
+  const cumulative = cumulativeWords(sentences);
+  const totalWords = cumulative[n - 1] ?? 0;
+  const cuts: number[] = [];
+  let previous = 0;
+
+  for (let part = 1; part < partCount; part++) {
+    const remainingCuts = partCount - part - 1;
+    const maxCut = n - 1 - remainingCuts;
+    const targetProgress = part / partCount;
+    let bestCut = previous + 1;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (let cut = previous + 1; cut <= maxCut; cut++) {
+      const wordProgress = totalWords > 0 ? (cumulative[cut - 1] ?? 0) / totalWords : targetProgress;
+      const sceneProgress = cut / n;
+      // Words approximate run time; sentence count keeps visual pacing sensible.
+      const distance = Math.abs(wordProgress - targetProgress) * 0.7 + Math.abs(sceneProgress - targetProgress) * 0.3;
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestCut = cut;
+      }
+    }
+    cuts.push(bestCut);
+    previous = bestCut;
+  }
+  return cuts;
+}
+
+/** Reject a dramatic-looking cut if it creates a lopsided reel series. */
+function cutsAreBalanced(sentences: string[], cuts: number[], partCount: number): boolean {
+  const normalized = normalizeCuts(cuts, sentences.length, partCount);
+  if (normalized.length !== partCount - 1) return false;
+
+  const totalWords = sentences.reduce((sum, sentence) => sum + wordCount(sentence), 0);
+  const targetWords = totalWords / partCount;
+  const targetScenes = sentences.length / partCount;
+  const boundaries = [0, ...normalized, sentences.length];
+  const minRatio = 0.65;
+  const maxRatio = 1.35;
+
+  for (let part = 0; part < partCount; part++) {
+    const start = boundaries[part];
+    const end = boundaries[part + 1];
+    const partWords = sentences.slice(start, end).reduce((sum, sentence) => sum + wordCount(sentence), 0);
+    const partScenes = end - start;
+    if (targetWords > 0 && (partWords < targetWords * minRatio || partWords > targetWords * maxRatio)) return false;
+    if (targetScenes >= 2 && (partScenes < targetScenes * minRatio || partScenes > targetScenes * maxRatio)) return false;
+  }
+  return true;
+}
+
+/**
+ * Cliffhangers are a tie-breaker, never permission for one part to absorb most
+ * of the story. Fall back to the balanced cut when an LLM/refinement violates
+ * the duration or scene-pacing guard.
+ */
+function preserveBalancedCuts(sentences: string[], cuts: number[], partCount: number): number[] {
+  const normalized = normalizeCuts(cuts, sentences.length, partCount);
+  if (cutsAreBalanced(sentences, normalized, partCount)) return normalized;
+  return normalizeCuts(balancedCutAfter(sentences, partCount), sentences.length, partCount);
 }
 
 /**
@@ -1096,6 +1253,184 @@ function cliffhangerScore(sentence: string, next?: string): number {
   if (words < 5) score -= 2; // too short to land a beat
   if (/\b(anyway|so yeah|that'?s it|thanks for reading|tl;?dr|to be continued)\b/i.test(s)) score -= 3; // deflates tension
   return score;
+}
+
+export interface SeriesStructureBreak {
+  /** The episode that ends at this boundary. */
+  partNumber: number;
+  sentenceNumber: number;
+  ending: string;
+  score: number;
+  quality: "strong" | "serviceable" | "weak";
+  rationale?: string;
+}
+
+export interface SeriesStructureAdvice {
+  wordCount: number;
+  sentenceCount: number;
+  estimatedDurationSeconds: number;
+  /** Minimum count required to honor the two-minute ceiling. */
+  minimumParts: number;
+  recommendedParts: number;
+  reason: string;
+  breaks: SeriesStructureBreak[];
+  hasWeakBreaks: boolean;
+}
+
+function breakQuality(score: number): SeriesStructureBreak["quality"] {
+  if (score >= 3) return "strong";
+  if (score >= 1) return "serviceable";
+  return "weak";
+}
+
+function inspectStructureBreaks(sentences: string[], partCount: number): SeriesStructureBreak[] {
+  if (partCount <= 1 || sentences.length <= 1) return [];
+  const cuts = balancedCutAfter(sentences, Math.min(partCount, sentences.length));
+  return cuts.map((cut, index) => {
+    const ending = sentences[cut - 1] ?? "";
+    const score = cliffhangerScore(ending, sentences[cut]);
+    return {
+      partNumber: index + 1,
+      sentenceNumber: cut,
+      ending,
+      score,
+      quality: breakQuality(score),
+    };
+  });
+}
+
+function structureAdviceForParts(
+  wordTotal: number,
+  sentenceCount: number,
+  minimumParts: number,
+  recommendedParts: number,
+  breaks: SeriesStructureBreak[],
+  reason?: string
+): SeriesStructureAdvice {
+  const hasWeakBreaks = breaks.some((candidate) => candidate.quality === "weak");
+  const perPartWords = Math.round(wordTotal / recommendedParts);
+  const fallbackReason =
+    recommendedParts === 1
+      ? `One reel is the cleanest structure: about ${perPartWords} spoken words and no justified episode break.`
+      : recommendedParts === minimumParts && minimumParts > 1
+        ? `${minimumParts} part${minimumParts === 1 ? "" : "s"} ${minimumParts === 1 ? "is" : "are"} required to keep each reel under about two minutes (${perPartWords} words each).${hasWeakBreaks ? " Some seams are duration-driven rather than natural cliffhangers." : ""}`
+        : `${recommendedParts} parts keep the pacing near ${perPartWords} words per reel while preserving usable return hooks.`;
+  return {
+    wordCount: wordTotal,
+    sentenceCount,
+    estimatedDurationSeconds: Math.max(1, Math.round((wordTotal / 150) * 60)),
+    minimumParts,
+    recommendedParts,
+    reason: reason?.trim() || fallbackReason,
+    breaks,
+    hasWeakBreaks,
+  };
+}
+
+/**
+ * Assess a fully assembled verbatim story before anyone spends production
+ * credits. The advisor uses the same duration cap and balanced cut candidates
+ * as the actual splitter, then avoids optional extra episodes when their only
+ * available ending is flat. This is deliberately deterministic and free: it
+ * advises the user without silently spending a second LLM call.
+ */
+export function assessVerbatimSeriesStructure(body: string): SeriesStructureAdvice {
+  const sentences = splitSentencesForReelParts(cleanRedditBody(body));
+  const wordTotal = sentences.reduce((sum, sentence) => sum + wordCount(sentence), 0);
+  const minimumParts = Math.max(1, Math.ceil(wordTotal / MAX_WORDS_PER_PART));
+  const autoParts = resolvePartCount("auto", wordTotal, { capLength: true });
+
+  // Length establishes the floor. Above it, only retain an extra episode when
+  // every added seam gives the audience at least a serviceable reason to return.
+  let recommendedParts = autoParts;
+  let breaks = inspectStructureBreaks(sentences, recommendedParts);
+  while (
+    recommendedParts > minimumParts &&
+    breaks.some((candidate) => candidate.quality === "weak")
+  ) {
+    recommendedParts--;
+    breaks = inspectStructureBreaks(sentences, recommendedParts);
+  }
+  return structureAdviceForParts(wordTotal, sentences.length, minimumParts, recommendedParts, breaks);
+}
+
+/**
+ * Editorial LLM pass over the full assembled story (including selected updates)
+ * and each duration-safe candidate structure. It selects the strongest viable
+ * plan and explains why; usage is surfaced through `onLlmUsage` for the cost
+ * ledger, including during plan review.
+ */
+export async function assessVerbatimSeriesStructureWithAi(
+  body: string,
+  tier: Tier,
+  onLlmUsage?: LlmUsageCallback
+): Promise<SeriesStructureAdvice> {
+  const cleanBody = cleanRedditBody(body);
+  const sentences = splitSentencesForReelParts(cleanBody);
+  const wordTotal = sentences.reduce((sum, sentence) => sum + wordCount(sentence), 0);
+  const minimumParts = Math.max(1, Math.ceil(wordTotal / MAX_WORDS_PER_PART));
+  const maximumParts = resolvePartCount("auto", wordTotal, { capLength: true });
+  const candidateCounts = Array.from({ length: Math.max(1, maximumParts - minimumParts + 1) }, (_, index) =>
+    minimumParts + index
+  );
+  const candidates = candidateCounts.map((partCount) => ({
+    partCount,
+    approxWordsPerPart: Math.round(wordTotal / partCount),
+    seams: inspectStructureBreaks(sentences, partCount).map((seam) => ({
+      partNumber: seam.partNumber,
+      sentenceNumber: seam.sentenceNumber,
+      ending: seam.ending,
+      nextOpening: sentences[seam.sentenceNumber] ?? "",
+    })),
+  }));
+  const llm = resolveModels(tier).llm;
+  const prompt = `You are the editorial planner for a short-form Reddit reel series. Decide the best part count BEFORE production.
+
+The narration below already includes every approved OP follow-up and manually supplied Reddit update. A reel must stay at or below about 300 spoken words (roughly two minutes). You must choose one of the supplied duration-safe candidate plans; do not invent a different count or rewrite the story.
+
+Assess narrative continuity, whether each seam creates a genuine reason to continue, and whether extra episodes are justified. A duration-forced seam is acceptable when required, but say so plainly. Prefer fewer parts when extra seams are weak.
+
+STORY (${wordTotal} words):
+${cleanBody}
+
+SAFE CANDIDATE PLANS:
+${JSON.stringify(candidates)}
+
+Return JSON only:
+{
+  "recommendedParts": number,
+  "reason": "one concise editorial explanation",
+  "breaks": [{ "partNumber": number, "quality": "strong" | "serviceable" | "weak", "rationale": "short reason" }]
+}`;
+
+  const { text, usage } = await generateText({ model: openrouter(llm), prompt });
+  reportLlmUsage(onLlmUsage, "Series structure assessment", llm, usage);
+  const parsed = extractJson<{
+    recommendedParts?: number;
+    reason?: string;
+    breaks?: { partNumber?: number; quality?: SeriesStructureBreak["quality"]; rationale?: string }[];
+  }>(text);
+  const recommendedParts = candidateCounts.includes(parsed.recommendedParts ?? -1)
+    ? (parsed.recommendedParts as number)
+    : assessVerbatimSeriesStructure(cleanBody).recommendedParts;
+  const modelBreaks = new Map((parsed.breaks ?? []).filter((item) => item.partNumber).map((item) => [item.partNumber!, item]));
+  const breaks = inspectStructureBreaks(sentences, recommendedParts).map((candidate) => {
+    const modelBreak = modelBreaks.get(candidate.partNumber);
+    const quality = modelBreak?.quality;
+    return {
+      ...candidate,
+      quality: quality === "strong" || quality === "serviceable" || quality === "weak" ? quality : candidate.quality,
+      rationale: modelBreak?.rationale?.trim(),
+    };
+  });
+  return structureAdviceForParts(
+    wordTotal,
+    sentences.length,
+    minimumParts,
+    recommendedParts,
+    breaks,
+    parsed.reason
+  );
 }
 
 /**
@@ -1151,27 +1486,29 @@ function normalizeCuts(cuts: number[], sentenceCount: number, partCount: number)
   return filled.sort((a, b) => a - b).slice(0, partCount - 1);
 }
 
-async function selectVerbatimCuts(
+export async function selectVerbatimCuts(
   title: string,
   sentences: string[],
   partCount: number,
   tier: Tier,
   onLlmUsage?: LlmUsageCallback
 ): Promise<number[]> {
-  // Fallback: balance by words, then chase the strongest nearby hook aggressively.
-  const fallback = normalizeCuts(
-    refineCutsForCliffhangers(sentences, fallbackCutAfter(sentences, partCount), 0.5),
-    sentences.length,
+  // Balance is a hard constraint. A cliffhanger can improve a comparable cut,
+  // but never turn a two-part request into a 22-scenes-versus-4 split.
+  const balancedFallback = normalizeCuts(balancedCutAfter(sentences, partCount), sentences.length, partCount);
+  const fallback = preserveBalancedCuts(
+    sentences,
+    refineCutsForCliffhangers(sentences, balancedFallback, 0.5),
     partCount
   );
   // Not enough sentences to place partCount-1 distinct interior cuts.
-  if (sentences.length <= partCount) return fallback;
+  if (sentences.length <= partCount) return enforceMaxWordsPerPart(sentences, fallback);
 
   const llm = resolveModels(tier).llm;
   const totalWords = sentences.reduce((sum, s) => sum + wordCount(s), 0);
   const targetWords = Math.max(1, Math.round(totalWords / partCount));
-  const minWords = Math.round(targetWords * 0.6);
-  const maxWords = Math.round(targetWords * 1.5);
+  const minWords = Math.round(targetWords * 0.65);
+  const maxWords = Math.round(targetWords * 1.35);
 
   // Annotate each sentence with the running word total so the model can balance
   // parts while still being free to cut anywhere (not just near word targets).
@@ -1194,9 +1531,11 @@ ${numbered}
 
 Choose exactly ${partCount - 1} cut points. A cut point N means a part ENDS after sentence N, and the next part begins at sentence N+1.
 
-Priorities, in order:
-1. END EVERY PART ON A CLIFFHANGER. The final sentence of a part is the retention hook — it should leave a question open, introduce a threat, escalate the stakes, tease a reveal, or land right before an "Edit/Update". Never end a part mid-thought or on a throwaway line.
-2. Keep parts watchable — ideally each part between ~${minWords} and ~${maxWords} words. Balance matters, but a strong ending beats perfect balance.
+Hard constraints:
+1. Keep every part close to ${targetWords} words (roughly ${minWords}–${maxWords}) AND a comparable number of sentences/scenes. Do not put most of the story in one part just to get a stronger ending.
+2. Cut only between complete sentences and keep the parts sequential.
+
+Within those constraints, END EVERY PART ON THE BEST CLIFFHANGER available. The final sentence should leave a question open, introduce a threat, escalate the stakes, tease a reveal, or land right before an "Edit/Update". Never end on a throwaway line.
 
 Cut points must be strictly increasing integers between 1 and ${sentences.length - 1}, and there must be exactly ${partCount - 1} of them.
 
@@ -1207,19 +1546,22 @@ OUTPUT JSON ONLY: { "cutAfter": [${Array.from({ length: partCount - 1 }, () => "
     reportLlmUsage(onLlmUsage, "Verbatim cut selection", llm, usage);
     const parsed = extractJson<{ cutAfter: number[] }>(text);
     const valid = normalizeCuts(parsed.cutAfter, sentences.length, partCount);
-    if (valid.length !== partCount - 1) return fallback;
-    // Trust the model's cliffhangers, but rescue any part it ended on a flat line.
-    return normalizeCuts(
-      refineCutsForCliffhangers(sentences, valid, 1.5),
-      sentences.length,
-      partCount
+    if (valid.length !== partCount - 1) return enforceMaxWordsPerPart(sentences, fallback);
+    // Trust the model's cliffhangers only while its parts stay balanced.
+    return enforceMaxWordsPerPart(
+      sentences,
+      preserveBalancedCuts(
+        sentences,
+        refineCutsForCliffhangers(sentences, valid, 1.5),
+        partCount
+      )
     );
   } catch {
-    return fallback;
+    return enforceMaxWordsPerPart(sentences, fallback);
   }
 }
 
-function buildVerbatimParts(
+export function buildVerbatimParts(
   post: RedditPost,
   subreddit: string,
   sentences: string[],
@@ -1253,7 +1595,14 @@ function buildVerbatimParts(
  */
 export async function generateStory(
   mode: StorySource = "llm",
-  opts: { themeId?: string; genre?: string; tier?: Tier; onLlmUsage?: LlmUsageCallback } = {}
+  opts: {
+    themeId?: string;
+    genre?: string;
+    tier?: Tier;
+    onLlmUsage?: LlmUsageCallback;
+    fetchUpdates?: boolean;
+    manualUpdateUrls?: string[];
+  } = {}
 ): Promise<StoryDraft & { source: StorySource }> {
   const tier = opts.tier ?? "value";
   const onLlmUsage = opts.onLlmUsage;
@@ -1267,9 +1616,16 @@ export async function generateStory(
 
   // hybrid / verbatim need a real post
   const post = await pickRedditPost(genre);
+  // verbatim threads updates by default; hybrid only when explicitly asked.
+  const threadOpts: ThreadOptions = {
+    fetchUpdates: opts.fetchUpdates ?? (mode === "verbatim"),
+    manualUpdateUrls: opts.manualUpdateUrls,
+    tier,
+    onLlmUsage,
+  };
 
   if (mode === "verbatim") {
-    const threadedPost = await resolveRedditStoryThread(post);
+    const { post: threadedPost, discovery } = await resolveRedditStoryThread(post, threadOpts);
     return {
       title: threadedPost.title,
       body: trimBody(threadedPost.body),
@@ -1283,11 +1639,13 @@ export async function generateStory(
       ageHours: threadedPost.ageHours,
       seedTitle: post.title,
       seedUrl: post.url,
+      updateDiscovery: discovery,
     };
   }
 
-  // hybrid
-  const s = await llmStory(genre.angle, tier, genre.id, post, onLlmUsage);
+  // hybrid — optionally thread the seed before rewriting.
+  const { post: seedPost, discovery } = await resolveRedditStoryThread(post, threadOpts);
+  const s = await llmStory(genre.angle, tier, genre.id, seedPost, onLlmUsage);
   return {
     ...s,
     source: "hybrid",
@@ -1300,6 +1658,7 @@ export async function generateStory(
     ageHours: post.ageHours,
     seedTitle: post.title,
     seedUrl: post.url,
+    updateDiscovery: discovery,
   };
 }
 
@@ -1319,6 +1678,8 @@ export async function generateStorySeries(
     selectedSeedUrl?: string;
     excludeReelIds?: string[];
     onLlmUsage?: LlmUsageCallback;
+    fetchUpdates?: boolean;
+    manualUpdateUrls?: string[];
   } = {}
 ): Promise<StoryPartDraft[]> {
   const tier = opts.tier ?? "value";
@@ -1326,6 +1687,13 @@ export async function generateStorySeries(
   const genre = theme ? themeToGenre(theme) : pickGenre(opts.genre);
   const requestedParts = opts.parts;
   const onLlmUsage = opts.onLlmUsage;
+  const threadOpts: ThreadOptions = {
+    fetchUpdates: opts.fetchUpdates ?? (mode === "verbatim"),
+    manualUpdateUrls: opts.manualUpdateUrls,
+    tier,
+    onLlmUsage,
+    stageAutoUpdates: mode === "verbatim",
+  };
 
   if (mode === "llm") {
     const partCount = typeof requestedParts === "number" ? resolvePartCount(requestedParts, 300) : 2;
@@ -1354,9 +1722,10 @@ export async function generateStorySeries(
     // episodes) instead of always defaulting to 2. Floor at 2: hybrid rewrites
     // can expand a short seed, and a "series" should stay multi-part. Explicit
     // 2-4 pass through unchanged.
-    const seedWords = wordCount(cleanRedditBody(post.body));
+    const { post: seedPost, discovery } = await resolveRedditStoryThread(post, threadOpts);
+    const seedWords = wordCount(cleanRedditBody(seedPost.body));
     const partCount = Math.max(2, resolvePartCount(requestedParts, seedWords));
-    const parts = await llmStorySeries(genre.angle, tier, partCount, genre.id, post, onLlmUsage);
+    const parts = await llmStorySeries(genre.angle, tier, partCount, genre.id, seedPost, onLlmUsage);
     return parts.map((part, i) => ({
       ...part,
       title: titleWithPart(part.title, i + 1),
@@ -1372,16 +1741,19 @@ export async function generateStorySeries(
       seedUrl: post.url,
       partNumber: i + 1,
       partCount,
+      updateDiscovery: discovery,
     }));
   }
 
-  const threadedPost = await resolveRedditStoryThread(post);
+  const { post: threadedPost, discovery } = await resolveRedditStoryThread(post, threadOpts);
   const body = cleanRedditBody(threadedPost.body);
   const words = wordCount(body);
-  const partCount = resolvePartCount(requestedParts, words);
-  // An explicit "1 (no split)" keeps the WHOLE story untruncated; auto-collapse
-  // (a naturally short story) still trims to a narratable length.
-  const keepFullBody = requestedParts === 1;
+  // Verbatim body length == narration length, so cap each reel at ~2 min: a long
+  // story (e.g. original + several updates) auto-splits instead of one 9-min reel.
+  const partCount = resolvePartCount(requestedParts, words, { capLength: true });
+  // An explicit "1 (no split)" keeps the WHOLE story untruncated *only when it
+  // still fits one reel*; the length cap above may have forced a multi-part split.
+  const keepFullBody = requestedParts === 1 && partCount === 1;
   const singleBody = keepFullBody ? body : trimBody(body);
   if (partCount === 1) {
     return [
@@ -1400,11 +1772,12 @@ export async function generateStorySeries(
         seedUrl: post.url,
         partNumber: 1,
         partCount: 1,
+        updateDiscovery: discovery,
       },
     ];
   }
 
-  const sentences = splitSentences(body);
+  const sentences = splitSentencesForReelParts(body);
   const resolvedPartCount = Math.min(partCount, Math.max(sentences.length, 1));
   if (resolvedPartCount === 1) {
     return [
@@ -1423,6 +1796,7 @@ export async function generateStorySeries(
         seedUrl: post.url,
         partNumber: 1,
         partCount: 1,
+        updateDiscovery: discovery,
       },
     ];
   }
@@ -1434,6 +1808,7 @@ export async function generateStorySeries(
     genre: genre.id,
     seedTitle: post.title,
     seedUrl: post.url,
+    updateDiscovery: discovery,
   }));
 }
 
@@ -1702,11 +2077,25 @@ export async function materializeFromSeed(
   source: StorySource,
   genre?: string,
   tier: Tier = "value",
-  opts: { seedOnly?: boolean; onLlmUsage?: LlmUsageCallback; excludeReelId?: string } = {}
+  opts: {
+    seedOnly?: boolean;
+    onLlmUsage?: LlmUsageCallback;
+    excludeReelId?: string;
+    fetchUpdates?: boolean;
+    manualUpdateUrls?: string[];
+    stageAutoUpdates?: boolean;
+  } = {}
 ): Promise<StoryDraft & { source: StorySource }> {
   if (source === "llm") {
     throw new Error("Cannot materialize a Reddit seed with llm source");
   }
+  const threadOpts: ThreadOptions = {
+    fetchUpdates: opts.fetchUpdates ?? (source === "verbatim"),
+    manualUpdateUrls: opts.manualUpdateUrls,
+    tier,
+    onLlmUsage: opts.onLlmUsage,
+    stageAutoUpdates: opts.stageAutoUpdates,
+  };
 
   let post = await fetchPostByUrl(seedUrl);
   const resolvedGenre = pickGenre(genre);
@@ -1737,7 +2126,7 @@ export async function materializeFromSeed(
   await assertStoryAvailable(post.title, post.url, { excludeReelId: opts.excludeReelId });
 
   if (source === "verbatim") {
-    const threadedPost = await resolveRedditStoryThread(post);
+    const { post: threadedPost, discovery } = await resolveRedditStoryThread(post, threadOpts);
     return {
       title: threadedPost.title,
       body: trimBody(threadedPost.body),
@@ -1750,10 +2139,13 @@ export async function materializeFromSeed(
       ageHours: threadedPost.ageHours,
       seedTitle: post.title,
       seedUrl: post.url,
+      updateDiscovery: discovery,
     };
   }
 
-  const threadedPost = await resolveRedditStoryThread(post).catch(() => post);
+  const { post: threadedPost, discovery } = await resolveRedditStoryThread(post, threadOpts).catch(
+    () => ({ post, discovery: undefined as UpdateDiscovery | undefined })
+  );
   const rewritten = await llmStory(resolvedGenre.angle, tier, resolvedGenre.id, threadedPost, opts.onLlmUsage);
   return {
     ...rewritten,
@@ -1765,6 +2157,7 @@ export async function materializeFromSeed(
     comments: post.comments,
     ageHours: post.ageHours,
     seedTitle: post.title,
+    updateDiscovery: discovery,
     seedUrl: post.url,
   };
 }
