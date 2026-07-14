@@ -21,6 +21,7 @@ export {
   type IYouTubePublish,
   type IInstagramPublish,
   type IInstagramPublishSettings,
+  type IInstagramPollSuggestion,
   type IReelReviewPackage,
   type ICostBreakdown,
   type ICostLine,

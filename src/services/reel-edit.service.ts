@@ -567,13 +567,58 @@ export async function updateReelSettings(
     skipPartOutro?: boolean;
     skipBrandedOutro?: boolean;
     voice?: { model?: string; voice?: string; format?: "mp3" | "pcm" };
+    voiceScope?: "reel" | "series";
     audioPost?: IAudioPost;
     editEffects?: IEditEffects;
-    instagram?: { caption?: string; shareToFeed?: boolean };
+    instagram?: {
+      caption?: string;
+      shareToFeed?: boolean;
+      poll?: { question?: string; optionA?: string; optionB?: string };
+    };
   }
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
+
+  // The Voice panel is the one deliberate series-level voice control. Apply
+  // that exact voice to every part before returning; background/default
+  // selection and preset bundles remain scoped to the current reel.
+  if (patch.voice?.voice && patch.voiceScope === "series" && reel.seriesId) {
+    const parts = sortedSeriesParts(await listReelsBySeries(reel.seriesId));
+    if (parts.length > 1) {
+      for (const part of parts) {
+        try {
+          assertEditable(part);
+        } catch {
+          throw new Error(
+            `Cannot lock the series voice yet — Part ${part.partNumber ?? 1} has an active operation. Wait for every part to finish planning, rendering, or publishing, then try again.`
+          );
+        }
+      }
+
+      await Promise.all(
+        parts.map((part) =>
+          updateReelSettings(part._id.toString(), { voice: patch.voice })
+        )
+      );
+
+      recordOperationLog({
+        scope: "system",
+        event: "voice.series_override_saved",
+        message: "Saved one explicit narration voice for every part in the series",
+        reelId: reel._id.toString(),
+        metadata: {
+          seriesId: reel.seriesId,
+          partCount: parts.length,
+          model: patch.voice.model,
+          voice: patch.voice.voice,
+        },
+      });
+
+      return loadReel(reelId);
+    }
+  }
+
   const prevArt = reel.artStyleId;
   const prevModel = reel.imageModelOverride;
   const prevVoiceProfile = reel.audioPost?.voiceProfile;
@@ -602,6 +647,7 @@ export async function updateReelSettings(
   if (patch.gameplayKey !== undefined) reel.gameplayKey = patch.gameplayKey || undefined;
   const prevOutroChannel = reel.outroChannelId;
   const prevOutroInstagramChannel = reel.outroInstagramChannelId;
+  const prevCommentPrompt = reel.outro?.commentPrompt;
   const prevSpokenLine = reel.outro?.spokenLine;
   const prevOutroChannelName = reel.outro?.channelName;
   if (patch.outroChannelId !== undefined) reel.outroChannelId = patch.outroChannelId || undefined;
@@ -630,12 +676,28 @@ export async function updateReelSettings(
       );
     }
     const captionChanged = patch.instagram.caption !== undefined;
+    const pollPatch = patch.instagram.poll;
+    const pollChanged = Boolean(
+      pollPatch &&
+      (pollPatch.question !== undefined || pollPatch.optionA !== undefined || pollPatch.optionB !== undefined),
+    );
+    const priorPoll = reel.instagramSettings?.poll;
     reel.instagramSettings = {
       caption: captionChanged ? patch.instagram.caption : reel.instagramSettings?.caption,
       shareToFeed: patch.instagram.shareToFeed ?? reel.instagramSettings?.shareToFeed ?? true,
       source: captionChanged ? "manual" : reel.instagramSettings?.source,
       generatedAt: captionChanged ? undefined : reel.instagramSettings?.generatedAt,
       model: captionChanged ? undefined : reel.instagramSettings?.model,
+      poll: pollPatch
+        ? {
+            question: pollPatch.question ?? priorPoll?.question,
+            optionA: pollPatch.optionA ?? priorPoll?.optionA,
+            optionB: pollPatch.optionB ?? priorPoll?.optionB,
+            source: pollChanged ? "manual" : priorPoll?.source,
+            generatedAt: pollChanged ? undefined : priorPoll?.generatedAt,
+            model: pollChanged ? undefined : priorPoll?.model,
+          }
+        : priorPoll,
     };
     reel.markModified("instagramSettings");
   }
@@ -657,6 +719,7 @@ export async function updateReelSettings(
         captionLength: reel.instagramSettings?.caption?.length ?? 0,
         hashtagCount: instagramCaptionHashtagCount(reel.instagramSettings?.caption ?? ""),
         shareToFeed: reel.instagramSettings?.shareToFeed ?? true,
+        pollDraft: Boolean(reel.instagramSettings?.poll),
       },
     });
   }
@@ -673,7 +736,8 @@ export async function updateReelSettings(
     (patch.outroChannelId !== undefined && patch.outroChannelId !== prevOutroChannel) ||
     (patch.outroInstagramChannelId !== undefined && patch.outroInstagramChannelId !== prevOutroInstagramChannel) ||
     (patch.outro !== undefined &&
-      (patch.outro.spokenLine !== prevSpokenLine ||
+      (patch.outro.commentPrompt !== prevCommentPrompt ||
+        patch.outro.spokenLine !== prevSpokenLine ||
         patch.outro.channelName !== prevOutroChannelName));
   const clearsAssembly =
     patch.motionMode !== undefined || clearsImages || clearsAudio;
@@ -696,6 +760,16 @@ export async function updateReelSettings(
     patch.outro !== undefined ||
     brandedOutroToggledOff ||
     brandedOutroToggledOn;
+  // Empty extra-destination prompts inherit the primary story prompt. A primary
+  // edit must therefore invalidate only those inherited extras, not a channel
+  // with an intentionally bespoke question.
+  const primaryCommentPromptChanged =
+    patch.outro !== undefined && patch.outro.commentPrompt !== prevCommentPrompt;
+  const inheritedPromptDestinationIds = primaryCommentPromptChanged
+    ? (reel.destinations ?? [])
+        .filter((destination) => !destination.outro?.commentPrompt?.trim())
+        .map((destination) => destination.id)
+    : [];
 
   const unset: Record<string, ""> = {};
   const s3Delete: (string | undefined)[] = [];
@@ -709,6 +783,7 @@ export async function updateReelSettings(
     unset.titleAudioUrl = "";
     unset.partOutroAudioUrl = "";
     unset.outroAudioUrl = "";
+    unset.outroAudioSignature = "";
     s3Delete.push(
       ...prevSceneAudios,
       prevTitleAudioUrl,
@@ -717,6 +792,7 @@ export async function updateReelSettings(
     );
   } else if (clearsOutroAudio) {
     unset.outroAudioUrl = "";
+    unset.outroAudioSignature = "";
     s3Delete.push(prevOutroAudioUrl);
   }
   if (clearsAssembly) {
@@ -740,6 +816,7 @@ export async function updateReelSettings(
   // Branded outro sits after bodyVideoUrl — body stays valid; only outro audio goes.
   if (brandedOutroToggledOff) {
     unset.outroAudioUrl = "";
+    unset.outroAudioSignature = "";
     s3Delete.push(prevOutroAudioUrl);
   }
 
@@ -755,8 +832,9 @@ export async function updateReelSettings(
           ? "Shared body, narration, or part teaser settings changed"
           : "Primary branded outro settings changed",
         includePrimary: true,
-        includeExtras: sharedFinalChanged,
-        clearOutroAudio: clearsAudio,
+        includeExtras: sharedFinalChanged || inheritedPromptDestinationIds.length > 0,
+        extraDestinationIds: sharedFinalChanged ? undefined : inheritedPromptDestinationIds,
+        clearOutroAudio: clearsAudio || inheritedPromptDestinationIds.length > 0,
       }),
     );
     await reel.save();
@@ -840,6 +918,170 @@ export async function listReelDestinations(reelId: string): Promise<IReelDestina
   return resolveReelDestinations(reel);
 }
 
+interface PrimaryDestinationInput {
+  platform: "youtube" | "instagram";
+  channelId: string;
+  /** Keep turns the current primary into an extra destination; remove deletes
+   * only this reel/story's rendered media for that account, never the globally
+   * connected YouTube/Instagram account. */
+  previousPrimary: "keep" | "remove";
+  /** Apply the routing change to the current part or every part in the series. */
+  scope: "reel" | "series";
+}
+
+function channelSpecificOutro(outro: IOutroSettings | undefined): IOutroSettings | undefined {
+  if (!outro) return undefined;
+  const { commentPrompt: _globalStoryQuestion, ...channelFields } = outro;
+  return Object.keys(channelFields).length ? channelFields : undefined;
+}
+
+function primaryPlatform(reel: IReel): "youtube" | "instagram" {
+  return reel.outroInstagramChannelId ? "instagram" : "youtube";
+}
+
+function primaryChannelId(reel: IReel): string | undefined {
+  return reel.outroInstagramChannelId || reel.outroChannelId;
+}
+
+async function changePrimaryDestinationOnReel(
+  reel: IReel,
+  input: Omit<PrimaryDestinationInput, "scope">,
+  targetLabel: string,
+): Promise<string[]> {
+  const currentPlatform = primaryPlatform(reel);
+  const currentChannelId = primaryChannelId(reel);
+  if (currentPlatform === input.platform && currentChannelId === input.channelId) return [];
+
+  const extras = [...(reel.destinations ?? [])];
+  const promotedExtraIndex = extras.findIndex(
+    (destination) => destination.platform === input.platform && destination.channelId === input.channelId,
+  );
+  const promotedExtra = promotedExtraIndex >= 0 ? extras[promotedExtraIndex] : undefined;
+  if (promotedExtraIndex >= 0) extras.splice(promotedExtraIndex, 1);
+
+  const globalQuestion = reel.outro?.commentPrompt;
+  // A ready promoted extra may intentionally have a channel-local question.
+  // Its media/audio remains valid only if that effective question becomes the
+  // new primary question. If we keep the old primary, freeze its old effective
+  // question too whenever the global question changes beneath it.
+  const promotedQuestion = promotedExtra?.outro?.commentPrompt?.trim();
+  const nextGlobalQuestion = promotedQuestion || globalQuestion;
+  const stale: string[] = [];
+  if (promotedQuestion && globalQuestion) {
+    // Every remaining blank extra had rendered against the former global
+    // question. Freeze it before the promoted local question becomes global,
+    // otherwise a ready file would no longer match its persisted copy.
+    for (const destination of extras) {
+      if (!destination.outro?.commentPrompt?.trim()) {
+        destination.outro = { ...(destination.outro ?? {}), commentPrompt: globalQuestion };
+      }
+    }
+  }
+  if (currentChannelId && input.previousPrimary === "keep") {
+    const currentLabel = await resolveChannelLabel(currentPlatform, currentChannelId).catch(
+      () => currentChannelId,
+    );
+    extras.push({
+      id: randomUUID(),
+      platform: currentPlatform,
+      channelId: currentChannelId,
+      channelLabel: currentLabel,
+      outro: {
+        ...(channelSpecificOutro(reel.outro) ?? {}),
+        ...(promotedQuestion && globalQuestion ? { commentPrompt: globalQuestion } : {}),
+      },
+      skipBrandedOutro: reel.skipBrandedOutro,
+      outroAudioUrl: reel.outroAudioUrl,
+      outroAudioSignature: reel.outroAudioSignature,
+      outputUrl: reel.outputUrl,
+      status: reel.outputUrl ? "ready" : "pending",
+      createdAt: new Date(),
+    });
+  } else if (input.previousPrimary === "remove") {
+    if (reel.outputUrl) stale.push(reel.outputUrl);
+    if (reel.outroAudioUrl) stale.push(reel.outroAudioUrl);
+  }
+
+  if (input.platform === "instagram") {
+    reel.outroInstagramChannelId = input.channelId;
+    reel.outroChannelId = undefined;
+  } else {
+    reel.outroChannelId = input.channelId;
+    reel.outroInstagramChannelId = undefined;
+  }
+
+  if (promotedExtra) {
+    reel.outro = {
+      ...(channelSpecificOutro(promotedExtra.outro) ?? {}),
+      ...(nextGlobalQuestion ? { commentPrompt: nextGlobalQuestion } : {}),
+    };
+    reel.skipBrandedOutro = promotedExtra.skipBrandedOutro;
+    reel.outroAudioUrl = promotedExtra.outroAudioUrl;
+    reel.outroAudioSignature = promotedExtra.outroAudioSignature;
+    reel.outputUrl = promotedExtra.outputUrl;
+  } else {
+    // A newly selected connected account has no channel-specific final yet.
+    // Retain the global story question, but let its own connected profile and
+    // platform defaults supply the brand/card values.
+    reel.outro = globalQuestion ? { commentPrompt: globalQuestion } : undefined;
+    reel.skipBrandedOutro = false;
+    reel.outroAudioUrl = undefined;
+    reel.outroAudioSignature = undefined;
+    reel.outputUrl = undefined;
+  }
+
+  reel.destinations = extras;
+  reel.markModified("outro");
+  reel.markModified("destinations");
+  recordOperationLog({
+    scope: "system",
+    event: "outro.primary_destination_changed",
+    message: "Changed the primary publish destination while preserving channel-scoped outputs",
+    reelId: reel._id.toString(),
+    metadata: {
+      from: currentChannelId ? `${currentPlatform}:${currentChannelId}` : "auto",
+      to: `${input.platform}:${input.channelId}`,
+      targetLabel,
+      previousPrimary: input.previousPrimary,
+      promotedExistingDestination: Boolean(promotedExtra),
+    },
+  });
+  return stale.filter((url): url is string => Boolean(url));
+}
+
+/**
+ * Promote a destination (or select a new connected account) as this reel's
+ * primary. This only changes reel routing/media ownership: it never deletes a
+ * connected social account. With `scope: series`, every part gets the same
+ * primary routing rule, while each part retains its own correct final output.
+ */
+export async function setReelPrimaryDestination(
+  reelId: string,
+  input: PrimaryDestinationInput,
+): Promise<IReel> {
+  const root = await loadReel(reelId);
+  assertEditable(root);
+  const targetLabel = await resolveChannelLabel(input.platform, input.channelId);
+  const parts = input.scope === "series" && root.seriesId
+    ? sortedSeriesParts(await listReelsBySeries(root.seriesId))
+    : [root];
+  for (const part of parts) assertEditable(part);
+
+  const stale: string[] = [];
+  for (const part of parts) {
+    stale.push(
+      ...(await changePrimaryDestinationOnReel(part, {
+        platform: input.platform,
+        channelId: input.channelId,
+        previousPrimary: input.previousPrimary,
+      }, targetLabel)),
+    );
+    await part.save();
+  }
+  await deleteS3Urls([...new Set(stale)]);
+  return loadReel(reelId);
+}
+
 /** Add an EXTRA channel destination. Renders its outro now when the reel is
  *  already produced; otherwise it renders at first produce. */
 export async function addReelDestination(
@@ -898,9 +1140,14 @@ export async function updateReelDestinationOutro(
   assertEditable(reel);
   const dest = reel.destinations?.find((d) => d.id === destId);
   if (!dest) throw new Error("Destination not found");
-  const spokenChanged = (dest.outro?.spokenLine ?? "") !== (outro.spokenLine ?? "");
+  const outroNarrationChanged =
+    (dest.outro?.commentPrompt ?? "") !== (outro.commentPrompt ?? "") ||
+    (dest.outro?.spokenLine ?? "") !== (outro.spokenLine ?? "");
   dest.outro = outro;
-  if (spokenChanged) dest.outroAudioUrl = undefined; // force fresh TTS on re-render
+  if (outroNarrationChanged) {
+    dest.outroAudioUrl = undefined;
+    dest.outroAudioSignature = undefined;
+  }
   dest.status = "pending";
   reel.markModified("destinations");
   await reel.save();

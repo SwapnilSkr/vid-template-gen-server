@@ -33,6 +33,7 @@ export * from "./reel-gameplay.service";
 export * from "./reel-revoice.service";
 export * from "./reel-review.service";
 export * from "./reel-shorts-cover.service";
+export * from "./reel-outro-comment-prompt.service";
 export * from "./reel-cost.service";
 export * from "./reddit-card.service";
 export * from "./gameplay-ingest.service";

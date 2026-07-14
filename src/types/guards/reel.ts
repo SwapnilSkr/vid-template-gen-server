@@ -21,6 +21,7 @@ export const EditEffectsBody = t.Object({
 export const OutroSettingsBody = t.Object({
   channelName: t.Optional(t.String()),
   channelHandle: t.Optional(t.String()),
+  commentPrompt: t.Optional(t.String({ maxLength: 160 })),
   spokenLine: t.Optional(t.String()),
   title: t.Optional(t.String()),
   subtitle: t.Optional(t.String()),
@@ -30,9 +31,17 @@ export const OutroSettingsBody = t.Object({
 
 /** Platform-owned publish copy. Reused by create and Studio settings so this
  * field cannot be accepted in one path and silently discarded in another. */
+const InstagramPollSuggestionBody = t.Object({
+  question: t.Optional(t.String({ maxLength: 90 })),
+  optionA: t.Optional(t.String({ maxLength: 30 })),
+  optionB: t.Optional(t.String({ maxLength: 30 })),
+});
+
 export const InstagramPublishSettingsBody = t.Object({
   caption: t.Optional(t.String({ maxLength: 2200 })),
   shareToFeed: t.Optional(t.Boolean()),
+  /** Creator-facing draft only — Meta's API cannot publish a native poll. */
+  poll: t.Optional(InstagramPollSuggestionBody),
 });
 
 export const CreateReelBody = t.Object({
@@ -187,6 +196,21 @@ export const UpdateDestinationOutroBody = t.Object({
 });
 export type TUpdateDestinationOutroBody = typeof UpdateDestinationOutroBody.static;
 
+/** Promote an existing destination or select another connected account as the
+ * required primary for this reel (or every part in its story series). */
+export const SetPrimaryDestinationBody = t.Object({
+  platform: t.Union([t.Literal("youtube"), t.Literal("instagram")]),
+  channelId: t.String(),
+  previousPrimary: t.Union([t.Literal("keep"), t.Literal("remove")]),
+  scope: t.Union([t.Literal("reel"), t.Literal("series")]),
+});
+export type TSetPrimaryDestinationBody = typeof SetPrimaryDestinationBody.static;
+
+export const RegenerateOutroCommentPromptBody = t.Object({
+  scope: t.Optional(t.Union([t.Literal("primary"), t.Literal("inheriting"), t.Literal("all")])),
+});
+export type TRegenerateOutroCommentPromptBody = typeof RegenerateOutroCommentPromptBody.static;
+
 export const UpdateReelSettingsBody = t.Object({
   thumbnailSceneIndex: t.Optional(t.Number({ minimum: 0 })),
   artStyleId: t.Optional(t.String()),
@@ -214,6 +238,8 @@ export const UpdateReelSettingsBody = t.Object({
       format: t.Optional(t.Union([t.Literal("mp3"), t.Literal("pcm")])),
     })
   ),
+  /** A deliberate Studio voice pick can lock the exact voice for every part. */
+  voiceScope: t.Optional(t.Union([t.Literal("reel"), t.Literal("series")])),
   audioPost: t.Optional(
     t.Object({
       voiceProfile: t.Optional(
@@ -346,6 +372,7 @@ export const UpdateReelReviewBody = t.Object({
   title: t.Optional(t.String({ maxLength: 100 })),
   description: t.Optional(t.String({ maxLength: 5000 })),
   tags: t.Optional(t.Array(t.String({ maxLength: 100 }), { maxItems: 50 })),
+  thumbnailText: t.Optional(t.String({ maxLength: 60 })),
   thumbnailPrompt: t.Optional(t.String()),
   visibilityNotes: t.Optional(t.String()),
   status: t.Optional(t.Union([t.Literal("draft"), t.Literal("ready"), t.Literal("approved")])),

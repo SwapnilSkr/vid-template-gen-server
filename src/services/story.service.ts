@@ -1893,6 +1893,47 @@ export async function markStoryReel(storyId: string | undefined, reelId: string)
   await Story.findByIdAndUpdate(storyId, { reelId });
 }
 
+/**
+ * Durable source-history ledger. A Reel can be deleted to reclaim every S3
+ * asset, but a source that was already produced must remain unavailable in
+ * Browse and pasted-link validation. Bank stories already have this record;
+ * this fills the gap for manually pasted and replanned Reddit sources.
+ */
+export async function recordStoryUsage(
+  story: Pick<
+    StoryDraft,
+    "title" | "body" | "genre" | "subreddit" | "author" | "upvotes" | "comments" | "ageHours" | "seedTitle" | "seedUrl"
+  > & { source?: StorySource },
+  reelId: string,
+): Promise<void> {
+  const seedUrl = story.seedUrl?.trim();
+  const filter = seedUrl ? { seedUrl } : { premiseKey: premiseKey(story.title) };
+  const source = story.source ?? "llm";
+  await Story.findOneAndUpdate(
+    filter,
+    {
+      $set: { used: true },
+      $setOnInsert: {
+        title: story.title,
+        body: story.body,
+        source,
+        genre: story.genre,
+        subreddit: story.subreddit,
+        author: story.author,
+        upvotes: story.upvotes,
+        comments: story.comments,
+        ageHours: story.ageHours,
+        seedTitle: story.seedTitle,
+        seedUrl,
+        premiseKey: premiseKey(story.title),
+        usedAt: new Date(),
+        reelId,
+      },
+    },
+    { upsert: true },
+  );
+}
+
 /** Bank stats for monitoring the farm. */
 export async function storyBankStats(): Promise<{ ready: number; used: number }> {
   const [ready, used] = await Promise.all([

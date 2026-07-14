@@ -7,6 +7,7 @@ import { resolveModels } from "../config/models";
 import {
   Reel,
   type IInstagramPublishSettings,
+  type IInstagramPollSuggestion,
   type IReel,
   type IReelReviewPackage,
 } from "../models";
@@ -33,6 +34,7 @@ export interface UpdateReelReviewInput {
   title?: string;
   description?: string;
   tags?: string[];
+  thumbnailText?: string;
   thumbnailPrompt?: string;
   visibilityNotes?: string;
   status?: IReelReviewPackage["status"];
@@ -402,6 +404,9 @@ export async function generateInstagramCaptionForReel(
     source: result.source,
     generatedAt: new Date(),
     model: result.model,
+    // Caption regeneration must never erase the independently editable native
+    // poll draft.
+    poll: reel.instagramSettings?.poll,
   };
   reel.instagramSettings = settings;
   reel.markModified("instagramSettings");
@@ -418,6 +423,129 @@ export async function generateInstagramCaptionForReel(
     },
   });
   return settings;
+}
+
+export interface InstagramPollSuggestionResult {
+  question: string;
+  optionA: string;
+  optionB: string;
+  source: "ai" | "fallback";
+  model?: string;
+}
+
+function fallbackInstagramPoll(reel: IReel): Omit<InstagramPollSuggestionResult, "source" | "model"> {
+  if (isHorrorNiche(reel.niche)) {
+    return { question: "Would you go inside?", optionA: "Absolutely not", optionB: "I would" };
+  }
+  if (reel.niche === "reddit") {
+    return { question: "Who was more wrong?", optionA: "OP", optionB: "The other person" };
+  }
+  return { question: "What would you do?", optionA: "Walk away", optionB: "Hear them out" };
+}
+
+function compactPollText(value: string, maxLength: number): string {
+  const compact = value
+    .replace(/[\r\n]+/g, " ")
+    .replace(/["“”]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (compact.length <= maxLength) return compact;
+  return compact.slice(0, maxLength).replace(/\s+\S*$/, "").trim();
+}
+
+function extractInstagramPoll(text: string): Omit<InstagramPollSuggestionResult, "source" | "model"> | undefined {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return undefined;
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    const question = typeof parsed.question === "string" ? compactPollText(parsed.question, 90) : "";
+    const optionA = typeof parsed.optionA === "string" ? compactPollText(parsed.optionA, 30) : "";
+    const optionB = typeof parsed.optionB === "string" ? compactPollText(parsed.optionB, 30) : "";
+    return question && optionA && optionB && optionA.toLocaleLowerCase() !== optionB.toLocaleLowerCase()
+      ? { question, optionA, optionB }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Native interactive polls are created in Instagram itself. This produces
+ * only a short, editable question/options draft for the creator to paste. */
+async function buildInstagramPollSuggestion(
+  reel: IReel,
+  onLlmUsage?: LlmUsageCallback,
+): Promise<InstagramPollSuggestionResult> {
+  const fallback = fallbackInstagramPoll(reel);
+  const source = storySeed(reel).slice(0, 2_600);
+  const model = resolveModels("cheap").llm;
+  if (!source || !config.openRouterApiKey) {
+    return { ...fallback, source: "fallback" };
+  }
+  try {
+    const { text, usage } = await generateText({
+      model: openrouter(model),
+      prompt: `Create one native Instagram poll draft for this Reel. It will be entered manually in the Instagram app, so do not claim it can be attached by an API.
+
+SOURCE STORY:
+${source}
+
+Rules:
+- Output JSON only: {"question":"...","optionA":"...","optionB":"..."}.
+- Question: 3–10 words, under 90 characters. Each option: 1–4 words, under 30 characters.
+- Make it a specific, balanced dilemma from this part of the story; invite an opinion without spoiling a later part.
+- Options must be distinct, clear on a phone, and never use hashtags, emojis, “yes/no” filler, “part 2”, or generic engagement bait.
+- Do not invent facts or repeat the title verbatim.`,
+    });
+    reportLlmUsage(onLlmUsage, "Instagram poll suggestion", model, usage);
+    const poll = extractInstagramPoll(text);
+    if (!poll) throw new Error("Instagram poll model returned invalid options");
+    return { ...poll, source: "ai", model };
+  } catch (error: unknown) {
+    console.warn(`Instagram poll generation failed, using fallback: ${getErrorMessage(error)}`);
+    recordOperationLog({
+      scope: "external",
+      level: "warn",
+      event: "instagram.poll_ai_fallback",
+      message: "Instagram poll suggestion generation failed; saved a deterministic draft",
+      reelId: reel._id.toString(),
+      error,
+    });
+    return { ...fallback, source: "fallback" };
+  }
+}
+
+/** Mutates the reel with creator-only poll copy. It is deliberately not read
+ * by the Meta publishing worker because the API cannot create poll stickers. */
+export async function generateInstagramPollSuggestionForReel(
+  reel: IReel,
+  onLlmUsage?: LlmUsageCallback,
+): Promise<IInstagramPollSuggestion> {
+  const result = await buildInstagramPollSuggestion(reel, onLlmUsage);
+  const poll: IInstagramPollSuggestion = {
+    question: result.question,
+    optionA: result.optionA,
+    optionB: result.optionB,
+    source: result.source,
+    generatedAt: new Date(),
+    model: result.model,
+  };
+  reel.instagramSettings = {
+    caption: reel.instagramSettings?.caption,
+    shareToFeed: reel.instagramSettings?.shareToFeed ?? true,
+    source: reel.instagramSettings?.source,
+    generatedAt: reel.instagramSettings?.generatedAt,
+    model: reel.instagramSettings?.model,
+    poll,
+  };
+  reel.markModified("instagramSettings");
+  recordOperationLog({
+    scope: "system",
+    event: "instagram.poll_suggestion_generated",
+    message: result.source === "ai" ? "Generated an editable Instagram native-poll draft" : "Saved a fallback Instagram native-poll draft",
+    reelId: reel._id.toString(),
+    metadata: { source: result.source, model: result.model },
+  });
+  return poll;
 }
 
 async function buildReviewCopy(
@@ -483,6 +611,97 @@ Rules:
   }
 }
 
+function fallbackThumbnailText(reel: IReel): string {
+  if (isHorrorNiche(reel.niche)) return "DON'T GO INSIDE";
+  if (reel.niche === "reddit") return "WHO'S REALLY WRONG?";
+  return "THE TRUTH COMES OUT";
+}
+
+function cleanThumbnailText(value: string): string | undefined {
+  const text = value
+    .replace(/[\r\n]+/g, " ")
+    .replace(/#[\p{L}\p{N}_]+/gu, "")
+    .replace(/["“”]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return undefined;
+  const bounded =
+    text.length <= 60 ? text : text.slice(0, 60).replace(/\s+\S*$/, "").trim();
+  return bounded || undefined;
+}
+
+function extractThumbnailText(text: string): string | undefined {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return undefined;
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    return typeof parsed.thumbnailText === "string" ? cleanThumbnailText(parsed.thumbnailText) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Generate compact overlay copy separately from the long YouTube headline.
+ * This call is intentionally metered on its own so the Cost panel can show
+ * exactly what was spent to create the thumbnail hook. */
+async function buildThumbnailText(
+  reel: IReel,
+  onLlmUsage?: LlmUsageCallback,
+): Promise<string> {
+  const fallback = fallbackThumbnailText(reel);
+  const source = storySeed(reel).slice(0, 2_600);
+  const model = resolveModels("cheap").llm;
+  if (!source || !config.openRouterApiKey) return fallback;
+
+  try {
+    const { text, usage } = await generateText({
+      model: openrouter(model),
+      prompt: `Write the on-image text for a YouTube Shorts thumbnail.
+
+SOURCE STORY:
+${source}
+
+Rules:
+- Output JSON only: {"thumbnailText":"..."}.
+- 3–7 punchy words, maximum 42 characters. It must express a conflict, accusation, reversal, or twist that makes the viewer curious.
+- This is NOT the YouTube title and NOT the Reddit/title-card headline. Do not copy any run of 4 or more consecutive words from the source title or restate it in sentence form.
+- No “Part 1/2”, hashtags, emojis, quotation marks, vague bait (“you won't believe”), labels, or generic format words.
+- Keep it factually grounded in this story part and readable as large overlay text.`,
+    });
+    reportLlmUsage(onLlmUsage, "Thumbnail hook", model, usage);
+    return extractThumbnailText(text) ?? fallback;
+  } catch (error: unknown) {
+    console.warn(`Thumbnail hook generation failed, using fallback: ${getErrorMessage(error)}`);
+    recordOperationLog({
+      scope: "external",
+      level: "warn",
+      event: "review.thumbnail_hook_ai_fallback",
+      message: "Thumbnail hook generation failed; using a deterministic fallback",
+      reelId: reel._id.toString(),
+      error,
+    });
+    return fallback;
+  }
+}
+
+/** Ensure the shared opening-cover/thumbnail hook exists without constructing
+ * the larger YouTube review package. The caller persists the reel and records
+ * the metered usage in its own plan or produce ledger. */
+export async function ensureReelThumbnailHook(
+  reel: IReel,
+  onLlmUsage?: LlmUsageCallback,
+): Promise<string> {
+  const existing = cleanThumbnailText(reel.review?.thumbnailText ?? reel.thumbnailHook ?? "");
+  if (existing) {
+    if (reel.thumbnailHook !== existing) reel.thumbnailHook = existing;
+    return existing;
+  }
+
+  const thumbnailHook = await buildThumbnailText(reel, onLlmUsage);
+  reel.thumbnailHook = thumbnailHook;
+  return thumbnailHook;
+}
+
 function buildDescription(reel: IReel, title: string): string {
   const part =
     reel.partNumber && reel.partCount && reel.partCount > 1
@@ -497,7 +716,7 @@ function buildDescription(reel: IReel, title: string): string {
   return `${title}\n\n${recipe.displayName}.${part}`.trim();
 }
 
-async function buildThumbnailPrompt(reel: IReel, _title: string): Promise<string> {
+async function buildThumbnailPrompt(reel: IReel): Promise<string> {
   const genre = reel.genre ? ` ${reel.genre.replace(/_/g, " ")}` : "";
   const digest = await getTrendDigest(reel.niche, reel.genre);
   const trendBlock = digest ? ` Reference these winning thumbnail/title patterns from top-performing videos in this genre: ${digest.replace(/\n/g, " ")}` : "";
@@ -717,6 +936,7 @@ async function renderThumbnailPng(
 
 export interface ReelReviewUsageCallbacks {
   onReviewCopyUsage?: LlmUsageCallback;
+  onThumbnailHookUsage?: LlmUsageCallback;
   onThumbnailImageUsage?: MediaUsageCallback;
 }
 
@@ -733,19 +953,31 @@ export async function buildReelReviewPackage(
 ): Promise<IReelReviewPackage> {
   const callbacks = resolveReviewUsageCallbacks(usage);
   const tags = reviewTagsForReel(reel);
-  const { title, description } = await buildReviewCopy(reel, tags, callbacks.onReviewCopyUsage);
-  const thumbnailPrompt = await buildThumbnailPrompt(reel, title);
-  const visibilityNotes = await buildVisibilityNotes(reel);
+  // These independent editorial calls are intentionally parallel: all outputs
+  // are persisted together, while each LLM usage callback remains a distinct
+  // cost line in the ledger.
+  const existingThumbnailText = cleanThumbnailText(reel.review?.thumbnailText ?? reel.thumbnailHook ?? "");
+  const [{ title, description }, thumbnailText, thumbnailPrompt, visibilityNotes] = await Promise.all([
+    buildReviewCopy(reel, tags, callbacks.onReviewCopyUsage),
+    existingThumbnailText
+      ? Promise.resolve(existingThumbnailText)
+      : buildThumbnailText(reel, callbacks.onThumbnailHookUsage),
+    buildThumbnailPrompt(reel),
+    buildVisibilityNotes(reel),
+  ]);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
   const thumbnailUrl =
     reel.thumbnailMode === "ai"
-      ? await renderAndUploadThumbnail(reel, title, subtitle, thumbnailPrompt, callbacks.onThumbnailImageUsage)
+      ? await renderAndUploadThumbnail(reel, thumbnailText, subtitle, thumbnailPrompt, callbacks.onThumbnailImageUsage)
       : undefined;
+
+  reel.thumbnailHook = thumbnailText;
 
   return {
     title,
     description,
     tags,
+    thumbnailText,
     thumbnailUrl,
     thumbnailPrompt,
     visibilityNotes,
@@ -756,13 +988,13 @@ export async function buildReelReviewPackage(
 
 async function renderAndUploadThumbnail(
   reel: IReel,
-  title: string,
+  thumbnailText: string,
   subtitle: string,
   thumbnailPrompt: string,
   onThumbnailImageUsage?: MediaUsageCallback
 ): Promise<string> {
   const thumbnailPath = await renderThumbnailPng(
-    title,
+    thumbnailText,
     subtitle,
     reel.niche,
     thumbnailPrompt,
@@ -779,11 +1011,13 @@ export async function ensureReelReviewPackage(reelId: string): Promise<IReelRevi
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   const needsReview = !reel.review?.title || (reel.thumbnailMode === "ai" && !reel.review.thumbnailUrl);
+  const needsThumbnailText = !reel.review?.thumbnailText?.trim();
   // A string (including an intentional empty one) means a human has already
   // made the Instagram-copy decision. Only genuinely unset settings get an AI
   // draft as part of the normal review package.
   const needsInstagramCaption = typeof reel.instagramSettings?.caption !== "string";
-  if (needsReview || needsInstagramCaption) {
+  const needsInstagramPoll = !reel.instagramSettings?.poll;
+  if (needsReview || needsThumbnailText || needsInstagramCaption || needsInstagramPoll) {
     const measuredCosts: MeasuredCostInput[] = [];
     const callbacks: ReelReviewUsageCallbacks = {
       onReviewCopyUsage: (usage) => {
@@ -797,10 +1031,23 @@ export async function ensureReelReviewPackage(reelId: string): Promise<IReelRevi
           source: usage.costUsd !== undefined ? "actual" : "estimated",
         });
       },
+      onThumbnailHookUsage: (usage) => {
+        measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+      },
     };
     if (needsReview) reel.review = await buildReelReviewPackage(reel, callbacks);
+    else if (needsThumbnailText && reel.review) {
+      reel.review.thumbnailText = await ensureReelThumbnailHook(reel, callbacks.onThumbnailHookUsage);
+      reel.review.updatedAt = new Date();
+      reel.markModified("review");
+    }
     if (needsInstagramCaption) {
       await generateInstagramCaptionForReel(reel, (usage) => {
+        measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+      });
+    }
+    if (needsInstagramPoll) {
+      await generateInstagramPollSuggestionForReel(reel, (usage) => {
         measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
       });
     }
@@ -822,6 +1069,50 @@ export async function regenerateInstagramCaption(reelId: string): Promise<IReel>
     measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
   });
   applyMeasuredCostsToReel(reel, measuredCosts, "Instagram caption");
+  await reel.save();
+  return reel;
+}
+
+/** Paid, explicit re-generation of the creator-only native Instagram poll
+ * draft. It never changes the rendered reel, caption, or publish payload. */
+export async function regenerateInstagramPollSuggestion(reelId: string): Promise<IReel> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const measuredCosts: MeasuredCostInput[] = [];
+  await generateInstagramPollSuggestionForReel(reel, (usage) => {
+    measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+  });
+  applyMeasuredCostsToReel(reel, measuredCosts, "Instagram poll suggestion");
+  await reel.save();
+  return reel;
+}
+
+/** Paid, explicit thumbnail-copy regeneration. It does not render an image or
+ * alter the YouTube title/description; the saved hook is used by the next AI
+ * thumbnail render and as the default text in Thumbnail Studio. */
+export async function regenerateThumbnailText(reelId: string): Promise<IReel> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const measuredCosts: MeasuredCostInput[] = [];
+  const thumbnailText = await buildThumbnailText(reel, (usage) => {
+    measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+  });
+  const current: IReelReviewPackage = reel.review ?? {
+    tags: reviewTagsForReel(reel),
+    status: "ready",
+    updatedAt: new Date(),
+  };
+  reel.thumbnailHook = thumbnailText;
+  reel.review = { ...current, thumbnailText, updatedAt: new Date() };
+  reel.markModified("review");
+  applyMeasuredCostsToReel(reel, measuredCosts, "Thumbnail hook");
+  recordOperationLog({
+    scope: "system",
+    event: "review.thumbnail_hook_generated",
+    message: "Generated a distinct, editable thumbnail hook",
+    reelId: reel._id.toString(),
+    metadata: { model: resolveModels("cheap").llm, length: thumbnailText.length },
+  });
   await reel.save();
   return reel;
 }
@@ -886,6 +1177,7 @@ export async function updateReelReview(
 ): Promise<IReelReviewPackage> {
   if (input.title !== undefined && input.title.length > 100) throw new Error("YouTube titles are limited to 100 characters");
   if (input.description !== undefined && input.description.length > 5000) throw new Error("YouTube descriptions are limited to 5,000 characters");
+  if (input.thumbnailText !== undefined && input.thumbnailText.length > 60) throw new Error("Thumbnail hook text is limited to 60 characters");
   const hashtagCount = `${input.title ?? ""} ${input.description ?? ""}`.match(/#[\p{L}\p{N}_]+/gu)?.length ?? 0;
   if (hashtagCount > 60) throw new Error("YouTube ignores all hashtags when a video contains more than 60");
   if (input.tags && input.tags.join(",").length > 500) throw new Error("YouTube upload tags are limited to 500 total characters");
@@ -898,6 +1190,9 @@ export async function updateReelReview(
     tags: input.tags ? normalizeTags(input.tags) : current.tags,
     updatedAt: new Date(),
   };
+  if (input.thumbnailText !== undefined) {
+    reel.thumbnailHook = cleanThumbnailText(input.thumbnailText);
+  }
   await reel.save();
   recordOperationLog({
     scope: "system",
@@ -907,6 +1202,7 @@ export async function updateReelReview(
     metadata: {
       titleLength: reel.review.title?.length ?? 0,
       descriptionLength: reel.review.description?.length ?? 0,
+      thumbnailTextLength: reel.review.thumbnailText?.length ?? 0,
       tagCount: reel.review.tags.length,
     },
   });
@@ -930,13 +1226,16 @@ export async function regenerateReelThumbnail(
   };
 
   const title = (nextReview.title || buildTitle(reel)).slice(0, 100);
+  const thumbnailText = cleanThumbnailText(nextReview.thumbnailText || title) || fallbackThumbnailText(reel);
   const subtitle = reel.partNumber && reel.partCount ? `Part ${reel.partNumber} of ${reel.partCount}` : "Full story";
-  const thumbnailPrompt = nextReview.thumbnailPrompt || (await buildThumbnailPrompt(reel, title));
+  const thumbnailPrompt = nextReview.thumbnailPrompt || (await buildThumbnailPrompt(reel));
   nextReview.title = title;
+  nextReview.thumbnailText = thumbnailText;
   nextReview.thumbnailPrompt = thumbnailPrompt;
+  reel.thumbnailHook = thumbnailText;
   const measuredCosts: MeasuredCostInput[] = [];
   const thumbnailPath = await renderThumbnailPng(
-    title,
+    thumbnailText,
     subtitle,
     reel.niche,
     thumbnailPrompt,

@@ -112,6 +112,7 @@ function snapshotEditDraftBaseline(reel: IReel): IEditDraftBaseline {
     assemblyVideoUrl: reel.assemblyVideoUrl,
     bodyVideoUrl: reel.bodyVideoUrl,
     outroAudioUrl: reel.outroAudioUrl,
+    outroAudioSignature: reel.outroAudioSignature,
     scenes: reel.scenes.map((scene) => ({
       index: scene.index,
       assetUrl: scene.assetUrl,
@@ -151,6 +152,7 @@ async function restoreEditDraftBaseline(reel: IReel): Promise<void> {
   reel.assemblyVideoUrl = baseline.assemblyVideoUrl;
   reel.bodyVideoUrl = baseline.bodyVideoUrl;
   reel.outroAudioUrl = baseline.outroAudioUrl;
+  reel.outroAudioSignature = baseline.outroAudioSignature;
   reel.markModified("scenes");
   await deleteS3Urls(superseded);
 }
@@ -527,6 +529,7 @@ async function buildDraftPreview(
         `${reelKey}_outro.mp3`,
       );
     }
+    reel.outroAudioSignature = outroResult.outroAudioSignature;
     finalVideoPath = outroResult.videoPath;
     if (outroResult.subtitle) {
       await appendBouncingCaptionCues(result.assPath, [outroResult.subtitle]);
@@ -534,6 +537,7 @@ async function buildDraftPreview(
   } else if (reel.skipBrandedOutro && reel.outroAudioUrl) {
     // Baseline still holds the prior outro audio for Discard restore.
     reel.outroAudioUrl = undefined;
+    reel.outroAudioSignature = undefined;
   }
 
   const outputPath = join(rootDir, "preview.mp4");

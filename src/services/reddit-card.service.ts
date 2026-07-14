@@ -118,10 +118,10 @@ export async function renderRedditCard(
  */
 export async function renderRedditOpeningShortsCover(
   title: string,
-  opts: { partNumber?: number; partCount?: number } = {}
+  opts: { headline?: string; partNumber?: number; partCount?: number } = {}
 ): Promise<string> {
   await ensureDir(config.processingPath);
-  const headline = redditShortsCoverHeadline(title);
+  const headline = redditShortsCoverHeadline(opts.headline ?? title);
   const lines = wrap(headline, 20).slice(0, 4);
   const lineHeight = lines.length >= 4 ? 105 : lines.length === 3 ? 122 : 138;
   const fontSize = lines.length >= 4 ? 88 : lines.length === 3 ? 102 : 118;

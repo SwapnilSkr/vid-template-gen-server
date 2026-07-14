@@ -1,4 +1,5 @@
 import { Resvg } from "@resvg/resvg-js";
+import { createHash } from "node:crypto";
 import ffmpeg from "fluent-ffmpeg";
 import { unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -18,11 +19,18 @@ const W = 1080;
 const H = 1920;
 const FPS = 30;
 
+/** Emergency fallback only. Planning normally persists a story-and-part
+ * specific prompt from the cheap editorial model before any outro is rendered. */
+export const DEFAULT_OUTRO_COMMENT_PROMPT =
+  "What would you have done in this situation?";
+
 export interface OutroBrand {
   channelName: string;
   channelHandle?: string;
   logoUrl?: string;
   kind: "reddit" | "horror";
+  platform: "youtube" | "instagram";
+  commentPrompt: string;
   spokenLine?: string;
   title?: string;
   subtitle?: string;
@@ -52,6 +60,14 @@ export function destinationOutroSource(dest: IReelDestination): OutroSource {
   };
 }
 
+function platformForOutroSource(source: OutroSource): "youtube" | "instagram" {
+  return source.outroInstagramChannelId ? "instagram" : "youtube";
+}
+
+function defaultCtaForPlatform(platform: OutroBrand["platform"]): "FOLLOW" | "SUBSCRIBE" {
+  return platform === "instagram" ? "FOLLOW" : "SUBSCRIBE";
+}
+
 /**
  * The implicit PRIMARY destination, synthesized from the reel's legacy `outro*`
  * fields. It always renders to the canonical `${reelId}.mp4` and mirrors
@@ -68,6 +84,7 @@ export function primaryDestination(reel: IReel): IReelDestination {
     outro: reel.outro,
     skipBrandedOutro: reel.skipBrandedOutro,
     outroAudioUrl: reel.outroAudioUrl,
+    outroAudioSignature: reel.outroAudioSignature,
     outputUrl: reel.outputUrl,
     status: reel.outputUrl ? "ready" : "pending",
     createdAt: reel.createdAt ?? new Date(),
@@ -94,11 +111,18 @@ export function invalidateFinalDestinationRenders(
     reason: string;
     includePrimary?: boolean;
     includeExtras?: boolean;
+    /** Limit extra-destination invalidation to these ids. Primary remains
+     * controlled separately, so a primary prompt change does not disturb an
+     * extra channel with its own explicit comment prompt. */
+    extraDestinationIds?: string[];
     clearOutroAudio?: boolean;
   }
 ): string[] {
   const includePrimary = options.includePrimary ?? true;
   const includeExtras = options.includeExtras ?? true;
+  const requestedExtraIds = options.extraDestinationIds
+    ? new Set(options.extraDestinationIds)
+    : undefined;
   const stale: string[] = [];
   let affected = 0;
 
@@ -110,6 +134,7 @@ export function invalidateFinalDestinationRenders(
 
   if (includeExtras) {
     for (const destination of reel.destinations ?? []) {
+      if (requestedExtraIds && !requestedExtraIds.has(destination.id)) continue;
       if (destination.outputUrl) {
         stale.push(destination.outputUrl);
         affected += 1;
@@ -119,6 +144,7 @@ export function invalidateFinalDestinationRenders(
         stale.push(destination.outroAudioUrl);
         destination.outroAudioUrl = undefined;
       }
+      if (options.clearOutroAudio) destination.outroAudioSignature = undefined;
       destination.status = "pending";
       destination.error = undefined;
     }
@@ -135,6 +161,7 @@ export function invalidateFinalDestinationRenders(
         reason: options.reason,
         includePrimary,
         includeExtras,
+        extraDestinationIds: options.extraDestinationIds,
         clearOutroAudio: Boolean(options.clearOutroAudio),
         affectedOutputCount: affected,
       },
@@ -193,7 +220,12 @@ export async function resolveOutroBrand(
     : undefined;
   // CTA copy follows the destination platform whenever the creator leaves it
   // blank. A saved value remains an intentional per-reel/channel override.
-  const defaultCta = src.outroInstagramChannelId ? "FOLLOW" : "SUBSCRIBE";
+  const platform = platformForOutroSource(src);
+  const defaultCta = defaultCtaForPlatform(platform);
+  // Extra destinations without their own prompt deliberately inherit the
+  // generated primary prompt. Their other card/call-to-action fields remain
+  // per-destination, but this keeps one story-specific question consistent.
+  const primaryCommentPrompt = reel.outro?.commentPrompt?.trim();
 
   if (reel.niche === "reddit") {
     const channel = explicitChannel ?? (await findChannelForNiche(["reddit", "reddit_stories", "aita"]));
@@ -202,6 +234,9 @@ export async function resolveOutroBrand(
       channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
       channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
       logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
+      platform,
+      commentPrompt:
+        src.outro?.commentPrompt?.trim() || primaryCommentPrompt || DEFAULT_OUTRO_COMMENT_PROMPT,
       spokenLine: src.outro?.spokenLine?.trim(),
       title: src.outro?.title?.trim(),
       subtitle: src.outro?.subtitle?.trim(),
@@ -218,6 +253,9 @@ export async function resolveOutroBrand(
       channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
       channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
       logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
+      platform,
+      commentPrompt:
+        src.outro?.commentPrompt?.trim() || primaryCommentPrompt || DEFAULT_OUTRO_COMMENT_PROMPT,
       spokenLine: src.outro?.spokenLine?.trim(),
       title: src.outro?.title?.trim(),
       subtitle: src.outro?.subtitle?.trim(),
@@ -261,6 +299,8 @@ export async function appendBrandedOutro(
       /** Local outro narration mp3 — upload when outroAudioGenerated. */
       outroAudioPath: string;
       outroAudioGenerated: boolean;
+      /** Signature that proves a cached clip matches the resolved narration. */
+      outroAudioSignature: string;
     }
   | undefined
 > {
@@ -281,17 +321,21 @@ export async function appendBrandedOutro(
 
   const key = dest ? `${reel._id}_${dest.id}` : `${reel._id}`;
   const cachedOutroAudioUrl = dest ? dest.outroAudioUrl : reel.outroAudioUrl;
+  const cachedOutroAudioSignature = dest ? dest.outroAudioSignature : reel.outroAudioSignature;
   const tmp: string[] = [];
   let retainAudioPath: string | undefined;
   try {
     await ensureDir(config.processingPath);
-    const line = brand.spokenLine || (brand.kind === "reddit"
-        ? redditOutroLine(reel, brand.channelName)
-        : `Subscribe to ${brand.channelName}. The next story is already waiting.`);
+    const line = composeOutroSpokenLine(reel, brand);
+    const outroAudioSignature = narrationSignature(line, tts);
 
     let audioPath: string;
     let outroAudioGenerated = false;
-    if (!options.forceFreshOutroAudio && cachedOutroAudioUrl) {
+    if (
+      !options.forceFreshOutroAudio &&
+      cachedOutroAudioUrl &&
+      cachedOutroAudioSignature === outroAudioSignature
+    ) {
       audioPath = join(config.processingPath, `${key}_outro_reused.mp3`);
       const res = await fetch(cachedOutroAudioUrl);
       if (!res.ok) {
@@ -332,6 +376,7 @@ export async function appendBrandedOutro(
       durationAdded,
       outroAudioPath: audioPath,
       outroAudioGenerated,
+      outroAudioSignature,
       subtitle: {
         text: line,
         startTime: mainDuration,
@@ -358,12 +403,35 @@ export async function appendBrandedOutro(
   }
 }
 
-function redditOutroLine(reel: IReel, channelName: string): string {
+function narrationSignature(line: string, tts: OutroTts): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ line, model: tts.model ?? "", voice: tts.voice ?? "", format: tts.format ?? "" }))
+    .digest("hex");
+}
+
+/** Build the complete branded-outro narration. The comments question is always
+ * first, then the channel action. This makes comment prompting consistent for
+ * a primary output and every per-channel destination. */
+export function composeOutroSpokenLine(reel: IReel, brand: OutroBrand): string {
+  const actionLine = brand.spokenLine || defaultChannelOutroLine(reel, brand);
+  return [brand.commentPrompt, actionLine].filter(Boolean).join(" ");
+}
+
+function defaultChannelOutroLine(reel: IReel, brand: OutroBrand): string {
+  const channelAction =
+    brand.platform === "instagram"
+      ? `Follow ${brand.channelName}`
+      : `Subscribe to ${brand.channelName}`;
+  if (brand.kind !== "reddit") {
+    return brand.platform === "instagram"
+      ? `${channelAction} for more stories.`
+      : `${channelAction}. The next story is already waiting.`;
+  }
   const nextPart = nextRedditPart(reel);
   if (nextPart) {
-    return `Follow ${channelName} for part ${nextPart}.`;
+    return `${channelAction} for part ${nextPart}.`;
   }
-  return `Follow ${channelName} for more stories.`;
+  return `${channelAction} for more stories.`;
 }
 
 function nextRedditPart(reel: IReel): number | undefined {
@@ -384,11 +452,12 @@ async function renderOutroCard(
     .join("")
     .slice(0, 2)
     .toUpperCase();
+  const cta = brand.cta || defaultCtaForPlatform(brand.platform);
   const title = isHorror
     ? brand.title || "DON'T WATCH ALONE"
     : nextPart
-      ? brand.title || `FOLLOW FOR PART ${nextPart}`
-      : brand.title || "FOLLOW FOR MORE";
+      ? brand.title || `${cta} FOR PART ${nextPart}`
+      : brand.title || `${cta} FOR MORE`;
   const subtitle = isHorror
     ? brand.subtitle || "New nightmares every night"
     : nextPart
@@ -402,7 +471,20 @@ async function renderOutroCard(
   const background = transparent
     ? ""
     : `<rect width="${W}" height="${H}" fill="url(#bg)"/>`;
-  const subscribeY = transparent ? 1325 : 1195;
+  const commentLines = wrapOutroText(brand.commentPrompt, 48);
+  const commentY = transparent ? 1220 : 1145;
+  const commentLineHeight = 31;
+  const subscribeY = Math.max(
+    transparent ? 1325 : 1195,
+    commentY + (Math.max(commentLines.length, 1) - 1) * commentLineHeight + 46,
+  );
+  const footerY = subscribeY + 140;
+  const commentText = commentLines
+    .map(
+      (line, index) =>
+        `<text x="540" y="${commentY + index * commentLineHeight}" text-anchor="middle" font-family="Arial" font-size="28" font-weight="800" fill="#f8fafc">${esc(line)}</text>`
+    )
+    .join("");
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -432,9 +514,10 @@ async function renderOutroCard(
   <text x="540" y="${transparent ? 1050 : 990}" text-anchor="middle" font-family="Arial" font-size="68" font-weight="900" fill="#f8fafc">${esc(brand.channelName)}</text>
   ${handle ? `<text x="540" y="${transparent ? 1110 : 1042}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="800" fill="#cbd5e1">${esc(handle)}</text>` : ""}
   <text x="540" y="${transparent ? 1190 : 1100}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="700" fill="#cbd5e1">${esc(subtitle)}</text>
+  ${commentText}
   <rect x="270" y="${subscribeY}" width="540" height="78" rx="39" fill="${accent}"/>
-  <text x="540" y="${subscribeY + 52}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="900" fill="#ffffff">${esc(brand.cta || "SUBSCRIBE")}</text>
-  ${isHorror ? `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#64748b">${esc(brand.footer || "it already knows you're here")}</text>` : brand.footer ? `<text x="540" y="1440" text-anchor="middle" font-family="Arial" font-size="30" fill="#cbd5e1">${esc(brand.footer)}</text>` : ""}
+  <text x="540" y="${subscribeY + 52}" text-anchor="middle" font-family="Arial" font-size="34" font-weight="900" fill="#ffffff">${esc(cta)}</text>
+  ${isHorror ? `<text x="540" y="${footerY}" text-anchor="middle" font-family="Arial" font-size="30" fill="#64748b">${esc(brand.footer || "it already knows you're here")}</text>` : brand.footer ? `<text x="540" y="${footerY}" text-anchor="middle" font-family="Arial" font-size="30" fill="#cbd5e1">${esc(brand.footer)}</text>` : ""}
 </svg>`;
 
   const png = new Resvg(svg, {
@@ -444,6 +527,26 @@ async function renderOutroCard(
   const output = join(config.processingPath, generateFilename("branded-outro", "png"));
   await writeFile(output, png);
   return output;
+}
+
+/** Keep a user-authored discussion prompt readable on the rendered card.
+ * Validation caps it at 160 characters; this uses as many lines as needed,
+ * while preserving exactly the same words that TTS reads. */
+function wrapOutroText(value: string, maxLineLength: number): string[] {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    const next = current ? `${current} ${word}` : word;
+    if (current && next.length > maxLineLength) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = next;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
 }
 
 function esc(value: string): string {

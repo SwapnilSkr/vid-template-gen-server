@@ -6,12 +6,13 @@ import { redditShortsCoverHeadline, renderRedditOpeningShortsCover } from "./red
 const PNG_MAGIC = 0x89504e47;
 const MAX_BYTES = 12 * 1024 * 1024;
 const AUTO_REDDIT_OPENING_PREFIX = "reddit-opening-cover:";
-const AUTO_REDDIT_OPENING_FINGERPRINT = "reddit-opening-cover:v2:";
+const AUTO_REDDIT_OPENING_FINGERPRINT = "reddit-opening-cover:v3:";
 
 function redditOpeningFingerprint(reel: IReel): string {
   const story = reel.redditStory;
   return `${AUTO_REDDIT_OPENING_FINGERPRINT}${[
     story?.title ?? reel.title ?? "",
+    reel.thumbnailHook ?? "",
     story?.subreddit ?? "",
     story?.cardUsername ?? story?.author ?? "",
     story?.ageHours ?? "",
@@ -50,8 +51,9 @@ export async function ensureDefaultRedditOpeningCover(reel: IReel): Promise<void
   if (reel.shortsCover?.imageUrl && reel.shortsCover.sourceFingerprint === fingerprint) return;
 
   const story = reel.redditStory;
-  const headline = redditShortsCoverHeadline(story.title);
+  const headline = redditShortsCoverHeadline(reel.thumbnailHook || story.title);
   const cardPath = await renderRedditOpeningShortsCover(story.title, {
+    headline,
     partNumber: reel.partNumber ?? story.partNumber,
     partCount: reel.partCount ?? story.partCount,
   });

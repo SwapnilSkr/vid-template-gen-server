@@ -126,6 +126,12 @@ export function resolveStoryMatchedTts(
   story: { title: string; body: string }
 ): TtsChoice {
   const current = resolveTtsChoice(base, nicheVoice, explicitVoice ?? {});
+
+  // A named catalog voice is a human decision, not a hint. Story-aware voice
+  // matching is only for unattended/default selection; it must never replace
+  // a voice the creator explicitly picked during review or at creation.
+  if (explicitVoice?.voice) return current;
+
   const gender = inferNarratorGender(story.title, story.body);
   if (gender === "unknown" || compatible(current, gender)) return current;
 

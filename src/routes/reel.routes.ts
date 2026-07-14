@@ -33,6 +33,8 @@ import {
   DestinationInputBody,
   DestinationParams,
   UpdateDestinationOutroBody,
+  SetPrimaryDestinationBody,
+  RegenerateOutroCommentPromptBody,
   DraftAssetParams,
   SaveShortsCoverBody,
 } from "../types/guards";
@@ -51,6 +53,9 @@ import {
   regenerateReelThumbnailController,
   regenerateReelReviewCopyController,
   regenerateInstagramCaptionController,
+  regenerateInstagramPollSuggestionController,
+  regenerateThumbnailTextController,
+  regenerateOutroCommentPromptController,
   revoiceReelController,
   promoteVoiceVariantController,
   previewReelFrameThumbnailController,
@@ -84,6 +89,7 @@ import {
   addReelDestinationController,
   removeReelDestinationController,
   updateReelDestinationOutroController,
+  setReelPrimaryDestinationController,
   saveReelEditDraftController,
   discardReelEditDraftController,
   getReelDraftAssetController,
@@ -161,6 +167,19 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
 
   .post("/:id/instagram-caption", regenerateInstagramCaptionController, {
     params: IdParams,
+  })
+
+  .post("/:id/instagram-poll", regenerateInstagramPollSuggestionController, {
+    params: IdParams,
+  })
+
+  .post("/:id/review/thumbnail-text", regenerateThumbnailTextController, {
+    params: IdParams,
+  })
+
+  .post("/:id/outro/comment-prompt", regenerateOutroCommentPromptController, {
+    params: IdParams,
+    body: RegenerateOutroCommentPromptBody,
   })
 
   // Use a specific frame of the rendered video as the thumbnail
@@ -314,6 +333,10 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .post("/:id/destinations", addReelDestinationController, {
     params: IdParams,
     body: DestinationInputBody,
+  })
+  .post("/:id/destinations/primary", setReelPrimaryDestinationController, {
+    params: IdParams,
+    body: SetPrimaryDestinationBody,
   })
   .delete("/:id/destinations/:destId", removeReelDestinationController, {
     params: DestinationParams,

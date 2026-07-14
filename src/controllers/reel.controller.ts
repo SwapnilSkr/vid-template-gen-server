@@ -11,6 +11,9 @@ import {
   ensureReelReviewPackage,
   regenerateReelThumbnail,
   regenerateInstagramCaption,
+  regenerateInstagramPollSuggestion,
+  regenerateThumbnailText,
+  regenerateReelOutroCommentPrompt,
   regenerateReelReviewCopy,
   previewReelFrameThumbnail,
   previewReelFrameWithText,
@@ -52,6 +55,7 @@ import {
   addReelDestination,
   removeReelDestination,
   updateReelDestinationOutro,
+  setReelPrimaryDestination,
   resolveInstagramPublishCaption,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
@@ -90,6 +94,8 @@ import type {
   TDestinationInputBody,
   TDestinationParams,
   TUpdateDestinationOutroBody,
+  TSetPrimaryDestinationBody,
+  TRegenerateOutroCommentPromptBody,
   TCustomThumbnailBody,
   TStageThumbnailDraftBody,
   TStageThumbnailImageBody,
@@ -291,7 +297,13 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       partCount: reel.partCount,
       updatedAt: reel.updatedAt,
       outputUrl: reel.outputUrl,
+      bodyVideoUrl: reel.bodyVideoUrl,
+      assemblyVideoUrl: reel.assemblyVideoUrl,
       subtitlesUrl: reel.subtitlesUrl,
+      titleAudioUrl: reel.titleAudioUrl,
+      partOutroAudioUrl: reel.partOutroAudioUrl,
+      outroAudioUrl: reel.outroAudioUrl,
+      outroAudioSignature: reel.outroAudioSignature,
       hook: reel.hook,
       scenes: reel.scenes,
       redditStory: reel.redditStory,
@@ -320,6 +332,7 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       skipPartOutro: reel.skipPartOutro,
       skipBrandedOutro: reel.skipBrandedOutro,
       thumbnailMode: reel.thumbnailMode,
+      thumbnailHook: reel.thumbnailHook,
       imageModelOverride: reel.imageModelOverride,
       voiceOverride: reel.voiceOverride,
       narrationVoice: reel.narrationVoice,
@@ -431,6 +444,73 @@ export async function regenerateInstagramCaptionController({ params, set }: GetR
   }
   try {
     return { success: true, data: await regenerateInstagramCaption(params.id) };
+  } catch (error: unknown) {
+    set.status = 500;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Generate only the creator-facing native Instagram poll draft. Meta's
+ * publishing API never receives this copy or attempts to create a sticker. */
+export async function regenerateInstagramPollSuggestionController({ params, set }: GetReelContext) {
+  const reel = await getReel(params.id);
+  if (!reel) {
+    set.status = 404;
+    return { success: false, error: "Reel not found" };
+  }
+  if (reel.status !== "completed") {
+    set.status = 400;
+    return { success: false, error: `Instagram poll suggestion requires a completed reel. Current status: ${reel.status}` };
+  }
+  try {
+    return { success: true, data: await regenerateInstagramPollSuggestion(params.id) };
+  } catch (error: unknown) {
+    set.status = 500;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Generate only the short text hook used by the thumbnail renderer/editor. */
+export async function regenerateThumbnailTextController({ params, set }: GetReelContext) {
+  const reel = await getReel(params.id);
+  if (!reel) {
+    set.status = 404;
+    return { success: false, error: "Reel not found" };
+  }
+  if (reel.status !== "completed") {
+    set.status = 400;
+    return { success: false, error: `Thumbnail hook generation requires a completed reel. Current status: ${reel.status}` };
+  }
+  try {
+    return { success: true, data: await regenerateThumbnailText(params.id) };
+  } catch (error: unknown) {
+    set.status = 500;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Generate a new story-and-part-specific question for the branded outro.
+ * This is intentionally available before first production, because plan review
+ * is where creators should settle end-card copy before paying for TTS. */
+export async function regenerateOutroCommentPromptController({
+  params,
+  body,
+  set,
+}: RegenerateOutroCommentPromptContext) {
+  const reel = await getReel(params.id);
+  if (!reel) {
+    set.status = 404;
+    return { success: false, error: "Reel not found" };
+  }
+  if (reel.status !== "plan_review" && reel.status !== "completed") {
+    set.status = 400;
+    return {
+      success: false,
+      error: `Outro comment prompt generation requires a reviewed or completed reel. Current status: ${reel.status}`,
+    };
+  }
+  try {
+    return { success: true, data: await regenerateReelOutroCommentPrompt(params.id, body.scope) };
   } catch (error: unknown) {
     set.status = 500;
     return { success: false, error: getErrorMessage(error) };
@@ -866,6 +946,15 @@ interface UpdateDestinationOutroContext extends Context {
   params: TDestinationParams;
   body: TUpdateDestinationOutroBody;
 }
+
+interface SetPrimaryDestinationContext extends Context {
+  params: TIdParams;
+  body: TSetPrimaryDestinationBody;
+}
+interface RegenerateOutroCommentPromptContext extends Context {
+  params: TIdParams;
+  body: TRegenerateOutroCommentPromptBody;
+}
 interface DraftAssetContext extends Context {
   params: TDraftAssetParams;
 }
@@ -1079,6 +1168,16 @@ export async function updateReelDestinationOutroController({
   set,
 }: UpdateDestinationOutroContext) {
   return runEdit(set, () => updateReelDestinationOutro(params.id, params.destId, body.outro));
+}
+
+/** Promote a channel as primary, keeping or reclaiming the old primary's
+ * channel-scoped output according to the explicit user choice. */
+export async function setReelPrimaryDestinationController({
+  params,
+  body,
+  set,
+}: SetPrimaryDestinationContext) {
+  return runEdit(set, () => setReelPrimaryDestination(params.id, body));
 }
 
 export async function saveReelEditDraftController({

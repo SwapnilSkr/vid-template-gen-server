@@ -121,6 +121,8 @@ export interface IEditEffects {
 export interface IOutroSettings {
   channelName?: string;
   channelHandle?: string;
+  /** A visible discussion hook that is also prepended to branded-outro TTS. */
+  commentPrompt?: string;
   spokenLine?: string;
   title?: string;
   subtitle?: string;
@@ -146,8 +148,10 @@ export interface IReelDestination {
   outro?: IOutroSettings;
   /** Skip the branded end card + spoken line for just this destination. */
   skipBrandedOutro?: boolean;
-  /** Cached outro narration mp3 — reused while the spoken line is unchanged. */
+  /** Cached outro narration mp3 — reused only when its effective TTS signature matches. */
   outroAudioUrl?: string;
+  /** SHA-256 of the resolved comment prompt, CTA line, and TTS selection. */
+  outroAudioSignature?: string;
   /** Final rendered video (body + this destination's outro). */
   outputUrl?: string;
   /** Seconds the outro added over the shared body. */
@@ -196,6 +200,7 @@ export interface IEditDraftBaseline {
   assemblyVideoUrl?: string;
   bodyVideoUrl?: string;
   outroAudioUrl?: string;
+  outroAudioSignature?: string;
   scenes: { index: number; assetUrl?: string; audioUrl?: string }[];
 }
 
@@ -287,12 +292,27 @@ export interface IInstagramPublishSettings {
   source?: "ai" | "manual" | "fallback";
   generatedAt?: Date;
   model?: string;
+  /** A native-Instagram poll draft. This is guidance for the creator only;
+   * the Content Publishing API cannot attach interactive stickers. */
+  poll?: IInstagramPollSuggestion;
+}
+
+export interface IInstagramPollSuggestion {
+  question?: string;
+  optionA?: string;
+  optionB?: string;
+  source?: "ai" | "manual" | "fallback";
+  generatedAt?: Date;
+  model?: string;
 }
 
 export interface IReelReviewPackage {
   title?: string;
   description?: string;
   tags: string[];
+  /** Short, curiosity-led overlay copy for the thumbnail. It is intentionally
+   * distinct from the YouTube title and title-card copy. */
+  thumbnailText?: string;
   thumbnailUrl?: string;
   thumbnailPrompt?: string;
   /** Layered source document retained after the staged PNG is uploaded. */
@@ -470,6 +490,8 @@ export interface IReel extends Document {
   /** When true, skip the branded channel end card + spoken subscribe line. */
   skipBrandedOutro?: boolean;
   thumbnailMode?: "frame" | "ai";
+  /** Short hook shared by the automatic opening cover and thumbnail. */
+  thumbnailHook?: string;
   imageModelOverride?: string;
   voiceOverride?: IVoiceOverride;
   narrationVoice?: IVoiceOverride;
@@ -500,8 +522,9 @@ export interface IReel extends Document {
   titleAudioUrl?: string;
   /** Cached "Stay tuned for part N" line for multi-part Reddit reels. */
   partOutroAudioUrl?: string;
-  /** Cached branded outro narration — reused when the spoken line is unchanged. */
+  /** Cached branded outro narration — reused only when its TTS signature matches. */
   outroAudioUrl?: string;
+  outroAudioSignature?: string;
   review?: IReelReviewPackage;
   costUsd?: number;
   costBreakdown?: ICostBreakdown;
@@ -604,6 +627,7 @@ const outroSettingsSchema = new Schema<IOutroSettings>(
   {
     channelName: String,
     channelHandle: String,
+    commentPrompt: String,
     spokenLine: String,
     title: String,
     subtitle: String,
@@ -622,6 +646,7 @@ const reelDestinationSchema = new Schema<IReelDestination>(
     outro: outroSettingsSchema,
     skipBrandedOutro: Boolean,
     outroAudioUrl: String,
+    outroAudioSignature: String,
     outputUrl: String,
     durationAdded: Number,
     status: {
@@ -778,6 +803,7 @@ const editDraftBaselineSchema = new Schema<IEditDraftBaseline>(
     assemblyVideoUrl: String,
     bodyVideoUrl: String,
     outroAudioUrl: String,
+    outroAudioSignature: String,
     scenes: { type: [editDraftBaselineSceneSchema], default: [] },
   },
   { _id: false }
@@ -881,6 +907,14 @@ const instagramSettingsSchema = new Schema<IInstagramPublishSettings>(
     source: { type: String, enum: ["ai", "manual", "fallback"] },
     generatedAt: Date,
     model: String,
+    poll: {
+      question: String,
+      optionA: String,
+      optionB: String,
+      source: { type: String, enum: ["ai", "manual", "fallback"] },
+      generatedAt: Date,
+      model: String,
+    },
   },
   { _id: false },
 );
@@ -890,6 +924,7 @@ const reelReviewSchema = new Schema<IReelReviewPackage>(
     title: String,
     description: String,
     tags: { type: [String], default: [] },
+    thumbnailText: String,
     thumbnailUrl: String,
     thumbnailPrompt: String,
     thumbnailEditorState: Schema.Types.Mixed,
@@ -989,6 +1024,7 @@ const reelSchema = new Schema<IReel>(
     skipPartOutro: { type: Boolean, default: false },
     skipBrandedOutro: { type: Boolean, default: false },
     thumbnailMode: { type: String, enum: ["frame", "ai"], default: "frame" },
+    thumbnailHook: String,
     imageModelOverride: String,
     voiceOverride: voiceOverrideSchema,
     narrationVoice: voiceOverrideSchema,
@@ -1024,6 +1060,7 @@ const reelSchema = new Schema<IReel>(
     titleAudioUrl: String,
     partOutroAudioUrl: String,
     outroAudioUrl: String,
+    outroAudioSignature: String,
     review: reelReviewSchema,
     costUsd: Number,
     costBreakdown: costBreakdownSchema,
