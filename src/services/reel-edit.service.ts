@@ -1111,7 +1111,10 @@ export async function addReelDestination(
   });
   reel.markModified("destinations");
   await reel.save();
-  if (canRerenderOutro(reel)) return regenerateReel(reelId, "outro_only");
+  // Adding an account while the branded outro is intentionally disabled must
+  // not enqueue a misleading body-only render. It remains planned until the
+  // creator enables the outro again.
+  if (!reel.skipBrandedOutro && canRerenderOutro(reel)) return regenerateReel(reelId, "outro_only");
   return loadReel(reelId);
 }
 
@@ -1151,7 +1154,9 @@ export async function updateReelDestinationOutro(
   dest.status = "pending";
   reel.markModified("destinations");
   await reel.save();
-  if (canRerenderOutro(reel)) return regenerateReel(reelId, "outro_only");
+  // Saving copy while the branded outro is disabled is configuration only.
+  // Do not spend a render to re-emit the same body without an end card.
+  if (!reel.skipBrandedOutro && canRerenderOutro(reel)) return regenerateReel(reelId, "outro_only");
   return loadReel(reelId);
 }
 
