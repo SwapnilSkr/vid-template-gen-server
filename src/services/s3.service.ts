@@ -268,22 +268,46 @@ export async function deleteFromS3(url: string): Promise<void> {
   await deleteKey(key);
 }
 
-/** Best-effort GC for superseded media URLs. Failures never block the caller. */
-export async function deleteS3Urls(urls: (string | undefined)[]): Promise<void> {
+/** Outcome of a best-effort S3 cleanup. A successful S3 DELETE is idempotent:
+ * it confirms the delete request completed, not that an object necessarily
+ * existed beforehand. */
+export interface S3DeleteSummary {
+  requested: number;
+  deleted: number;
+  skipped: number;
+  failed: number;
+}
+
+/** Best-effort GC for superseded media URLs. Failures never block the caller,
+ * but callers can now report an honest cleanup outcome to the creator. */
+export async function deleteS3Urls(urls: (string | undefined)[]): Promise<S3DeleteSummary> {
   const unique = [...new Set(urls.filter((url): url is string => Boolean(url)))];
-  await Promise.all(
+  const outcomes = await Promise.all(
     unique.map((url) =>
-      deleteFromS3(url).catch((error: unknown) => {
-        recordOperationLog({
-          scope: "external",
-          level: "warn",
-          event: "s3.superseded_asset_delete_failed",
-          message: "Could not delete a superseded S3 asset; the new reel state remains valid",
-          metadata: { url },
-          error,
-        });
-      })
+      (() => {
+        if (!getS3KeyFromUrl(url)) return Promise.resolve("skipped" as const);
+        return deleteFromS3(url)
+          .then(() => "deleted" as const)
+          .catch((error: unknown) => {
+            recordOperationLog({
+              scope: "external",
+              level: "warn",
+              event: "s3.superseded_asset_delete_failed",
+              message: "Could not delete a superseded S3 asset; the new reel state remains valid",
+              metadata: { url },
+              error,
+            });
+            return "failed" as const;
+          });
+      })()
     )
+  );
+  return outcomes.reduce<S3DeleteSummary>(
+    (summary, outcome) => {
+      summary[outcome] += 1;
+      return summary;
+    },
+    { requested: unique.length, deleted: 0, skipped: 0, failed: 0 },
   );
 }
 

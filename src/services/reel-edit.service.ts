@@ -1118,8 +1118,16 @@ export async function addReelDestination(
   return loadReel(reelId);
 }
 
-/** Remove an extra destination and its dedicated media. */
-export async function removeReelDestination(reelId: string, destId: string): Promise<IReel> {
+export interface DestinationRemovalResult {
+  reel: IReel;
+  destination: { id: string; platform: "youtube" | "instagram"; channelId: string; channelLabel?: string };
+  cleanup: { requested: number; deleted: number; skipped: number; failed: number };
+}
+
+/** Remove an extra destination and its dedicated media. The persisted
+ * Operations record and response both say whether each recorded S3 deletion
+ * request succeeded, failed, or had no usable S3 key. */
+export async function removeReelDestination(reelId: string, destId: string): Promise<DestinationRemovalResult> {
   const reel = await loadReel(reelId);
   assertEditable(reel);
   const index = reel.destinations?.findIndex((d) => d.id === destId) ?? -1;
@@ -1127,10 +1135,38 @@ export async function removeReelDestination(reelId: string, destId: string): Pro
   const [removed] = reel.destinations.splice(index, 1);
   reel.markModified("destinations");
   await reel.save();
-  await deleteS3Urls(
-    [removed.outputUrl, removed.outroAudioUrl].filter((url): url is string => Boolean(url))
+  const cleanup = await deleteS3Urls([removed.outputUrl, removed.outroAudioUrl]);
+  recordOperationLog({
+    scope: "system",
+    level: cleanup.failed ? "warn" : "info",
+    event: "outro.destination_removed",
+    message: cleanup.failed
+      ? "Removed destination, but one or more recorded S3 deletion requests failed"
+      : "Removed destination and completed recorded S3 media cleanup",
+    reelId,
+    metadata: {
+      destinationId: removed.id,
+      platform: removed.platform,
+      channelId: removed.channelId,
+      channelLabel: removed.channelLabel,
+      hadOutput: Boolean(removed.outputUrl),
+      hadOutroAudio: Boolean(removed.outroAudioUrl),
+      ...cleanup,
+    },
+  });
+  console.log(
+    `🧹 Removed ${removed.platform} destination ${removed.channelId} from reel ${reelId}; S3 deleted=${cleanup.deleted}, failed=${cleanup.failed}, skipped=${cleanup.skipped}`,
   );
-  return loadReel(reelId);
+  return {
+    reel: await loadReel(reelId),
+    destination: {
+      id: removed.id,
+      platform: removed.platform,
+      channelId: removed.channelId,
+      channelLabel: removed.channelLabel,
+    },
+    cleanup,
+  };
 }
 
 /** Update one extra destination's outro copy; re-renders its outro when produced. */
