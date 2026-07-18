@@ -1,6 +1,7 @@
 import type { Context } from "elysia";
 import { cleanupGameplayDownloadCache, cleanupLocalProcessing, reconcileS3Assets, purgeFailedReels } from "../services";
 import { getErrorMessage } from "../types";
+import { getWordAlignmentStatus } from "../services/forced-alignment.service";
 
 interface ReconcileS3Context extends Context {
   query: { apply?: string };
@@ -55,4 +56,9 @@ export async function cleanupGameplayCacheController({ query, set }: LocalCleanu
     set.status = 400;
     return { success: false, error: getErrorMessage(error) };
   }
+}
+
+/** Report whether this API host is ready to attempt local Whisper word timing. */
+export async function getWordAlignmentStatusController() {
+  return { success: true, data: await getWordAlignmentStatus() };
 }

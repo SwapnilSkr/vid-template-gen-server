@@ -17,6 +17,9 @@ import { captionStylePlain } from "../utils/caption-style.utils";
 import { captionBurnFailed } from "./ffmpeg-capability.service";
 import type { ICaptionStyle } from "../models";
 import { gameplayDownloadCacheDir, touchGameplayCacheFile } from "./gameplay-cache.service";
+import { normalizeNarration, normalizeForSpeech } from "../utils/narration-normalize";
+import { distributeWordTimings, type RealWordTiming } from "../utils/caption-timing";
+import { alignWordsToAudio } from "./forced-alignment.service";
 
 // ============================================
 // GameplayOverlayStrategy (Reddit / AITA).
@@ -262,7 +265,22 @@ async function renderGameplayReelInner(
   const outroText = getPartOutroText(story, { skip: ttsOpts.skipPartOutro });
   const bodySentences =
     ttsOpts.bodySentences?.map((s) => clean(s)).filter(Boolean) ?? toSentences(story.body);
-  const segTexts = [clean(story.title), ...bodySentences, ...(outroText ? [outroText] : [])];
+
+  // Normalize story text for TTS — spell out acronyms (AITA → "A.I.T.A."),
+  // expand age/gender + chat shorthand (31M → "31 male", bc → "because"), and
+  // de-censor profanity — while keeping a readable caption form. Both forms
+  // carry identical whitespace-token counts, so the per-word highlighter stays
+  // aligned with the spoken audio (see utils/narration-normalize.ts).
+  const bodyNorm = bodySentences.map((s) => normalizeNarration(s));
+  const bodyCaptions = bodyNorm.map((n) => n.caption);
+  const outroNorm = outroText ? normalizeNarration(outroText) : undefined;
+
+  // Text sent to TTS per segment: [title, ...body, outro?] (speech form).
+  const segTexts = [
+    normalizeForSpeech(clean(story.title)),
+    ...bodyNorm.map((n) => n.speech),
+    ...(outroNorm ? [outroNorm.speech] : []),
+  ];
   const audioPaths: string[] = [];
   const speechDurs: number[] = [];
   const generatedFlags: boolean[] = [];
@@ -357,16 +375,32 @@ async function renderGameplayReelInner(
   tmp.push(bgPath);
 
   // 4. Bouncing word captions for the body (title is shown as a card instead).
-  const capSegs = bodySentences.map((t, i) => ({
-    text: t,
-    startTime: starts[i + 1],
-    speech: speechDurs[i + 1],
-  }));
-  if (outroText) {
+  // Caption text is the readable normalized form; per-word cue times come from
+  // real measured segment audio. When a forced aligner is available it supplies
+  // real word timestamps (provider-independent); otherwise distributeWordTimings
+  // falls back to syllable weighting. Either way each segment hard-resyncs to
+  // its real start/end so the highlight can't drift across the video.
+  const capSegs: CaptionSegment[] = await Promise.all(
+    bodyCaptions.map(async (text, i) => {
+      const words = text.trim().split(/\s+/).filter(Boolean);
+      const wordTimings = await alignWordsToAudio(audioPaths[i + 1], words);
+      return {
+        text,
+        startTime: starts[i + 1],
+        speech: speechDurs[i + 1],
+        wordTimings: wordTimings ?? undefined,
+      };
+    })
+  );
+  if (outroNorm) {
+    const idx = segTexts.length - 1;
+    const words = outroNorm.caption.trim().split(/\s+/).filter(Boolean);
+    const wordTimings = await alignWordsToAudio(audioPaths[idx], words);
     capSegs.push({
-      text: outroText,
-      startTime: starts[segTexts.length - 1],
-      speech: speechDurs[segTexts.length - 1],
+      text: outroNorm.caption,
+      startTime: starts[idx],
+      speech: speechDurs[idx],
+      wordTimings: wordTimings ?? undefined,
     });
   }
   const assPath = join(config.processingPath, `${reelId}.ass`);
@@ -670,16 +704,21 @@ function runComposite(
 // the active word pops larger + amber.
 // ============================================
 
+/** One caption line worth of text + its real audio window, plus optional real
+ *  per-word timings (forced alignment) aligned 1:1 with the words in `text`. */
+export interface CaptionSegment {
+  text: string;
+  startTime: number;
+  speech: number;
+  wordTimings?: RealWordTiming[];
+}
+
 function assTime(sec: number): string {
   const s = Math.max(sec, 0);
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const ss = (s % 60).toFixed(2);
   return `${h}:${m.toString().padStart(2, "0")}:${ss.padStart(5, "0")}`;
-}
-
-function wordWeight(w: string): number {
-  return Math.max(w.replace(/[^A-Za-z0-9]/g, "").length, 1);
 }
 
 function hexToAssColor(hex?: string, fallback = "&H00FFFFFF"): string {
@@ -700,8 +739,8 @@ function hexToAssInlineColor(hex?: string, fallback = "&HFFFFFF&"): string {
   return `&H${bb}${gg}${rr}&`.toUpperCase();
 }
 
-function buildBouncingCaptions(
-  segs: { text: string; startTime: number; speech: number }[],
+export function buildBouncingCaptions(
+  segs: CaptionSegment[],
   captionStyle?: ICaptionStyle
 ): string {
   const style = captionStylePlain(captionStyle);
@@ -729,7 +768,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 export async function appendBouncingCaptionCues(
   assPath: string,
-  segs: { text: string; startTime: number; speech: number }[],
+  segs: CaptionSegment[],
   captionStyle?: ICaptionStyle
 ): Promise<void> {
   const current = await readFile(assPath, "utf-8");
@@ -741,7 +780,7 @@ export async function appendBouncingCaptionCues(
 }
 
 function buildBouncingCaptionLines(
-  segs: { text: string; startTime: number; speech: number }[],
+  segs: CaptionSegment[],
   style: {
     fontName: string;
     fontSize: number;
@@ -769,16 +808,20 @@ function buildBouncingCaptionLines(
     const words = raw.trim().split(/\s+/).filter(Boolean);
     if (!words.length) continue;
 
-    const weights = words.map(wordWeight);
-    const totalW = weights.reduce((a, b) => a + b, 0);
-    const starts: number[] = [];
-    const ends: number[] = [];
-    let acc = 0;
-    for (let i = 0; i < words.length; i++) {
-      starts.push(seg.startTime + (acc / totalW) * seg.speech);
-      acc += weights[i];
-      ends.push(seg.startTime + (acc / totalW) * seg.speech);
-    }
+    // Per-word cue times from real measured audio: syllable-weighted by
+    // default, or real forced-alignment timestamps when supplied. The first
+    // word pins to the segment's real start and the last to its real end, so
+    // drift cannot accumulate (see utils/caption-timing.ts).
+    const timings = distributeWordTimings(
+      words,
+      seg.startTime,
+      seg.speech,
+      seg.wordTimings && seg.wordTimings.length === words.length
+        ? seg.wordTimings
+        : undefined
+    );
+    const starts = timings.map((t) => t.start);
+    const ends = timings.map((t) => t.end);
 
     for (const { start: cs, end: ce, scale } of captionChunks(words)) {
       const chunk = words.slice(cs, ce);

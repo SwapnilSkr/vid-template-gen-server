@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 import { cleanupGameplayCacheController, cleanupLocalProcessingController, reconcileS3Controller, purgeFailedReelsController } from "../controllers";
 import { runCaptionSmokeController } from "../controllers/caption-smoke.controller";
+import { getWordAlignmentStatusController } from "../controllers/maintenance.controller";
 
 // ============================================
 // Cleanup/reconciliation routes — on-demand triggers for the same logic the
@@ -9,6 +10,7 @@ import { runCaptionSmokeController } from "../controllers/caption-smoke.controll
 // ============================================
 
 export const maintenanceRoutes = new Elysia({ prefix: "/api/maintenance" })
+  .get("/word-alignment", getWordAlignmentStatusController)
   .get("/s3-reconcile", reconcileS3Controller, {
     query: t.Object({ apply: t.Optional(t.String()) }),
   })

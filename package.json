@@ -6,6 +6,7 @@
     "start": "bun run src/index.ts",
     "seed": "bun run src/db/seed.ts",
     "fetch-fonts": "bun run scripts/fetch-fonts.ts",
+    "whisper:install": "bun run scripts/install-whisper.ts",
     "smoke:captions": "bun run scripts/smoke-caption-burn.ts",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up --build",

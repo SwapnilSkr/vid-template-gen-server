@@ -450,6 +450,12 @@ async function generateNarrationWithChoice(
           voice,
           response_format: format,
           ...(isHorrorNarrationProfile(profile) ? { speed: profile === "whisper" || profile === "distant" ? 0.86 : 0.9 } : {}),
+          // Reddit: a slightly-under-1.0 provider speed makes the read more
+          // deliberate/clear (Issue 3). Sent only when it actually differs from
+          // natural, and only for models that accept `speed`.
+          ...(profile === "reddit" && Number.isFinite(config.redditTtsSpeed) && config.redditTtsSpeed !== 1
+            ? { speed: Math.min(Math.max(config.redditTtsSpeed, 0.7), 1.2) }
+            : {}),
           ...(profile === "horror" && model === "microsoft/mai-voice-2"
             ? {
                 provider: {
@@ -679,22 +685,30 @@ function applyHorrorVoiceTreatment(
 }
 
 /**
- * Reddit narration should feel like a lively short-form story read, not a raw
- * audiobook export. Keep it subtle: speech-focused EQ, mild compression, a tiny
- * room reflection, and platform loudness. Tempo is still handled by the gameplay
- * renderer after this step so caption timing remains based on final paced audio.
+ * Reddit narration should sound like a modern "storytime" podcast read — clean,
+ * punchy, intimate, and high-clarity so it cuts through on a phone speaker. This
+ * chain is deliberately subtle and, crucially, duration-preserving (no
+ * asetrate/atempo here) so caption timing stays predictable — tempo is applied
+ * separately by the gameplay renderer on the final paced audio.
+ *
+ * Chain: rumble filter → low-mud cut + a touch of chest warmth → presence /
+ * clarity EQ (intelligibility) → static de-ess (tame sibilance) → gentle
+ * compression → mild tanh saturation for warmth → peak limiter → EBU R128
+ * loudness normalization for consistent, phone-loud output.
  */
 function applyRedditVoiceTreatment(input: string, output: string): Promise<string> {
   const filters = [
     "aresample=48000",
-    "highpass=f=85",
-    "lowpass=f=7600",
-    "equalizer=f=180:t=q:w=1.1:g=-1.5",
-    "equalizer=f=2900:t=q:w=1.0:g=2.2",
-    "equalizer=f=5200:t=q:w=1.2:g=1.0",
-    "acompressor=threshold=-20dB:ratio=1.8:attack=5:release=95:makeup=1.5",
-    "aecho=0.35:0.25:28:0.035",
-    "loudnorm=I=-16:LRA=7:TP=-1.3",
+    "highpass=f=90", // kill sub-bass rumble
+    "equalizer=f=200:t=q:w=1.2:g=-2", // clear low-mid mud
+    "equalizer=f=120:t=q:w=1.0:g=1.2", // a touch of chest warmth
+    "equalizer=f=3000:t=q:w=1.1:g=2.6", // presence / intelligibility
+    "equalizer=f=5200:t=q:w=1.2:g=1.4", // clarity / air
+    "equalizer=f=7200:t=q:w=2.4:g=-3", // static de-ess (sibilance control)
+    "acompressor=threshold=-20dB:ratio=2.2:attack=6:release=90:makeup=2",
+    "asoftclip=type=tanh", // gentle harmonic warmth/saturation
+    "alimiter=limit=0.95", // catch peaks introduced by saturation
+    "loudnorm=I=-14:LRA=7:TP=-1.0", // consistent loudness for phone speakers
   ].join(",");
 
   return new Promise((resolve, reject) => {

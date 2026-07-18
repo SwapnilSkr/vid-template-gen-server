@@ -1,5 +1,9 @@
 import type { ICharacter } from "../models";
 import { DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
+import {
+  distributeWordTimings,
+  type RealWordTiming,
+} from "../utils/caption-timing";
 
 export interface SubtitleEntry {
   index: number;
@@ -144,7 +148,15 @@ function getAnimationTags(
 }
 
 export async function generateKaraokeAssContent(
-  dialogues: { text: string; startTime: number; duration: number }[],
+  dialogues: {
+    text: string;
+    startTime: number;
+    duration: number;
+    /** Optional real per-word windows (forced alignment / TTS timestamps),
+     *  aligned 1:1 with the words in `text`. When present the highlight tracks
+     *  the actual spoken word; otherwise a syllable-weighted estimate is used. */
+    words?: RealWordTiming[];
+  }[],
   config: KaraokeConfig = {},
   alignment = 2,
   marginV = 30
@@ -154,7 +166,6 @@ export async function generateKaraokeAssContent(
     wordsPerChunkMax = 3,
     primaryColor = "#FFFFFF",
     secondaryColor = "#00FF00",
-    chunkSpeedMultiplier = 0.75,
     animationType = "none",
   } = config;
 
@@ -181,35 +192,47 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   const dialogueLines: string[] = [];
 
   for (const dialogue of dialogues) {
-    const dialogueStartTime = dialogue.startTime;
+    // Timing is derived from the REAL measured audio duration for this line —
+    // never scaled below it (the old chunkSpeedMultiplier=0.75 that ran
+    // captions 33% fast is gone). distributeWordTimings hard-resyncs the first
+    // word to dialogue.startTime and the last word to the line's real end, so
+    // the highlight can never drift ahead of or behind the voice.
+    const allWords = splitChunkIntoWords(dialogue.text);
+    if (!allWords.length) continue;
 
+    const timings = distributeWordTimings(
+      allWords,
+      dialogue.startTime,
+      dialogue.duration,
+      dialogue.words && dialogue.words.length === allWords.length
+        ? dialogue.words
+        : undefined
+    );
+
+    // Group the words into visual chunks (random 2–3) purely for on-screen
+    // layout; the per-word cue times come from `timings`, not the chunk size.
     const chunks = splitTextIntoChunks(
       dialogue.text,
       wordsPerChunkMin,
       wordsPerChunkMax
     );
-    const chunkDuration =
-      (dialogue.duration / chunks.length) * chunkSpeedMultiplier;
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkStartTime = dialogueStartTime + i * chunkDuration;
-
-      const currentChunk = chunks[i];
+    let wordCursor = 0;
+    for (const currentChunk of chunks) {
       const words = splitChunkIntoWords(currentChunk);
-      const wordDuration = chunkDuration / words.length;
+      const chunkStart = wordCursor;
 
       for (let j = 0; j < words.length; j++) {
-        const wordStartTime = chunkStartTime + j * wordDuration;
-        const wordEndTime = chunkStartTime + (j + 1) * wordDuration;
-
-        const startTimeStr = formatAssTime(wordStartTime);
-        const endTimeStr = formatAssTime(wordEndTime);
+        const t = timings[chunkStart + j];
+        if (!t) continue;
+        const startTimeStr = formatAssTime(t.start);
+        const endTimeStr = formatAssTime(t.end);
 
         let coloredText = "";
         for (let k = 0; k < words.length; k++) {
           if (k === j) {
             // Active word: apply color and animation
-            const wordDurationMs = Math.floor(wordDuration * 1000);
+            const wordDurationMs = Math.floor((t.end - t.start) * 1000);
             const animTags = getAnimationTags(animationType, wordDurationMs);
             coloredText += `{\\1c&${greenAssColor}}${animTags}${words[k]}`;
           } else {
@@ -220,15 +243,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
           }
         }
 
-        const dialogueLine = `Dialogue: 0,${startTimeStr},${endTimeStr},Default,,0,0,0,,${coloredText}`;
-        console.log(
-          `🎤 Word ${j + 1}/${words.length} in chunk: ${dialogueLine.substring(
-            0,
-            120
-          )}...`
+        dialogueLines.push(
+          `Dialogue: 0,${startTimeStr},${endTimeStr},Default,,0,0,0,,${coloredText}`
         );
-        dialogueLines.push(dialogueLine);
       }
+      wordCursor += words.length;
     }
   }
 
