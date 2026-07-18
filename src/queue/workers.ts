@@ -11,6 +11,8 @@ import {
 } from "../services/composition.service";
 import { publishReelToYouTube } from "../services/youtube-publish.service";
 import { publishReelToInstagram } from "../services/instagram-publish.service";
+import { publishReelToFacebook } from "../services/facebook-publish.service";
+import { publishReelToThreads } from "../services/threads-publish.service";
 import { processRevoice } from "../services/reel-revoice.service";
 import type {
   ReelJobData,
@@ -47,7 +49,7 @@ export function startWorkers(): void {
   const reelWorker = new Worker<ReelJobData, void, "process">(
     "reel-processing",
     async (job: Job<ReelJobData, void, "process">) => {
-      const { reelId, stage, produceMode } = job.data;
+      const { reelId, stage, produceMode, outroRetry } = job.data;
       console.log(
         `▶️  [reel] job ${job.id} start reel=${reelId} stage=${stage ?? "full"}` +
           (produceMode ? ` mode=${produceMode}` : "")
@@ -58,10 +60,10 @@ export function startWorkers(): void {
         message: "Reel worker started",
         reelId,
         jobId: String(job.id),
-        metadata: { stage: stage ?? "full", produceMode },
+        metadata: { stage: stage ?? "full", produceMode, outroRetry },
       });
       if (stage === "plan") await processReelPlan(reelId);
-      else if (stage === "produce") await processReelProduce(reelId, produceMode ?? "full");
+      else if (stage === "produce") await processReelProduce(reelId, produceMode ?? "full", outroRetry);
       else await processReel(reelId);
     },
     { ...workerBaseOptions, concurrency: config.queueConcurrency }
@@ -94,6 +96,12 @@ export function startWorkers(): void {
         await publishReelToYouTube(job.data.reelId, job.data.channelId);
       } else if (job.data.platform === "instagram") {
         await publishReelToInstagram(job.data.reelId, job.data.channelId);
+      } else if (job.data.platform === "facebook") {
+        if (!job.data.channelId) throw new Error("A Facebook Page id is required");
+        await publishReelToFacebook(job.data.reelId, job.data.channelId);
+      } else if (job.data.platform === "threads") {
+        if (!job.data.channelId) throw new Error("A Threads profile id is required");
+        await publishReelToThreads(job.data.reelId, job.data.channelId);
       }
     },
     {

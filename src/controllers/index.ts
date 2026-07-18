@@ -71,6 +71,7 @@ export {
   updateRedditCardController,
   applyCaptionsController,
   regenerateReelController,
+  retryReelOutroController,
   resumeFailedReelController,
   approvePlanController,
   replanReelController,
@@ -147,8 +148,40 @@ export {
   completeYouTubeConnectController,
   deleteYouTubeChannelController,
   updateYouTubeChannelController,
+  postYouTubeFirstCommentController,
+  listYouTubeCommentsController,
+  replyYouTubeCommentController,
 } from "./youtube.controller";
-export { listInstagramChannelsController, startInstagramConnectController, completeInstagramConnectController, deleteInstagramChannelController, updateInstagramChannelController } from "./instagram.controller";
+export {
+  listInstagramChannelsController,
+  startInstagramConnectController,
+  completeInstagramConnectController,
+  deleteInstagramChannelController,
+  updateInstagramChannelController,
+  postInstagramFirstCommentController,
+  listInstagramCommentsController,
+  replyInstagramCommentController,
+} from "./instagram.controller";
+export {
+  listFacebookPagesController,
+  startFacebookConnectController,
+  completeFacebookConnectController,
+  deleteFacebookPageController,
+  updateFacebookPageController,
+  publishFacebookController,
+  postFacebookFirstCommentController,
+} from "./facebook.controller";
+export {
+  listThreadsChannelsController,
+  startThreadsConnectController,
+  completeThreadsConnectController,
+  deleteThreadsChannelController,
+  updateThreadsChannelController,
+  threadsUninstallController,
+  threadsDataDeletionController,
+  threadsDataDeletionStatusController,
+  publishThreadsController,
+} from "./threads.controller";
 
 export {
   listOperationLogsController,

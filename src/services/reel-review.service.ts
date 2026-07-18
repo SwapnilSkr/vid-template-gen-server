@@ -40,6 +40,46 @@ export interface UpdateReelReviewInput {
   status?: IReelReviewPackage["status"];
 }
 
+/**
+ * Final review approval is the storage boundary for a reel. Keep every file
+ * needed to publish the already-approved creative (the primary/destination
+ * final MP4s and cover art), but remove reconstruction caches. This makes the
+ * storage trade-off explicit: an approved reel can still be published, while
+ * a later visual or narration re-render will need to regenerate the released
+ * inputs instead of silently retaining paid assets forever.
+ */
+function reclaimApprovedRenderCaches(reel: IReel): string[] {
+  const released = [
+    reel.bodyVideoUrl,
+    reel.assemblyVideoUrl,
+    reel.subtitlesUrl,
+    reel.titleAudioUrl,
+    reel.partOutroAudioUrl,
+    reel.outroAudioUrl,
+    ...reel.scenes.flatMap((scene) => [scene.assetUrl, scene.audioUrl]),
+    ...(reel.destinations ?? []).flatMap((destination) => [destination.outroAudioUrl]),
+  ].filter((url): url is string => Boolean(url));
+
+  reel.bodyVideoUrl = undefined;
+  reel.assemblyVideoUrl = undefined;
+  reel.subtitlesUrl = undefined;
+  reel.titleAudioUrl = undefined;
+  reel.partOutroAudioUrl = undefined;
+  reel.outroAudioUrl = undefined;
+  reel.outroAudioSignature = undefined;
+  for (const scene of reel.scenes) {
+    scene.assetUrl = undefined;
+    scene.audioUrl = undefined;
+  }
+  for (const destination of reel.destinations ?? []) {
+    destination.outroAudioUrl = undefined;
+    destination.outroAudioSignature = undefined;
+  }
+  reel.markModified("scenes");
+  reel.markModified("destinations");
+  return [...new Set(released)];
+}
+
 const DEFAULT_REDDIT_TAGS = [
   "shorts",
   "redditstories",
@@ -1184,6 +1224,7 @@ export async function updateReelReview(
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   const current = reel.review ?? (await buildReelReviewPackage(reel));
+  const shouldReclaimCaches = input.status === "approved" && current.status !== "approved";
   reel.review = {
     ...current,
     ...input,
@@ -1193,7 +1234,24 @@ export async function updateReelReview(
   if (input.thumbnailText !== undefined) {
     reel.thumbnailHook = cleanThumbnailText(input.thumbnailText);
   }
+  const releasedUrls = shouldReclaimCaches ? reclaimApprovedRenderCaches(reel) : [];
   await reel.save();
+  if (shouldReclaimCaches) {
+    const cleanup = await deleteS3Urls(releasedUrls);
+    recordOperationLog({
+      scope: "system",
+      level: cleanup.failed ? "warn" : "info",
+      event: "reel.approved_render_caches_reclaimed",
+      message: cleanup.failed
+        ? "Final approval preserved publishable outputs, but some rebuild caches could not be deleted"
+        : "Final approval preserved publishable outputs and reclaimed rebuild caches",
+      reelId: reel._id.toString(),
+      metadata: {
+        ...cleanup,
+        retained: ["primary_final_video", "destination_final_videos", "review_thumbnail", "shorts_cover", "voice_variants"],
+      },
+    });
+  }
   recordOperationLog({
     scope: "system",
     event: "youtube.review_metadata_saved",

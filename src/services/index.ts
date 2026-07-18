@@ -54,5 +54,9 @@ export * from "./local-cleanup.service";
 // Distribution (publish rendered reels to platforms)
 export * from "./youtube-publish.service";
 export * from "./instagram-publish.service";
+export * from "./facebook-publish.service";
+export * from "./threads-publish.service";
+export * from "./post-comment.service";
+export * from "./publish-guard.service";
 export * from "./youtube-search.service";
 export * from "./yt-import.service";

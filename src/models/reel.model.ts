@@ -140,8 +140,8 @@ export interface IOutroSettings {
 export interface IReelDestination {
   /** Stable id used by studio/render to address this destination. */
   id: string;
-  platform: "youtube" | "instagram";
-  /** Connected channel/account id (YouTubeChannel / InstagramChannel doc id). */
+  platform: "youtube" | "instagram" | "facebook" | "threads";
+  /** Connected channel/account id (YouTube, Instagram, Facebook Page, or Threads profile). */
   channelId: string;
   channelLabel?: string;
   /** Per-destination outro copy overrides (channel name/handle/spoken line…). */
@@ -269,6 +269,11 @@ export interface IYouTubePublish {
    */
   shortsCoverStatus?: "applied" | "unchanged" | "unknown";
   publishedAt?: Date;
+  /** Own-post pinned-style first comment (curiosity prompt / series link).
+   *  Posted only after a successful publish; own-media only, never botting. */
+  firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
+  firstCommentId?: string;
+  firstCommentError?: string;
 }
 
 /** A reel may go to several Instagram creator/business accounts. */
@@ -284,6 +289,48 @@ export interface IInstagramPublish {
   message?: string;
   updatedAt?: Date;
   publishedAt?: Date;
+  /** Own-post first comment on the published Reel (own-media only). Note: the
+   *  Content Publishing API cannot PIN a comment — pinning stays manual. */
+  firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
+  firstCommentId?: string;
+  firstCommentError?: string;
+}
+
+/** Facebook Reels publish state (Page publishing). One reel may fan out to
+ *  several owned Pages. Mirrors IInstagramPublish. */
+export interface IFacebookPublish {
+  channelId: string; // FacebookPage.channelKey
+  channelLabel?: string;
+  status: "pending" | "uploading" | "published" | "failed";
+  /** Facebook video id returned by the reels upload start phase. */
+  videoId?: string;
+  url?: string;
+  error?: string;
+  message?: string;
+  firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
+  firstCommentId?: string;
+  firstCommentError?: string;
+  updatedAt?: Date;
+  publishedAt?: Date;
+}
+
+/** Threads publish state. One reel may cross-post to several owned Threads
+ *  profiles. The "first comment" here is a threaded text reply (Part N hook). */
+export interface IThreadsPublish {
+  channelId: string; // ThreadsChannel.channelKey
+  channelLabel?: string;
+  status: "pending" | "uploading" | "published" | "failed";
+  /** Threads media container id, retained so a timeout can resume safely. */
+  containerId?: string;
+  mediaId?: string;
+  url?: string;
+  error?: string;
+  message?: string;
+  firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
+  firstCommentId?: string;
+  firstCommentError?: string;
+  updatedAt?: Date;
+  publishedAt?: Date;
 }
 export interface IInstagramPublishSettings {
   caption?: string;
@@ -295,6 +342,17 @@ export interface IInstagramPublishSettings {
   /** A native-Instagram poll draft. This is guidance for the creator only;
    * the Content Publishing API cannot attach interactive stickers. */
   poll?: IInstagramPollSuggestion;
+}
+
+/** Creator-edited Facebook Reel description. Kept separate from Instagram so
+ * each Meta surface can carry genuinely platform-specific copy. */
+export interface IFacebookPublishSettings {
+  description?: string;
+}
+
+/** Creator-edited body text for a Threads video post. */
+export interface IThreadsPublishSettings {
+  text?: string;
 }
 
 export interface IInstagramPollSuggestion {
@@ -532,6 +590,14 @@ export interface IReel extends Document {
   youtube?: IYouTubePublish;
   instagram: IInstagramPublish[];
   instagramSettings?: IInstagramPublishSettings;
+  facebookSettings?: IFacebookPublishSettings;
+  threadsSettings?: IThreadsPublishSettings;
+  /** Facebook Reels publish targets (owned Pages). Scaffolded; gated behind
+   *  FACEBOOK_REELS_ENABLED until the Page + Meta app are configured. */
+  facebook: IFacebookPublish[];
+  /** Threads cross-post targets (owned profiles). Scaffolded; gated behind
+   *  THREADS_ENABLED until the separate Threads app is configured. */
+  threads: IThreadsPublish[];
 
   createdAt: Date;
   updatedAt: Date;
@@ -640,7 +706,7 @@ const outroSettingsSchema = new Schema<IOutroSettings>(
 const reelDestinationSchema = new Schema<IReelDestination>(
   {
     id: { type: String, required: true },
-    platform: { type: String, enum: ["youtube", "instagram"], required: true },
+    platform: { type: String, enum: ["youtube", "instagram", "facebook", "threads"], required: true },
     channelId: { type: String, required: true },
     channelLabel: String,
     outro: outroSettingsSchema,
@@ -881,9 +947,14 @@ const youtubePublishSchema = new Schema<IYouTubePublish>(
       enum: ["applied", "unchanged", "unknown"],
     },
     publishedAt: Date,
+    firstCommentStatus: { type: String, enum: ["pending", "posted", "failed", "skipped"] },
+    firstCommentId: String,
+    firstCommentError: String,
   },
   { _id: false }
 );
+
+const firstCommentStatusEnum = { type: String, enum: ["pending", "posted", "failed", "skipped"] } as const;
 
 const instagramPublishSchema = new Schema<IInstagramPublish>(
   {
@@ -895,6 +966,46 @@ const instagramPublishSchema = new Schema<IInstagramPublish>(
     url: String,
     error: String,
     message: String,
+    updatedAt: Date,
+    publishedAt: Date,
+    firstCommentStatus: firstCommentStatusEnum,
+    firstCommentId: String,
+    firstCommentError: String,
+  },
+  { _id: false }
+);
+
+const facebookPublishSchema = new Schema<IFacebookPublish>(
+  {
+    channelId: { type: String, required: true },
+    channelLabel: String,
+    status: { type: String, enum: ["pending", "uploading", "published", "failed"], default: "pending" },
+    videoId: String,
+    url: String,
+    error: String,
+    message: String,
+    firstCommentStatus: firstCommentStatusEnum,
+    firstCommentId: String,
+    firstCommentError: String,
+    updatedAt: Date,
+    publishedAt: Date,
+  },
+  { _id: false }
+);
+
+const threadsPublishSchema = new Schema<IThreadsPublish>(
+  {
+    channelId: { type: String, required: true },
+    channelLabel: String,
+    status: { type: String, enum: ["pending", "uploading", "published", "failed"], default: "pending" },
+    containerId: String,
+    mediaId: String,
+    url: String,
+    error: String,
+    message: String,
+    firstCommentStatus: firstCommentStatusEnum,
+    firstCommentId: String,
+    firstCommentError: String,
     updatedAt: Date,
     publishedAt: Date,
   },
@@ -916,6 +1027,16 @@ const instagramSettingsSchema = new Schema<IInstagramPublishSettings>(
       model: String,
     },
   },
+  { _id: false },
+);
+
+const facebookSettingsSchema = new Schema<IFacebookPublishSettings>(
+  { description: String },
+  { _id: false },
+);
+
+const threadsSettingsSchema = new Schema<IThreadsPublishSettings>(
+  { text: String },
   { _id: false },
 );
 
@@ -1068,6 +1189,10 @@ const reelSchema = new Schema<IReel>(
     youtube: youtubePublishSchema,
     instagram: { type: [instagramPublishSchema], default: [] },
     instagramSettings: instagramSettingsSchema,
+    facebookSettings: facebookSettingsSchema,
+    threadsSettings: threadsSettingsSchema,
+    facebook: { type: [facebookPublishSchema], default: [] },
+    threads: { type: [threadsPublishSchema], default: [] },
   },
   { timestamps: true }
 );

@@ -18,6 +18,8 @@ import {
   ytImportRoutes,
   storyRoutes,
   instagramRoutes,
+  facebookRoutes,
+  threadsRoutes,
   operationLogRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
@@ -222,6 +224,8 @@ const app = new Elysia({
   .use(trendRoutes)
   .use(youtubeRoutes)
   .use(instagramRoutes)
+  .use(facebookRoutes)
+  .use(threadsRoutes)
   .use(ytImportRoutes)
   .use(storyRoutes)
   .use(operationLogRoutes)

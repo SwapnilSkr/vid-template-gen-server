@@ -6,4 +6,7 @@ export * from "./reel";
 export * from "./trend";
 export * from "./yt-import";
 export * from "./instagram";
+export * from "./facebook";
+export * from "./threads";
+export * from "./distribution";
 export * from "./story";

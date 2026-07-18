@@ -23,6 +23,7 @@ import {
   UpdateCaptionsBody,
   UpdateRedditCardBody,
   RegenerateReelBody,
+  RetryReelOutroBody,
   ReplanReelBody,
   ReplanReelSeriesBody,
   MoveBoundaryBody,
@@ -74,6 +75,7 @@ import {
   updateRedditCardController,
   applyCaptionsController,
   regenerateReelController,
+  retryReelOutroController,
   resumeFailedReelController,
   approvePlanController,
   replanReelController,
@@ -398,6 +400,13 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   .post("/:id/regenerate", regenerateReelController, {
     params: IdParams,
     body: RegenerateReelBody,
+  })
+
+  // Rebuild branded outro visuals from current account information while
+  // retaining valid cached narration rather than paying for a new voice line.
+  .post("/:id/outro/retry", retryReelOutroController, {
+    params: IdParams,
+    body: RetryReelOutroBody,
   })
 
   // Commit or discard the currently staged local editor draft.

@@ -230,6 +230,95 @@ export const REDDIT_GENRES: Record<string, RedditGenre> = {
     subreddits: ["r/NeighborsFromHell", "r/fuckHOA", "r/pettyrevenge", "r/legaladvice"],
     keywords: ["neighbor", "hoa", "parking", "noise", "yard", "property"],
   },
+
+  // --- Added 2026-07-18: 10 new genres to broaden the story bank (14 -> 24).
+  // Non-overlapping with the above; AITA-style "pick a side" framing carries
+  // extra weight since it is the strongest completion driver. No fiction-writing
+  // subs (nosleep/shortscarystories) inside "true story" genres. ---
+  aita_general: {
+    id: "aita_general",
+    label: "AITA / Everyday Judgment",
+    angle: "a non-family moral dilemma over friends, money, strangers, or public behavior where viewers must pick a side",
+    subreddits: ["r/AmItheAsshole", "r/AITAH", "r/AmIOverreacting", "r/AmItheDevil"],
+    keywords: ["aita", "friend", "money", "roommate", "party", "public", "coworker", "refuse", "boundary"],
+    avoidKeywords: ["meta", "update request", "mod", "mom", "dad", "wedding"],
+    weight: 3,
+  },
+  cheating_infidelity: {
+    id: "cheating_infidelity",
+    label: "Cheating & Infidelity",
+    angle: "infidelity uncovered — the discovery, the confrontation, and the fallout the viewer wants to see resolved",
+    subreddits: ["r/survivinginfidelity", "r/AsOneAfterInfidelity", "r/relationship_advice", "r/AITAH"],
+    keywords: ["cheating", "affair", "infidelity", "caught", "texts", "unfaithful", "betrayal", "dday"],
+    avoidKeywords: ["minor", "underage", "support group only"],
+    weight: 2,
+  },
+  inlaws_justno: {
+    id: "inlaws_justno",
+    label: "In-Laws / JUSTNO",
+    angle: "an overbearing mother-in-law or toxic in-law crosses a serious line and forces a boundary showdown",
+    subreddits: ["r/JUSTNOMIL", "r/JUSTNOFAMILY", "r/JustNoSO", "r/MILInsanity"],
+    keywords: ["mil", "mother in law", "in law", "boundary", "grandkids", "wedding", "overstep"],
+    avoidKeywords: ["meta", "advice wanted flair only"],
+    weight: 2,
+  },
+  roommate_horror: {
+    id: "roommate_horror",
+    label: "Roommate Horror",
+    angle: "a roommate whose behavior escalates from annoying to unhinged, with a lease, deposit, or blowup at stake",
+    subreddits: ["r/BadRoommates", "r/Roommates", "r/AmItheAsshole", "r/legaladvice"],
+    keywords: ["roommate", "lease", "rent", "deposit", "dishes", "moved out", "sublet"],
+    avoidKeywords: ["looking for roommate", "room for rent", "wanted"],
+  },
+  teacher_school: {
+    id: "teacher_school",
+    label: "Teacher & School Stories",
+    angle: "a teacher or professor faces an entitled student, parent, or administrator in a story that begs for judgment",
+    subreddits: ["r/Teachers", "r/Professors", "r/education", "r/AskAcademia"],
+    keywords: ["student", "parent", "principal", "grade", "classroom", "professor", "administration", "detention"],
+    avoidKeywords: ["job posting", "hiring", "salary question", "which degree"],
+  },
+  parenting_drama: {
+    id: "parenting_drama",
+    label: "Parenting Drama",
+    angle: "a parenting conflict over discipline, co-parenting, or family boundaries where readers take sides",
+    subreddits: ["r/Parenting", "r/Mommit", "r/beyondthebump", "r/AmItheAsshole"],
+    keywords: ["kid", "toddler", "co-parent", "custody", "discipline", "daycare", "screen time", "grandparent"],
+    avoidKeywords: ["product recommendation", "gear question", "sleep training tips only"],
+  },
+  dating_horror: {
+    id: "dating_horror",
+    label: "Dating Horror Stories",
+    angle: "a first date or online match goes spectacularly, cringingly, or alarmingly wrong",
+    subreddits: ["r/Tinder", "r/dating", "r/OnlineDating", "r/datingoverthirty"],
+    keywords: ["date", "match", "app", "ghosted", "red flag", "profile", "first date", "creep"],
+    avoidKeywords: ["rate my profile", "advice on my bio", "which pic"],
+    weight: 2,
+  },
+  family_estrangement: {
+    id: "family_estrangement",
+    label: "Family Estrangement",
+    angle: "an adult child goes no-contact with toxic parents — the final straw and the aftermath",
+    subreddits: ["r/EstrangedAdultKids", "r/raisedbynarcissists", "r/insaneparents", "r/JUSTNOFAMILY"],
+    keywords: ["no contact", "estranged", "narcissist", "toxic parent", "cut off", "golden child", "scapegoat"],
+    avoidKeywords: ["therapy resource", "helpline", "support only"],
+  },
+  creepy_encounters: {
+    id: "creepy_encounters",
+    label: "Creepy Real Encounters",
+    angle: "a genuinely unsettling real-life encounter with a stranger, stalker, or unexplained situation",
+    subreddits: ["r/LetsNotMeet", "r/creepyencounters", "r/Nightshift"],
+    keywords: ["stranger", "followed", "creepy", "stalker", "night", "encounter", "car", "knock"],
+    avoidKeywords: ["nosleep", "fiction", "story i wrote", "part 1", "chapter", "series"],
+  },
+  unresolved_mysteries: {
+    id: "unresolved_mysteries",
+    label: "Unresolved Mysteries & Glitches",
+    angle: "an unexplained event, disappearance, or reality glitch the viewer can't stop thinking about",
+    subreddits: ["r/UnresolvedMysteries", "r/Glitch_in_the_Matrix", "r/RBI", "r/Paranormal"],
+    keywords: ["disappeared", "unexplained", "glitch", "mystery", "vanished", "witness", "strange", "never found"],
+    avoidKeywords: ["nosleep", "fiction", "creepypasta", "part 1", "chapter"],
+  },
 };
 
 // ---- Reddit (app-only OAuth; read-only) ----

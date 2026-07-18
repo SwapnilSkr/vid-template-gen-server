@@ -30,6 +30,12 @@ export interface ReelJobData {
   /** Produce-only: skip body rebuild and append a new outro onto bodyVideoUrl.
    *  composite_only finishes from assembly/narration caches (no TTS / no Ken Burns). */
   produceMode?: "full" | "outro_only" | "composite_only";
+  /** Explicit visual outro retry. Keeps existing narration when its signature
+   * still matches, but redraws the card from the latest account profile data. */
+  outroRetry?: {
+    scope: "all" | "primary" | "destination";
+    destinationId?: string;
+  };
 }
 
 export interface CompositionJobData {
@@ -43,7 +49,7 @@ export interface RegenerateCompositionJobData {
 
 export interface PublishJobData {
   reelId: string;
-  platform: "youtube" | "instagram";
+  platform: "youtube" | "instagram" | "facebook" | "threads";
   channelId?: string;
 }
 
@@ -113,9 +119,13 @@ export async function enqueueReelPlan(reelId: string): Promise<void> {
  *  produce job for this reel is already waiting/active (double-click / race). */
 export async function enqueueReelProduce(
   reelId: string,
-  options: { produceMode?: "full" | "outro_only" | "composite_only" } = {}
+  options: {
+    produceMode?: "full" | "outro_only" | "composite_only";
+    outroRetry?: ReelJobData["outroRetry"];
+  } = {}
 ): Promise<void> {
   const produceMode = options.produceMode ?? "full";
+  const outroRetry = options.outroRetry;
   const activeJobs = await reelQueue.getJobs(["waiting", "delayed", "active"], 0, 200);
   const duplicate = activeJobs.some(
     (job) => job.data.reelId === reelId && job.data.stage === "produce"
@@ -135,7 +145,7 @@ export async function enqueueReelProduce(
   const jobId = `${reelId}-produce-${Date.now()}`;
   await reelQueue.add(
     "process",
-    { reelId, stage: "produce", produceMode },
+    { reelId, stage: "produce", produceMode, outroRetry },
     { jobId }
   );
   recordOperationLog({
@@ -144,7 +154,7 @@ export async function enqueueReelProduce(
     message: "Reel produce job queued",
     reelId,
     jobId,
-    metadata: { produceMode },
+    metadata: { produceMode, outroRetry },
   });
 }
 
@@ -199,9 +209,10 @@ export async function enqueuePublish(
     { reelId, platform, channelId },
     {
       jobId,
-      // Retrying a failed Instagram container automatically can create a
-      // duplicate post. Surface the failure and require an explicit resend.
-      ...(platform === "instagram" ? { attempts: 1 } : {}),
+      // Retrying a failed container/upload automatically can create a duplicate
+      // post on the Meta platforms. Surface the failure and require an explicit
+      // resend. YouTube resumable uploads are safe to auto-retry.
+      ...(platform !== "youtube" ? { attempts: 1 } : {}),
     }
   );
   recordOperationLog({

@@ -128,6 +128,59 @@ export const config = {
     process.env.INSTAGRAM_PROCESSING_TIMEOUT_MS || String(10 * 60 * 1000)
   ),
 
+  // ============================================================
+  // Distribution / virality engine (own-media only). All of the flags below
+  // gate NEW behaviour off by default so nothing runs until the user finishes
+  // the per-platform Meta/Google setup. Never build cross-account automation
+  // here — only actions on the account's OWN posts are safe to automate.
+  // ============================================================
+
+  // Post a single pinned-style FIRST comment on our own post right after it
+  // publishes (curiosity prompt + series link). Own-media only; off by default.
+  instagramAutoFirstComment: process.env.INSTAGRAM_AUTO_FIRST_COMMENT === "true",
+  youtubeAutoFirstComment: process.env.YOUTUBE_AUTO_FIRST_COMMENT === "true",
+  facebookAutoFirstComment: process.env.FACEBOOK_AUTO_FIRST_COMMENT === "true",
+  threadsAutoFirstReply: process.env.THREADS_AUTO_FIRST_REPLY === "true",
+
+  // Conservative per-platform daily publish guards. New accounts are throttled
+  // harder by the 2025–2026 recommendation algorithms, so these sit well under
+  // the documented hard API caps (IG ~100/day, FB 30/day, Threads 250/day,
+  // YouTube 100 uploads/day). Set to 0 to disable a guard.
+  instagramDailyLimit: parseInt(process.env.INSTAGRAM_DAILY_LIMIT || "25"),
+  youtubeDailyLimit: parseInt(process.env.YOUTUBE_DAILY_LIMIT || "100"),
+  facebookDailyLimit: parseInt(process.env.FACEBOOK_DAILY_LIMIT || "30"),
+  threadsDailyLimit: parseInt(process.env.THREADS_DAILY_LIMIT || "250"),
+
+  // ---- Facebook Reels (Page publishing). Works under Meta Standard Access
+  // for Pages the user administers — NO App Review. Reuses the Instagram Meta
+  // app credentials by default; override if the Page lives on a different app.
+  // Requires scopes: pages_show_list, pages_read_engagement, pages_manage_posts
+  // (+ pages_manage_engagement for own-post first comments). ----
+  facebookReelsEnabled: process.env.FACEBOOK_REELS_ENABLED === "true",
+  facebookAppId: process.env.FACEBOOK_APP_ID || process.env.INSTAGRAM_APP_ID || "",
+  facebookAppSecret: process.env.FACEBOOK_APP_SECRET || process.env.INSTAGRAM_APP_SECRET || "",
+  facebookRedirectUri:
+    process.env.FACEBOOK_REDIRECT_URI || "http://localhost:3000/api/facebook/connect/callback",
+  facebookApiVersion: process.env.FACEBOOK_API_VERSION || "v21.0",
+  facebookProcessingTimeoutMs: parseInt(
+    process.env.FACEBOOK_PROCESSING_TIMEOUT_MS || String(10 * 60 * 1000)
+  ),
+
+  // ---- Threads. SEPARATE Meta "Threads" use-case app with its own OAuth and
+  // its own Graph host (graph.threads.net). Scopes: threads_basic,
+  // threads_content_publish, threads_manage_replies, threads_read_replies. ----
+  threadsEnabled: process.env.THREADS_ENABLED === "true",
+  threadsAppId: process.env.THREADS_APP_ID || "",
+  threadsAppSecret: process.env.THREADS_APP_SECRET || "",
+  threadsRedirectUri:
+    process.env.THREADS_REDIRECT_URI || "http://localhost:3000/api/threads/connect/callback",
+  threadsApiVersion: process.env.THREADS_API_VERSION || "v1.0",
+  // Threads processes the pulled video async like IG; a short fixed wait before
+  // publish is the documented pattern, then we poll the container status.
+  threadsProcessingTimeoutMs: parseInt(
+    process.env.THREADS_PROCESSING_TIMEOUT_MS || String(5 * 60 * 1000)
+  ),
+
   // YouTube Data API v3 *read* access (search/videos.list) for the trend
   // scout — a plain API key from Google Cloud Console, separate from the
   // OAuth publish credentials above (those write to OUR channel; this only
@@ -158,17 +211,39 @@ export const config = {
     secondary: process.env.SUBTITLE_SECONDARY_COLOR || "#00FF00",
   },
 
-  // Subtitle chunk speed multiplier (lower = faster chunks)
-  // 1.0 = normal, 0.75 = 1.33x faster, 0.5 = 2x faster, 0.33 = 3x faster
+  // Karaoke caption chunk speed multiplier. DEPRECATED as a compression knob:
+  // captions must never run faster than the real narration audio (Issue 1), so
+  // any value below 1.0 is clamped to 1.0 in generateKaraokeAssContent. Kept
+  // only for backward-compat of the env var; leave at 1.0.
   chunkSpeedMultiplier: parseFloat(
-    process.env.CHUNK_SPEED_MULTIPLIER || "0.75"
+    process.env.CHUNK_SPEED_MULTIPLIER || "1"
+  ),
+
+  // Forced word alignment (provider-independent caption sync). This runs the
+  // local whisper.cpp CLI over the FINAL paced Reddit narration, so it works
+  // with OpenRouter or any future TTS provider. It is deliberately opt-in: run
+  // `bun run whisper:install` locally, or use the Docker image which includes
+  // the CLI + base.en model.
+  whisperAlignmentEnabled: process.env.WHISPER_ALIGNMENT_ENABLED === "true",
+  whisperCliPath: process.env.WHISPER_CLI_PATH || "whisper-cli",
+  whisperModelPath: absPath(
+    process.env.WHISPER_MODEL_PATH,
+    "./storage/whisper/ggml-base.en.bin"
   ),
 
   // Reddit/gameplay narration pacing. Captions follow the processed audio, so
-  // these are the controls that actually affect Reddit reel feel.
-  redditNarrationTempo: parseFloat(process.env.REDDIT_NARRATION_TEMPO || "1.12"),
-  redditSentenceGapSeconds: parseFloat(process.env.REDDIT_SENTENCE_GAP_SECONDS || "0.12"),
-  redditTitleGapSeconds: parseFloat(process.env.REDDIT_TITLE_GAP_SECONDS || "0.2"),
+  // these are the controls that actually affect Reddit reel feel. Tuned for a
+  // deliberate, clear "storytime" read rather than a rushed one:
+  //  - redditTtsSpeed: provider `speed` param sent to TTS (1.0 = natural;
+  //    <1 = slower/clearer). Applied only when the model supports `speed`.
+  //  - redditNarrationTempo: post-hoc ffmpeg atempo on the rendered audio
+  //    (kept modest so it doesn't sound chipmunky; 1.0 = untouched).
+  //  - *GapSeconds: deliberate silence inserted BETWEEN segments so sentences
+  //    breathe without the dead air TTS bakes into each clip.
+  redditTtsSpeed: parseFloat(process.env.REDDIT_TTS_SPEED || "0.97"),
+  redditNarrationTempo: parseFloat(process.env.REDDIT_NARRATION_TEMPO || "1.04"),
+  redditSentenceGapSeconds: parseFloat(process.env.REDDIT_SENTENCE_GAP_SECONDS || "0.22"),
+  redditTitleGapSeconds: parseFloat(process.env.REDDIT_TITLE_GAP_SECONDS || "0.35"),
 };
 
 // Validate required config

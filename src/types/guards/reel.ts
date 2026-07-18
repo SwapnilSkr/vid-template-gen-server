@@ -44,6 +44,14 @@ export const InstagramPublishSettingsBody = t.Object({
   poll: t.Optional(InstagramPollSuggestionBody),
 });
 
+export const FacebookPublishSettingsBody = t.Object({
+  description: t.Optional(t.String({ maxLength: 2200 })),
+});
+
+export const ThreadsPublishSettingsBody = t.Object({
+  text: t.Optional(t.String({ maxLength: 500 })),
+});
+
 export const CreateReelBody = t.Object({
   niche: t.String(),
   genre: t.Optional(t.String()),
@@ -68,7 +76,7 @@ export const CreateReelBody = t.Object({
   destinations: t.Optional(
     t.Array(
       t.Object({
-        platform: t.Union([t.Literal("youtube"), t.Literal("instagram")]),
+        platform: t.Union([t.Literal("youtube"), t.Literal("instagram"), t.Literal("facebook"), t.Literal("threads")]),
         channelId: t.String(),
         outro: t.Optional(OutroSettingsBody),
       })
@@ -179,9 +187,11 @@ export type TMoveBoundaryBody = typeof MoveBoundaryBody.static;
 
 /** A publish destination for create/add: channel + optional outro copy overrides. */
 export const DestinationInputBody = t.Object({
-  platform: t.Union([t.Literal("youtube"), t.Literal("instagram")]),
+  platform: t.Union([t.Literal("youtube"), t.Literal("instagram"), t.Literal("facebook"), t.Literal("threads")]),
   channelId: t.String(),
   outro: t.Optional(OutroSettingsBody),
+  /** Add this channel output to only the open part, or every part in its story. */
+  scope: t.Optional(t.Union([t.Literal("reel"), t.Literal("series")])),
 });
 export type TDestinationInputBody = typeof DestinationInputBody.static;
 
@@ -257,6 +267,8 @@ export const UpdateReelSettingsBody = t.Object({
   ),
   editEffects: t.Optional(EditEffectsBody),
   instagram: t.Optional(InstagramPublishSettingsBody),
+  facebook: t.Optional(FacebookPublishSettingsBody),
+  threads: t.Optional(ThreadsPublishSettingsBody),
 });
 export type TUpdateReelSettingsBody = typeof UpdateReelSettingsBody.static;
 
@@ -299,6 +311,12 @@ export const RegenerateReelBody = t.Object({
   ]),
 });
 export type TRegenerateReelBody = typeof RegenerateReelBody.static;
+
+export const RetryReelOutroBody = t.Object({
+  scope: t.Union([t.Literal("all"), t.Literal("primary"), t.Literal("destination")]),
+  destinationId: t.Optional(t.String()),
+});
+export type TRetryReelOutroBody = typeof RetryReelOutroBody.static;
 
 export const DraftAssetParams = t.Object({
   draftId: t.String(),

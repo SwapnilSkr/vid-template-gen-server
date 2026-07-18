@@ -20,6 +20,8 @@ export {
   type ReelStatus,
   type IYouTubePublish,
   type IInstagramPublish,
+  type IFacebookPublish,
+  type IThreadsPublish,
   type IInstagramPublishSettings,
   type IInstagramPollSuggestion,
   type IReelReviewPackage,
@@ -66,6 +68,12 @@ export {
 export { TrendInsight, type ITrendInsight } from "./trend-insight.model";
 export { YouTubeChannel, type IYouTubeChannel } from "./youtube-channel.model";
 export { InstagramChannel, type IInstagramChannel } from "./instagram-channel.model";
+export { FacebookPage, type IFacebookPage } from "./facebook-page.model";
+export { ThreadsChannel, type IThreadsChannel } from "./threads-channel.model";
+export {
+  ThreadsDataDeletionRequest,
+  type IThreadsDataDeletionRequest,
+} from "./threads-data-deletion.model";
 export { OAuthState, type IOAuthState } from "./oauth-state.model";
 export {
   YtImport,

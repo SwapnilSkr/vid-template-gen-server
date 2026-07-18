@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   Reel,
+  FacebookPage,
   InstagramChannel,
+  ThreadsChannel,
   YouTubeChannel,
   type IReel,
   type IScene,
@@ -575,6 +577,8 @@ export async function updateReelSettings(
       shareToFeed?: boolean;
       poll?: { question?: string; optionA?: string; optionB?: string };
     };
+    facebook?: { description?: string };
+    threads?: { text?: string };
   }
 ): Promise<IReel> {
   const reel = await loadReel(reelId);
@@ -701,6 +705,18 @@ export async function updateReelSettings(
     };
     reel.markModified("instagramSettings");
   }
+  if (patch.facebook !== undefined) {
+    reel.facebookSettings = {
+      description: patch.facebook.description ?? reel.facebookSettings?.description,
+    };
+    reel.markModified("facebookSettings");
+  }
+  if (patch.threads !== undefined) {
+    reel.threadsSettings = {
+      text: patch.threads.text ?? reel.threadsSettings?.text,
+    };
+    reel.markModified("threadsSettings");
+  }
   if (patch.motionMode !== undefined) {
     reel.motionMode = patch.motionMode;
     reel.scenes.forEach((scene, i) => {
@@ -720,6 +736,18 @@ export async function updateReelSettings(
         hashtagCount: instagramCaptionHashtagCount(reel.instagramSettings?.caption ?? ""),
         shareToFeed: reel.instagramSettings?.shareToFeed ?? true,
         pollDraft: Boolean(reel.instagramSettings?.poll),
+      },
+    });
+  }
+  if (patch.facebook !== undefined || patch.threads !== undefined) {
+    recordOperationLog({
+      scope: "system",
+      event: "crosspost.publish_copy_saved",
+      message: "Saved platform-specific cross-post copy",
+      reelId: reel._id.toString(),
+      metadata: {
+        facebookDescriptionLength: reel.facebookSettings?.description?.length ?? 0,
+        threadsTextLength: reel.threadsSettings?.text?.length ?? 0,
       },
     });
   }
@@ -888,6 +916,27 @@ export async function regenerateReel(
   return loadReel(reelId);
 }
 
+/** Rebuild outro visuals from the latest resolved account data while retaining
+ * the cached outro narration whenever the spoken line and voice are unchanged. */
+export async function retryReelOutro(
+  reelId: string,
+  retry: { scope: "all" | "primary" | "destination"; destinationId?: string },
+): Promise<IReel> {
+  assertFfmpegReady("Retry outro");
+  const reel = await loadReel(reelId);
+  assertEditable(reel);
+  if (reel.skipBrandedOutro) throw new Error("Enable the branded outro before retrying it");
+  if (!reel.bodyVideoUrl) throw new Error("A completed body render is required before an outro can be retried");
+  if (retry.scope === "destination") {
+    if (!retry.destinationId || !reel.destinations?.some((destination) => destination.id === retry.destinationId)) {
+      throw new Error("The selected outro account is no longer assigned to this reel");
+    }
+  }
+  await markQueued(reelId);
+  await enqueueReelProduce(reelId, { produceMode: "outro_only", outroRetry: retry });
+  return loadReel(reelId);
+}
+
 // ---- Multi-channel destinations ----
 // `reel.destinations` holds the EXTRA channels beyond the primary. The primary is
 // the legacy `reel.outro*` fields (edited via updateReelSettings). These endpoints
@@ -899,7 +948,7 @@ function canRerenderOutro(reel: IReel): boolean {
 }
 
 async function resolveChannelLabel(
-  platform: "youtube" | "instagram",
+  platform: "youtube" | "instagram" | "facebook" | "threads",
   channelId: string
 ): Promise<string> {
   if (platform === "youtube") {
@@ -907,8 +956,18 @@ async function resolveChannelLabel(
     if (!channel) throw new Error("YouTube channel not found or inactive");
     return channel.googleChannelTitle || channel.label;
   }
-  const channel = await InstagramChannel.findOne({ channelKey: channelId, status: "active" });
-  if (!channel) throw new Error("Instagram account not found or inactive");
+  if (platform === "instagram") {
+    const channel = await InstagramChannel.findOne({ channelKey: channelId, status: "active" });
+    if (!channel) throw new Error("Instagram account not found or inactive");
+    return channel.name || channel.username || channel.label;
+  }
+  if (platform === "facebook") {
+    const page = await FacebookPage.findOne({ channelKey: channelId, status: "active" });
+    if (!page) throw new Error("Facebook Page not found or inactive");
+    return page.name || page.label;
+  }
+  const channel = await ThreadsChannel.findOne({ channelKey: channelId, status: "active" });
+  if (!channel) throw new Error("Threads profile not found or inactive");
   return channel.name || channel.username || channel.label;
 }
 
@@ -1082,45 +1141,70 @@ export async function setReelPrimaryDestination(
   return loadReel(reelId);
 }
 
-/** Add an EXTRA channel destination. Renders its outro now when the reel is
- *  already produced; otherwise it renders at first produce. */
+/** Add an EXTRA channel destination to one part or every part in its story.
+ * New destinations get their own branded outro. Facebook/Threads can still
+ * cross-post the primary render when no dedicated destination is added. */
 export async function addReelDestination(
   reelId: string,
-  input: { platform: "youtube" | "instagram"; channelId: string; outro?: IOutroSettings }
+  input: {
+    platform: "youtube" | "instagram" | "facebook" | "threads";
+    channelId: string;
+    outro?: IOutroSettings;
+    scope?: "reel" | "series";
+  }
 ): Promise<IReel> {
-  const reel = await loadReel(reelId);
-  assertEditable(reel);
+  const root = await loadReel(reelId);
+  assertEditable(root);
+  const parts = input.scope === "series" && root.seriesId
+    ? sortedSeriesParts(await listReelsBySeries(root.seriesId))
+    : [root];
+  for (const part of parts) assertEditable(part);
   const channelLabel = await resolveChannelLabel(input.platform, input.channelId);
-  const primaryPlatform = reel.outroInstagramChannelId ? "instagram" : "youtube";
-  const primaryChannel = reel.outroInstagramChannelId || reel.outroChannelId;
-  if (input.platform === primaryPlatform && input.channelId === primaryChannel) {
-    throw new Error("That channel is already the primary destination for this reel");
+
+  // Validate every part before mutating one. A channel which is already a
+  // primary uses different media ownership, so an "add as extra" operation
+  // must not quietly create conflicting routing within a story.
+  for (const part of parts) {
+    const primaryPlatform = part.outroInstagramChannelId ? "instagram" : "youtube";
+    const primaryChannel = part.outroInstagramChannelId || part.outroChannelId;
+    if (input.platform === primaryPlatform && input.channelId === primaryChannel) {
+      const suffix = parts.length > 1 ? ` on story part ${part.partNumber ?? "?"}` : "";
+      throw new Error(`That channel is already the primary destination${suffix}. Use the primary-account control instead.`);
+    }
   }
-  if (!reel.destinations) reel.destinations = [];
-  if (reel.destinations.some((d) => d.platform === input.platform && d.channelId === input.channelId)) {
-    throw new Error("That channel is already a destination for this reel");
+
+  const missingParts = parts.filter((part) => !part.destinations?.some(
+    (destination) => destination.platform === input.platform && destination.channelId === input.channelId,
+  ));
+  if (!missingParts.length) return loadReel(reelId);
+
+  for (const part of missingParts) {
+    if (!part.destinations) part.destinations = [];
+    part.destinations.push({
+      id: randomUUID(),
+      platform: input.platform,
+      channelId: input.channelId,
+      channelLabel,
+      outro: input.outro,
+      status: "pending",
+      createdAt: new Date(),
+    });
+    part.markModified("destinations");
   }
-  reel.destinations.push({
-    id: randomUUID(),
-    platform: input.platform,
-    channelId: input.channelId,
-    channelLabel,
-    outro: input.outro,
-    status: "pending",
-    createdAt: new Date(),
-  });
-  reel.markModified("destinations");
-  await reel.save();
-  // Adding an account while the branded outro is intentionally disabled must
-  // not enqueue a misleading body-only render. It remains planned until the
-  // creator enables the outro again.
-  if (!reel.skipBrandedOutro && canRerenderOutro(reel)) return regenerateReel(reelId, "outro_only");
+  await Promise.all(missingParts.map((part) => part.save()));
+
+  // Adding an account while the branded outro is disabled remains configuration
+  // only. Otherwise each produced part gets only its new channel outro over the
+  // cached body — no scenes or body narration are regenerated.
+  await Promise.all(missingParts
+    .filter((part) => !part.skipBrandedOutro && canRerenderOutro(part))
+    .map((part) => regenerateReel(part._id.toString(), "outro_only")));
   return loadReel(reelId);
 }
 
 export interface DestinationRemovalResult {
   reel: IReel;
-  destination: { id: string; platform: "youtube" | "instagram"; channelId: string; channelLabel?: string };
+  destination: { id: string; platform: "youtube" | "instagram" | "facebook" | "threads"; channelId: string; channelLabel?: string };
   cleanup: { requested: number; deleted: number; skipped: number; failed: number };
 }
 

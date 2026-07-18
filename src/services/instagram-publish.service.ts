@@ -4,9 +4,17 @@ import { InstagramChannel, OAuthState, Reel, type IReel } from "../models";
 import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { resolveRenderedPublishDestination } from "./reel-outro.service";
+import { buildFirstCommentText } from "./post-comment.service";
+import { assertDailyPublishLimit } from "./publish-guard.service";
 
 const graphBase = () => `https://graph.instagram.com/${config.instagramApiVersion}`;
-const scopes = ["instagram_business_basic", "instagram_business_content_publish"];
+// instagram_manage_comments is required for the own-post first comment plus the
+// assisted read/reply surface. It is a Standard-Access scope for owned accounts.
+const scopes = [
+  "instagram_business_basic",
+  "instagram_business_content_publish",
+  "instagram_business_manage_comments",
+];
 const INSTAGRAM_CAPTION_MAX_HASHTAGS = 5;
 
 function instagramCaptionHashtagCount(caption: string): number {
@@ -130,6 +138,7 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
   const destination = resolveRenderedPublishDestination(reel, "instagram", channelId);
   if (!destination.outputUrl) throw new Error("Instagram destination output is not ready");
   const channel = await resolveInstagramChannel(channelId ?? destination.channelId);
+  await assertDailyPublishLimit("instagram", channel.channelKey);
   const caption = resolveInstagramPublishCaption(reel);
   recordOperationLog({
     scope: "system",
@@ -233,5 +242,117 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
       });
     }
     await setStatus("published", { containerId, mediaId: published.id, url: permalink, error: undefined, message: permalink ? "Published." : "Published — Instagram permalink is still becoming available.", publishedAt: new Date() }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
+    // Own-post first comment (curiosity prompt + series link). Best-effort:
+    // a failed comment must never flip a successful publish to "failed".
+    if (config.instagramAutoFirstComment) {
+      try {
+        const comment = buildFirstCommentText(reel, "instagram", 2_000);
+        const commentId = await createInstagramComment(published.id, comment.text, token);
+        await setStatus("published", { firstCommentStatus: "posted", firstCommentId: commentId, firstCommentError: undefined });
+        recordOperationLog({
+          scope: "external",
+          event: "instagram.first_comment_posted",
+          message: "Posted the own-post first comment on the published Reel",
+          reelId,
+          metadata: { channelId: channel.channelKey, mediaId: published.id, source: comment.source, hasSeriesLink: comment.hasSeriesLink },
+        });
+      } catch (commentError) {
+        await setStatus("published", { firstCommentStatus: "failed", firstCommentError: getErrorMessage(commentError) });
+        recordOperationLog({
+          scope: "external",
+          level: "warn",
+          event: "instagram.first_comment_failed",
+          message: "Instagram Reel published, but the own-post first comment could not be posted",
+          reelId,
+          metadata: { channelId: channel.channelKey, mediaId: published.id },
+          error: commentError,
+        });
+      }
+    }
   } catch (error) { const message = getErrorMessage(error); await setStatus("failed", { error: message, message: `Failed: ${message}` }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastError: message, status: /token|access/i.test(message) ? "needs_reauth" : channel.status } }); throw error; }
+}
+
+// ============================================================
+// Own-post comment layer (own-media only).
+//
+// - Posting a first comment on OUR OWN just-published Reel is safe and seeds
+//   the thread. IG's Content Publishing API can post but CANNOT pin an
+//   app-created comment, so pinning stays a manual action in the app.
+// - Reading early comments + replying to them (assisted, from the studio) is a
+//   measurable reach boost. This is NOT a cross-account bot: we only read/reply
+//   on our own media. No auto-like/follow/DM automation is provided anywhere.
+// ============================================================
+
+/** Low-level: create a comment on an IG media object. Returns the comment id. */
+async function createInstagramComment(mediaId: string, message: string, token: string): Promise<string> {
+  const res = await graph<{ id: string }>(`/${mediaId}/comments`, token, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ message }),
+  });
+  return res.id;
+}
+
+export interface InstagramCommentView {
+  id: string;
+  text: string;
+  username?: string;
+  timestamp?: string;
+  likeCount?: number;
+  replyCount: number;
+}
+
+/** Manually (re)post the own-post first comment for a published Reel. Idempotent
+ *  intent: the caller decides; we always create a fresh comment. */
+export async function postInstagramFirstComment(reelId: string, channelId: string): Promise<string> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const publish = reel.instagram.find((p) => p.channelId === channelId && p.status === "published");
+  if (!publish?.mediaId) throw new Error("This reel has no published Instagram media on that account yet");
+  const channel = await resolveInstagramChannel(channelId);
+  const token = await accessTokenFor(channel);
+  const comment = buildFirstCommentText(reel, "instagram", 2_000);
+  const commentId = await createInstagramComment(publish.mediaId, comment.text, token);
+  await Reel.updateOne(
+    { _id: reelId, "instagram.channelId": channelId },
+    { $set: { "instagram.$.firstCommentStatus": "posted", "instagram.$.firstCommentId": commentId, "instagram.$.firstCommentError": undefined } },
+  );
+  recordOperationLog({ scope: "external", event: "instagram.first_comment_posted", message: "Manually posted the own-post first comment", reelId, metadata: { channelId, mediaId: publish.mediaId, source: comment.source } });
+  return commentId;
+}
+
+/** Read early top-level comments on our own published Reel (assisted replies). */
+export async function listInstagramComments(reelId: string, channelId: string, limit = 25): Promise<InstagramCommentView[]> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const publish = reel.instagram.find((p) => p.channelId === channelId && p.status === "published");
+  if (!publish?.mediaId) throw new Error("This reel has no published Instagram media on that account yet");
+  const channel = await resolveInstagramChannel(channelId);
+  const token = await accessTokenFor(channel);
+  const res = await graph<{ data?: { id: string; text?: string; username?: string; timestamp?: string; like_count?: number; replies?: { data?: unknown[] } }[] }>(
+    `/${publish.mediaId}/comments?fields=id,text,username,timestamp,like_count,replies.limit(0)&limit=${Math.min(Math.max(limit, 1), 50)}`,
+    token,
+  );
+  return (res.data ?? []).map((c) => ({
+    id: c.id,
+    text: c.text ?? "",
+    username: c.username,
+    timestamp: c.timestamp,
+    likeCount: c.like_count,
+    replyCount: (c.replies?.data ?? []).length,
+  }));
+}
+
+/** Reply to a comment on our own published Reel. Own-media only. */
+export async function replyToInstagramComment(channelId: string, commentId: string, message: string): Promise<string> {
+  if (!message.trim()) throw new Error("Reply text is required");
+  const channel = await resolveInstagramChannel(channelId);
+  const token = await accessTokenFor(channel);
+  const res = await graph<{ id: string }>(`/${commentId}/replies`, token, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ message: message.trim() }),
+  });
+  recordOperationLog({ scope: "external", event: "instagram.comment_replied", message: "Replied to a comment on an own Instagram Reel", metadata: { channelId, commentId } });
+  return res.id;
 }

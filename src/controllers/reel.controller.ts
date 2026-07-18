@@ -84,6 +84,7 @@ import type {
   TUpdateCaptionsBody,
   TUpdateRedditCardBody,
   TRegenerateReelBody,
+  TRetryReelOutroBody,
   TReplanReelBody,
   TReplanReelSeriesBody,
   TMoveBoundaryBody,
@@ -122,6 +123,7 @@ import {
   stageThumbnailDraftImage,
 } from "../services/reel-thumbnail-draft.service";
 import { clearShortsCover, saveShortsCover } from "../services/reel-shorts-cover.service";
+import { retryReelOutro } from "../services/reel-edit.service";
 
 // ============================================
 // Type Definitions for Controller Context
@@ -320,6 +322,10 @@ export async function getReelStatusController({ params, set }: GetReelContext) {
       // idle even though the worker was processing a Reel.
       instagram: reel.instagram,
       instagramSettings: reel.instagramSettings,
+      facebook: reel.facebook,
+      facebookSettings: reel.facebookSettings,
+      threads: reel.threads,
+      threadsSettings: reel.threadsSettings,
       gameplayKey: reel.gameplayKey,
       horrorAudioKey: reel.horrorAudioKey,
       outroChannelId: reel.outroChannelId,
@@ -904,6 +910,10 @@ interface RegenerateReelContext extends Context {
   params: TIdParams;
   body: TRegenerateReelBody;
 }
+interface RetryReelOutroContext extends Context {
+  params: TIdParams;
+  body: TRetryReelOutroBody;
+}
 interface ReplanContext extends Context {
   params: TIdParams;
   body: TReplanReelBody;
@@ -1069,6 +1079,15 @@ export async function regenerateReelController({
   return runEdit(set, () => createReelEditDraft(params.id, body.mode));
 }
 
+/** Rebuild selected branded outro visual(s), reusing matching cached narration. */
+export async function retryReelOutroController({
+  params,
+  body,
+  set,
+}: RetryReelOutroContext) {
+  return runEdit(set, () => retryReelOutro(params.id, body));
+}
+
 /** Resume a failed produce job, reusing any S3 assets already paid for. */
 export async function resumeFailedReelController({
   params,
@@ -1152,6 +1171,7 @@ export async function addReelDestinationController({ params, body, set }: AddDes
       platform: body.platform,
       channelId: body.channelId,
       outro: body.outro,
+      scope: body.scope,
     })
   );
 }

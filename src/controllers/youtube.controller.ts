@@ -4,12 +4,20 @@ import {
   completeYouTubeChannelConnect,
   disableYouTubeChannel,
   listAllYouTubePublishChannels,
+  listYouTubeComments,
+  postYouTubeFirstComment,
+  replyToYouTubeComment,
   startYouTubeChannelConnect,
   updateYouTubeChannel,
 } from "../services";
+import { getErrorMessage } from "../types";
 import type {
   TConnectYouTubeBody,
   TIdParams,
+  TPostFirstCommentBody,
+  TReelCommentsQuery,
+  TReelIdParams,
+  TReplyCommentBody,
   TYouTubeCallbackQuery,
   TUpdateYouTubeChannelBody,
 } from "../types/guards";
@@ -71,6 +79,22 @@ export async function deleteYouTubeChannelController({
   return { success: true, data: { id: params.id } };
 }
 export async function updateYouTubeChannelController({ params, body }: Context & { params: TIdParams; body: TUpdateYouTubeChannelBody }) { return { success: true, data: await updateYouTubeChannel(params.id, body) }; }
+
+// ---- Own-post comment layer (own-media only) ----
+export async function postYouTubeFirstCommentController({ params, body, set }: Context & { params: TReelIdParams; body: TPostFirstCommentBody }) {
+  try { return { success: true, data: { commentId: await postYouTubeFirstComment(params.reelId, body.channelId) } }; }
+  catch (error) { set.status = 400; return { success: false, error: getErrorMessage(error) }; }
+}
+interface ListYouTubeCommentsContext extends Context { params: TReelIdParams; query: TReelCommentsQuery }
+export async function listYouTubeCommentsController({ params, query, set }: ListYouTubeCommentsContext) {
+  const limit = query.limit ? Number(query.limit) : undefined;
+  try { return { success: true, data: await listYouTubeComments(params.reelId, query.channelId, Number.isFinite(limit) ? limit : undefined) }; }
+  catch (error) { set.status = 400; return { success: false, error: getErrorMessage(error) }; }
+}
+export async function replyYouTubeCommentController({ body, set }: Context & { body: TReplyCommentBody }) {
+  try { return { success: true, data: { replyId: await replyToYouTubeComment(body.channelId, body.commentId, body.message) } }; }
+  catch (error) { set.status = 400; return { success: false, error: getErrorMessage(error) }; }
+}
 
 function getOAuthErrorMessage(error: string, description?: string) {
   if (error === "access_denied") {

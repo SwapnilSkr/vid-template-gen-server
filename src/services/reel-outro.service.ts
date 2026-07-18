@@ -5,7 +5,9 @@ import { unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { config } from "../config";
 import {
+  FacebookPage,
   InstagramChannel,
+  ThreadsChannel,
   YouTubeChannel,
   type IReel,
   type IReelDestination,
@@ -29,7 +31,7 @@ export interface OutroBrand {
   channelHandle?: string;
   logoUrl?: string;
   kind: "reddit" | "horror";
-  platform: "youtube" | "instagram";
+  platform: "youtube" | "instagram" | "facebook" | "threads";
   commentPrompt: string;
   spokenLine?: string;
   title?: string;
@@ -48,6 +50,8 @@ export interface OutroTts {
 export interface OutroSource {
   outroChannelId?: string;
   outroInstagramChannelId?: string;
+  outroFacebookPageId?: string;
+  outroThreadsChannelId?: string;
   outro?: IOutroSettings;
 }
 
@@ -56,16 +60,21 @@ export function destinationOutroSource(dest: IReelDestination): OutroSource {
   return {
     outroChannelId: dest.platform === "youtube" ? dest.channelId : undefined,
     outroInstagramChannelId: dest.platform === "instagram" ? dest.channelId : undefined,
+    outroFacebookPageId: dest.platform === "facebook" ? dest.channelId : undefined,
+    outroThreadsChannelId: dest.platform === "threads" ? dest.channelId : undefined,
     outro: dest.outro,
   };
 }
 
-function platformForOutroSource(source: OutroSource): "youtube" | "instagram" {
-  return source.outroInstagramChannelId ? "instagram" : "youtube";
+function platformForOutroSource(source: OutroSource): OutroBrand["platform"] {
+  if (source.outroInstagramChannelId) return "instagram";
+  if (source.outroFacebookPageId) return "facebook";
+  if (source.outroThreadsChannelId) return "threads";
+  return "youtube";
 }
 
 function defaultCtaForPlatform(platform: OutroBrand["platform"]): "FOLLOW" | "SUBSCRIBE" {
-  return platform === "instagram" ? "FOLLOW" : "SUBSCRIBE";
+  return platform === "youtube" ? "SUBSCRIBE" : "FOLLOW";
 }
 
 /**
@@ -208,9 +217,17 @@ export async function resolveOutroBrand(
 ): Promise<OutroBrand | undefined> {
   // Legacy calls resolve from the reel's own outro* fields; destination-scoped
   // renders pass that destination's channel/copy instead.
-  const src = source ?? reel;
+  // IReel is structurally the legacy subset of OutroSource. Annotating here
+  // lets destination-only Facebook/Threads fields coexist with legacy reels.
+  const src: OutroSource = source ?? reel;
   const explicitInstagram = src.outroInstagramChannelId
     ? await InstagramChannel.findOne({ channelKey: src.outroInstagramChannelId, status: "active" })
+    : undefined;
+  const explicitFacebook = src.outroFacebookPageId
+    ? await FacebookPage.findOne({ channelKey: src.outroFacebookPageId, status: "active" })
+    : undefined;
+  const explicitThreads = src.outroThreadsChannelId
+    ? await ThreadsChannel.findOne({ channelKey: src.outroThreadsChannelId, status: "active" })
     : undefined;
   const explicitChannel = src.outroChannelId
     ? await YouTubeChannel.findOne({
@@ -231,9 +248,9 @@ export async function resolveOutroBrand(
     const channel = explicitChannel ?? (await findChannelForNiche(["reddit", "reddit_stories", "aita"]));
     return {
       kind: "reddit",
-      channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
-      channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
-      logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
+      channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || explicitFacebook?.name || explicitFacebook?.label || explicitThreads?.name || explicitThreads?.username || explicitThreads?.label || channel?.googleChannelTitle || channel?.label || "Reddit Stories",
+      channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || (explicitThreads?.username ? `@${explicitThreads.username}` : undefined) || channel?.googleChannelHandle,
+      logoUrl: explicitInstagram?.profilePictureUrl || explicitFacebook?.pictureUrl || explicitThreads?.profilePictureUrl || channel?.logoUrl,
       platform,
       commentPrompt:
         src.outro?.commentPrompt?.trim() || primaryCommentPrompt || DEFAULT_OUTRO_COMMENT_PROMPT,
@@ -250,9 +267,9 @@ export async function resolveOutroBrand(
       explicitChannel ?? (await findChannelForNiche(["horror", "horror_comic", reel.genre ?? ""]));
     return {
       kind: "horror",
-      channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
-      channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || channel?.googleChannelHandle,
-      logoUrl: explicitInstagram?.profilePictureUrl || channel?.logoUrl,
+      channelName: src.outro?.channelName?.trim() || explicitInstagram?.name || explicitInstagram?.username || explicitFacebook?.name || explicitFacebook?.label || explicitThreads?.name || explicitThreads?.username || explicitThreads?.label || channel?.googleChannelTitle || channel?.label || "Midnight Horror",
+      channelHandle: src.outro?.channelHandle?.trim() || (explicitInstagram?.username ? `@${explicitInstagram.username}` : undefined) || (explicitThreads?.username ? `@${explicitThreads.username}` : undefined) || channel?.googleChannelHandle,
+      logoUrl: explicitInstagram?.profilePictureUrl || explicitFacebook?.pictureUrl || explicitThreads?.profilePictureUrl || channel?.logoUrl,
       platform,
       commentPrompt:
         src.outro?.commentPrompt?.trim() || primaryCommentPrompt || DEFAULT_OUTRO_COMMENT_PROMPT,
@@ -419,13 +436,13 @@ export function composeOutroSpokenLine(reel: IReel, brand: OutroBrand): string {
 
 function defaultChannelOutroLine(reel: IReel, brand: OutroBrand): string {
   const channelAction =
-    brand.platform === "instagram"
-      ? `Follow ${brand.channelName}`
-      : `Subscribe to ${brand.channelName}`;
+    brand.platform === "youtube"
+      ? `Subscribe to ${brand.channelName}`
+      : `Follow ${brand.channelName}`;
   if (brand.kind !== "reddit") {
-    return brand.platform === "instagram"
-      ? `${channelAction} for more stories.`
-      : `${channelAction}. The next story is already waiting.`;
+    return brand.platform === "youtube"
+      ? `${channelAction}. The next story is already waiting.`
+      : `${channelAction} for more stories.`;
   }
   const nextPart = nextRedditPart(reel);
   if (nextPart) {

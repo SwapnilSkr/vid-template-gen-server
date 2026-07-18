@@ -1,4 +1,4 @@
-import { google } from "googleapis";
+import { google, type youtube_v3 } from "googleapis";
 import type { MethodOptions } from "googleapis-common";
 import ffmpeg from "fluent-ffmpeg";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
@@ -14,6 +14,8 @@ import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { ensureReelReviewPackage } from "./reel-review.service";
 import { resolveRenderedPublishDestination } from "./reel-outro.service";
+import { buildFirstCommentText } from "./post-comment.service";
+import { assertDailyPublishLimit } from "./publish-guard.service";
 import { applyOutputOptions } from "../utils";
 
 export interface YouTubePublishChannel {
@@ -451,6 +453,10 @@ export async function startYouTubeChannelConnect(input: StartYouTubeConnectInput
     scope: [
       "https://www.googleapis.com/auth/youtube.upload",
       "https://www.googleapis.com/auth/youtube.readonly",
+      // Required for the own-post first comment + assisted read/reply layer
+      // (commentThreads.insert / comments.insert). Channels connected before
+      // this scope was added must reconnect once to grant it.
+      "https://www.googleapis.com/auth/youtube.force-ssl",
     ],
     state,
   });
@@ -534,6 +540,7 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
   if (!reel) throw new Error("Reel not found");
   const destination = resolveRenderedPublishDestination(reel, "youtube", channelId);
   const channel = await resolveYouTubePublishChannel((channelId ?? destination.channelId) || reel.outroChannelId);
+  await assertDailyPublishLimit("youtube");
   recordOperationLog({
     scope: "system",
     event: "publish.destination_output_selected",
@@ -672,6 +679,38 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
     };
     await reel.save();
     console.log(`📤 Published reel ${reelId} to YouTube: ${reel.youtube.url}`);
+
+    // Own-post pinned-style first comment (curiosity prompt + series link).
+    // Best-effort: never flip a successful publish to failed. Requires the
+    // youtube.force-ssl scope — a channel connected before that scope was added
+    // will get a permission error here and simply skip.
+    if (config.youtubeAutoFirstComment && videoId) {
+      try {
+        const comment = buildFirstCommentText(reel, "youtube", 9_000);
+        const commentId = await insertYouTubeTopComment(youtube, videoId, comment.text);
+        reel.youtube = { ...reel.youtube, firstCommentStatus: "posted", firstCommentId: commentId, firstCommentError: undefined };
+        await reel.save();
+        recordOperationLog({
+          scope: "external",
+          event: "youtube.first_comment_posted",
+          message: "Posted the own-post first comment on the published Short",
+          reelId,
+          metadata: { videoId, source: comment.source, hasSeriesLink: comment.hasSeriesLink },
+        });
+      } catch (commentError: unknown) {
+        reel.youtube = { ...reel.youtube, firstCommentStatus: "failed", firstCommentError: getErrorMessage(commentError) };
+        await reel.save();
+        recordOperationLog({
+          scope: "external",
+          level: "warn",
+          event: "youtube.first_comment_failed",
+          message: "YouTube Short published, but the own-post first comment could not be posted (check the youtube.force-ssl scope)",
+          reelId,
+          metadata: { videoId },
+          error: commentError,
+        });
+      }
+    }
   } catch (error: unknown) {
     reel.youtube = {
       ...previousPublish,
@@ -683,4 +722,102 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
     await reel.save();
     throw error;
   }
+}
+
+// ============================================================
+// Own-post comment layer (own-media only).
+//
+// Posting a first comment on OUR OWN just-published Short, and reading/replying
+// to early comments on it, are safe reach boosters. They all require the
+// youtube.force-ssl scope, so channels connected before that scope was added
+// must reconnect once. This is NOT cross-account automation: every call targets
+// a video the account itself owns. There is no auto-like/subscribe/spam here.
+// ============================================================
+
+/** Build an authenticated YouTube client for a connected channel (force-ssl
+ *  scope needed for comment writes). Throws if the channel has no usable token. */
+async function youtubeClientForChannel(channelId: string): Promise<{ youtube: youtube_v3.Youtube; channelLabel: string }> {
+  const channel = await resolveYouTubePublishChannel(channelId);
+  const auth = getYouTubeOAuthClientForRefreshToken(
+    channel.refreshToken,
+    channel.clientId,
+    channel.clientSecret,
+    channel.redirectUri,
+  );
+  return { youtube: google.youtube({ version: "v3", auth, ...YOUTUBE_API_OPTIONS }), channelLabel: channel.label };
+}
+
+/** Low-level: insert a top-level comment thread on a video. Returns comment id. */
+async function insertYouTubeTopComment(youtube: youtube_v3.Youtube, videoId: string, text: string): Promise<string> {
+  const res = await youtube.commentThreads.insert({
+    part: ["snippet"],
+    requestBody: { snippet: { videoId, topLevelComment: { snippet: { textOriginal: text } } } },
+  });
+  const id = res.data.id ?? res.data.snippet?.topLevelComment?.id;
+  if (!id) throw new Error("YouTube did not return a comment id");
+  return id;
+}
+
+export interface YouTubeCommentView {
+  id: string;
+  text: string;
+  author?: string;
+  publishedAt?: string;
+  likeCount?: number;
+  replyCount: number;
+}
+
+/** Manually (re)post the own-post first comment for a published Short. */
+export async function postYouTubeFirstComment(reelId: string, channelId?: string): Promise<string> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const videoId = reel.youtube?.videoId;
+  if (!videoId || reel.youtube?.status !== "published") throw new Error("This reel has no published YouTube Short yet");
+  const { youtube } = await youtubeClientForChannel(channelId ?? reel.youtube?.channelId ?? "");
+  const comment = buildFirstCommentText(reel, "youtube", 9_000);
+  const commentId = await insertYouTubeTopComment(youtube, videoId, comment.text);
+  reel.youtube = { ...reel.youtube, firstCommentStatus: "posted", firstCommentId: commentId, firstCommentError: undefined };
+  await reel.save();
+  recordOperationLog({ scope: "external", event: "youtube.first_comment_posted", message: "Manually posted the own-post first comment", reelId, metadata: { videoId, source: comment.source } });
+  return commentId;
+}
+
+/** Read early top-level comments on our own published Short (assisted replies). */
+export async function listYouTubeComments(reelId: string, channelId?: string, limit = 25): Promise<YouTubeCommentView[]> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const videoId = reel.youtube?.videoId;
+  if (!videoId) throw new Error("This reel has no published YouTube Short yet");
+  const { youtube } = await youtubeClientForChannel(channelId ?? reel.youtube?.channelId ?? "");
+  const res = await youtube.commentThreads.list({
+    part: ["snippet"],
+    videoId,
+    maxResults: Math.min(Math.max(limit, 1), 50),
+    order: "time",
+  });
+  return (res.data.items ?? []).map((item) => {
+    const snippet = item.snippet?.topLevelComment?.snippet;
+    return {
+      id: item.snippet?.topLevelComment?.id ?? item.id ?? "",
+      text: snippet?.textDisplay ?? "",
+      author: snippet?.authorDisplayName ?? undefined,
+      publishedAt: snippet?.publishedAt ?? undefined,
+      likeCount: snippet?.likeCount ?? undefined,
+      replyCount: item.snippet?.totalReplyCount ?? 0,
+    };
+  });
+}
+
+/** Reply to a comment on our own published Short. Own-media only. */
+export async function replyToYouTubeComment(channelId: string, parentCommentId: string, text: string): Promise<string> {
+  if (!text.trim()) throw new Error("Reply text is required");
+  const { youtube } = await youtubeClientForChannel(channelId);
+  const res = await youtube.comments.insert({
+    part: ["snippet"],
+    requestBody: { snippet: { parentId: parentCommentId, textOriginal: text.trim() } },
+  });
+  const id = res.data.id;
+  if (!id) throw new Error("YouTube did not return a reply id");
+  recordOperationLog({ scope: "external", event: "youtube.comment_replied", message: "Replied to a comment on an own YouTube Short", metadata: { channelId, parentCommentId } });
+  return id;
 }

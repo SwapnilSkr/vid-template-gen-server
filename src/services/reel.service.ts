@@ -90,7 +90,7 @@ interface CreateReelOptions {
   outroInstagramChannelId?: string;
   outro?: IReel["outro"];
   /** Multi-channel targets — one video per destination, each with its own outro. */
-  destinations?: { platform: "youtube" | "instagram"; channelId: string; outro?: IReel["outro"] }[];
+  destinations?: { platform: "youtube" | "instagram" | "facebook" | "threads"; channelId: string; outro?: IReel["outro"] }[];
   thumbnailMode?: IReel["thumbnailMode"];
   imageModel?: string;
   artStyleId?: string;
@@ -891,14 +891,15 @@ export async function processReelPlan(reelId: string): Promise<void> {
  *  after edits (surgical regen = clear the changed scene's asset first). */
 export async function processReelProduce(
   reelId: string,
-  produceMode: "full" | "outro_only" | "composite_only" = "full"
+  produceMode: "full" | "outro_only" | "composite_only" = "full",
+  outroRetry?: { scope: "all" | "primary" | "destination"; destinationId?: string },
 ): Promise<void> {
   const reel = await Reel.findById(reelId);
   if (!reel) throw new Error("Reel not found");
   const recipe = getRecipe(reel.niche);
 
   if (produceMode === "outro_only") {
-    await processOutroOnlyReel(reel, recipe);
+    await processOutroOnlyReel(reel, recipe, outroRetry);
     return;
   }
 
@@ -959,6 +960,9 @@ async function renderReelDestinations(
     /** In an outro-only job, keep ready destination outputs untouched. This
      * makes a primary prompt edit or newly added channel truly surgical. */
     onlyPendingDestinations?: boolean;
+    /** Force selected ready outros through the visual render again. Cached
+     * narration remains eligible for reuse inside appendBrandedOutro. */
+    retryTargets?: { scope: "all" | "primary" | "destination"; destinationId?: string };
     onOutroUsage?: (usage: MediaUsageCost) => void;
   }
 ): Promise<{
@@ -967,13 +971,18 @@ async function renderReelDestinations(
 }> {
   const reelId = reel._id.toString();
   const extras = reel.destinations ?? [];
+  const retryAll = opts.retryTargets?.scope === "all";
+  const retryPrimary = retryAll || opts.retryTargets?.scope === "primary";
+  const retryDestinationId = opts.retryTargets?.scope === "destination"
+    ? opts.retryTargets.destinationId
+    : undefined;
   const pendingExtras = opts.onlyPendingDestinations
-    ? extras.filter((dest) => dest.status !== "ready" || !dest.outputUrl)
+    ? extras.filter((dest) => retryAll || retryDestinationId === dest.id || dest.status !== "ready" || !dest.outputUrl)
     : extras;
   const targets: { dest: IReelDestination | undefined; isPrimary: boolean }[] = [
     // The primary uses the legacy reel.outro* fields. In a surgical pass it is
     // included only if its canonical output was invalidated.
-    ...(!opts.onlyPendingDestinations || !reel.outputUrl
+    ...(!opts.onlyPendingDestinations || !reel.outputUrl || retryPrimary
       ? [{ dest: undefined, isPrimary: true }]
       : []),
     ...pendingExtras.map((dest) => ({ dest, isPrimary: false })),
@@ -1224,7 +1233,11 @@ async function processImageCompositeOnly(reel: IReel, recipe: NicheRecipe): Prom
 }
 
 /** Outro-only produce: concat a new branded outro onto the cached body video. */
-async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<void> {
+async function processOutroOnlyReel(
+  reel: IReel,
+  recipe: NicheRecipe,
+  outroRetry?: { scope: "all" | "primary" | "destination"; destinationId?: string },
+): Promise<void> {
   const reelId = reel._id.toString();
   if (!reel.bodyVideoUrl) {
     console.warn(
@@ -1286,6 +1299,7 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
       backgroundVideo: gameplayPath,
       localFiles,
       onlyPendingDestinations: true,
+      retryTargets: outroRetry,
       onOutroUsage: (usage) => {
         measuredCosts.push({
           label: "Outro narration",
@@ -1297,7 +1311,10 @@ async function processOutroOnlyReel(reel: IReel, recipe: NicheRecipe): Promise<v
     });
 
     let assPath: string | undefined;
-    if (primaryOutro?.subtitle && reel.subtitlesUrl) {
+    // A retry redraws the card over the same narration. Its existing subtitle
+    // track already contains that outro cue, so appending again would create a
+    // duplicate caption at the end of the video.
+    if (primaryOutro?.subtitle && reel.subtitlesUrl && !outroRetry) {
       // Best-effort: rebuild captions file only when we already have one.
       try {
         const existing = await fetch(reel.subtitlesUrl);
@@ -2032,8 +2049,9 @@ async function processGameplayReel(
       const need = 1 + bodySentences.length + (partOutroText ? 1 : 0);
       const have = cachedSegmentPaths.filter(Boolean).length;
       if (have < need) {
-        console.warn(
-          `⚠️ Composite-only: narration cache incomplete (${have}/${need}) — regenerating missing segments`
+        throw new Error(
+          `Composite-only re-render requires every cached narration segment (${have}/${need} available). ` +
+          "No TTS was started; choose a standard re-render if you want to regenerate the missing narration."
         );
       }
     }
