@@ -21,3 +21,14 @@ export const FacebookCallbackQuery = t.Object({
   error_description: t.Optional(t.String()),
 });
 export type TFacebookCallbackQuery = typeof FacebookCallbackQuery.static;
+
+/** Meta posts this form field to both Facebook Login lifecycle callbacks. */
+export const FacebookSignedRequestBody = t.Object({
+  signed_request: t.String({ minLength: 20 }),
+});
+export type TFacebookSignedRequestBody = typeof FacebookSignedRequestBody.static;
+
+export const FacebookDeletionStatusParams = t.Object({
+  confirmationCode: t.String({ minLength: 1, maxLength: 128 }),
+});
+export type TFacebookDeletionStatusParams = typeof FacebookDeletionStatusParams.static;

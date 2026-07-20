@@ -21,6 +21,7 @@ import {
   facebookRoutes,
   threadsRoutes,
   operationLogRoutes,
+  ownedAnalyticsRoutes,
 } from "./routes";
 import { initializeStorage } from "./utils";
 import { ensureYtImportsStorage } from "./services/yt-import.service";
@@ -229,6 +230,7 @@ const app = new Elysia({
   .use(ytImportRoutes)
   .use(storyRoutes)
   .use(operationLogRoutes)
+  .use(ownedAnalyticsRoutes)
   .use(maintenanceRoutes);
 
 // Start server

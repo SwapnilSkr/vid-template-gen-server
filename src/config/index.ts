@@ -125,7 +125,7 @@ export const config = {
   // often finish quickly, but busy periods and slower S3 fetches can take
   // several minutes. Keep this below the publishing worker's one-hour lock.
   instagramProcessingTimeoutMs: parseInt(
-    process.env.INSTAGRAM_PROCESSING_TIMEOUT_MS || String(10 * 60 * 1000)
+    process.env.INSTAGRAM_PROCESSING_TIMEOUT_MS || String(20 * 60 * 1000)
   ),
 
   // ============================================================
@@ -151,14 +151,20 @@ export const config = {
   facebookDailyLimit: parseInt(process.env.FACEBOOK_DAILY_LIMIT || "30"),
   threadsDailyLimit: parseInt(process.env.THREADS_DAILY_LIMIT || "250"),
 
-  // ---- Facebook Reels (Page publishing). Works under Meta Standard Access
-  // for Pages the user administers — NO App Review. Reuses the Instagram Meta
-  // app credentials by default; override if the Page lives on a different app.
-  // Requires scopes: pages_show_list, pages_read_engagement, pages_manage_posts
-  // (+ pages_manage_engagement for own-post first comments). ----
+  // ---- Facebook Reels (Page publishing). Facebook Login for Business uses
+  // the parent Meta App ID/secret of the app that owns its Configuration ID.
+  // Do not fall back to Instagram Login credentials: Meta can issue separate
+  // Instagram client IDs that Facebook's OAuth dialog rejects as an app ID.
+  // Requires scopes: pages_show_list, pages_read_engagement, pages_manage_posts,
+  // business_management (for Business Portfolio-owned Pages), plus
+  // pages_manage_engagement for own-post first comments. ----
   facebookReelsEnabled: process.env.FACEBOOK_REELS_ENABLED === "true",
-  facebookAppId: process.env.FACEBOOK_APP_ID || process.env.INSTAGRAM_APP_ID || "",
-  facebookAppSecret: process.env.FACEBOOK_APP_SECRET || process.env.INSTAGRAM_APP_SECRET || "",
+  facebookAppId: process.env.FACEBOOK_APP_ID || "",
+  facebookAppSecret: process.env.FACEBOOK_APP_SECRET || "",
+  // Facebook Login for Business creates a configuration under the app. Its
+  // Configuration ID is required in the Business Login OAuth dialog; it is
+  // distinct from the app's App ID and App Secret.
+  facebookLoginConfigId: process.env.FACEBOOK_LOGIN_CONFIG_ID || "",
   facebookRedirectUri:
     process.env.FACEBOOK_REDIRECT_URI || "http://localhost:3000/api/facebook/connect/callback",
   facebookApiVersion: process.env.FACEBOOK_API_VERSION || "v21.0",
@@ -178,7 +184,7 @@ export const config = {
   // Threads processes the pulled video async like IG; a short fixed wait before
   // publish is the documented pattern, then we poll the container status.
   threadsProcessingTimeoutMs: parseInt(
-    process.env.THREADS_PROCESSING_TIMEOUT_MS || String(5 * 60 * 1000)
+    process.env.THREADS_PROCESSING_TIMEOUT_MS || String(15 * 60 * 1000)
   ),
 
   // YouTube Data API v3 *read* access (search/videos.list) for the trend

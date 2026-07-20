@@ -4,6 +4,7 @@ import { InstagramChannel, OAuthState, Reel, type IReel } from "../models";
 import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { resolveRenderedPublishDestination } from "./reel-outro.service";
+import { publicMediaUrl } from "./s3.service";
 import { buildFirstCommentText } from "./post-comment.service";
 import { assertDailyPublishLimit } from "./publish-guard.service";
 
@@ -14,6 +15,7 @@ const scopes = [
   "instagram_business_basic",
   "instagram_business_content_publish",
   "instagram_business_manage_comments",
+  "instagram_business_manage_insights",
 ];
 const INSTAGRAM_CAPTION_MAX_HASHTAGS = 5;
 
@@ -133,6 +135,48 @@ async function accessTokenFor(channel: InstanceType<typeof InstagramChannel>): P
   }
   return token;
 }
+
+function insightNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value === "object" && "value" in value) return insightNumber((value as { value?: unknown }).value);
+  return undefined;
+}
+
+/** First-party only. Unsupported insight fields are reported as missing, not 0. */
+export async function fetchOwnedInstagramMediaMetrics(channelId: string, mediaId: string): Promise<{
+  accountLabel: string;
+  platformAccountId: string;
+  metrics: Record<string, number>;
+  available: string[];
+  limitations: string[];
+  provider: Record<string, unknown>;
+}> {
+  const channel = await resolveInstagramChannel(channelId);
+  const token = await accessTokenFor(channel);
+  const metricNames = [
+    // `follows` is account-level only. Meta rejects the *entire* per-Reel
+    // insights request when it is included, so it must not be requested here.
+    "views", "reach", "likes", "comments", "shares", "saved", "total_interactions",
+    "ig_reels_video_view_total_time", "ig_reels_avg_watch_time", "reels_skip_rate",
+  ];
+  const response = await graph<{ data?: { name?: string; value?: unknown; values?: { value?: unknown }[] }[] }>(
+    `/${mediaId}/insights?metric=${metricNames.join(",")}`,
+    token,
+  );
+  const metrics: Record<string, number> = {};
+  for (const item of response.data ?? []) {
+    const value = insightNumber(item.value ?? item.values?.[0]?.value);
+    if (item.name && value !== undefined) metrics[item.name] = value;
+  }
+  return {
+    accountLabel: channel.label,
+    platformAccountId: channel.instagramUserId,
+    metrics,
+    available: Object.keys(metrics),
+    limitations: metricNames.filter((name) => metrics[name] === undefined).map((name) => `Instagram did not return ${name} for this Reel.`),
+    provider: { returnedMetrics: response.data ?? [] },
+  };
+}
 export async function publishReelToInstagram(reelId: string, channelId?: string): Promise<void> {
   const reel = await Reel.findById(reelId); if (!reel) throw new Error("Reel not found");
   const destination = resolveRenderedPublishDestination(reel, "instagram", channelId);
@@ -178,7 +222,15 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
       },
     });
     const token = await accessTokenFor(channel);
-    let containerId = priorPublish?.containerId;
+    // Only resume an in-flight container from a live worker (pending/uploading).
+    // Failed/timed-out containers are frequently stuck IN_PROGRESS on Meta's side;
+    // creating a new one is safer than polling a dead creation_id.
+    const resumable =
+      priorPublish?.containerId &&
+      (priorPublish.status === "pending" || priorPublish.status === "uploading")
+        ? priorPublish.containerId
+        : undefined;
+    let containerId = resumable;
     if (containerId) {
       await setStatus("uploading", { message: "Resuming Instagram media processing…", containerId });
     } else {
@@ -186,19 +238,20 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
       // The current Vertical Cover is an overlay asset, not guaranteed to be a
       // flattened 9:16 image. Sending it as Meta's native cover can produce a
       // text-only cover, so let Instagram choose from the final MP4 for now.
+      const videoUrl = publicMediaUrl(destination.outputUrl);
       const create = await graph<{ id: string }>(`/${channel.instagramUserId}/media`, token, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
           media_type: "REELS",
-          video_url: destination.outputUrl,
+          video_url: videoUrl,
           caption,
           share_to_feed: String(reel.instagramSettings?.shareToFeed ?? true),
         }),
       });
       containerId = create.id;
-      // Persist this before polling. A worker restart or timeout can now
-      // continue the accepted container without creating a duplicate post.
+      // Persist this before polling. A worker restart mid-flight can continue
+      // the accepted container without creating a duplicate post.
       await setStatus("uploading", { message: "Instagram accepted the Reel — processing…", containerId });
     }
     let ready = false;
@@ -241,7 +294,14 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
         error,
       });
     }
-    await setStatus("published", { containerId, mediaId: published.id, url: permalink, error: undefined, message: permalink ? "Published." : "Published — Instagram permalink is still becoming available.", publishedAt: new Date() }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
+    const publishedAt = new Date();
+    await setStatus("published", { containerId, mediaId: published.id, url: permalink, error: undefined, message: permalink ? "Published." : "Published — Instagram permalink is still becoming available.", publishedAt }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
+    void import("./owned-analytics.service")
+      .then(({ registerOwnedPublication }) => registerOwnedPublication(reel, {
+        platform: "instagram", accountKey: channel.channelKey, accountLabel: channel.label,
+        mediaId: published.id, url: permalink, publishedAt, firstCommentKind: "none",
+      }))
+      .catch((error) => console.warn(`Could not freeze Instagram publication analytics context: ${getErrorMessage(error)}`));
     // Own-post first comment (curiosity prompt + series link). Best-effort:
     // a failed comment must never flip a successful publish to "failed".
     if (config.instagramAutoFirstComment) {
@@ -268,6 +328,9 @@ export async function publishReelToInstagram(reelId: string, channelId?: string)
           error: commentError,
         });
       }
+      void import("./series-navigation-comment.service")
+        .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "instagram", channel.channelKey))
+        .catch((error) => console.warn(`Could not reconcile Instagram series-navigation comments: ${getErrorMessage(error)}`));
     }
   } catch (error) { const message = getErrorMessage(error); await setStatus("failed", { error: message, message: `Failed: ${message}` }); await InstagramChannel.updateOne({ _id: channel._id }, { $set: { lastError: message, status: /token|access/i.test(message) ? "needs_reauth" : channel.status } }); throw error; }
 }
@@ -291,6 +354,12 @@ async function createInstagramComment(mediaId: string, message: string, token: s
     body: new URLSearchParams({ message }),
   });
   return res.id;
+}
+
+/** A separate navigation comment, never combined with the discussion prompt. */
+export async function postInstagramSeriesNavigationComment(channelId: string, mediaId: string, text: string): Promise<string> {
+  const channel = await resolveInstagramChannel(channelId);
+  return createInstagramComment(mediaId, text, await accessTokenFor(channel));
 }
 
 export interface InstagramCommentView {
@@ -318,6 +387,9 @@ export async function postInstagramFirstComment(reelId: string, channelId: strin
     { $set: { "instagram.$.firstCommentStatus": "posted", "instagram.$.firstCommentId": commentId, "instagram.$.firstCommentError": undefined } },
   );
   recordOperationLog({ scope: "external", event: "instagram.first_comment_posted", message: "Manually posted the own-post first comment", reelId, metadata: { channelId, mediaId: publish.mediaId, source: comment.source } });
+  void import("./series-navigation-comment.service")
+    .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "instagram", channelId))
+    .catch((error) => console.warn(`Could not reconcile Instagram series-navigation comments: ${getErrorMessage(error)}`));
   return commentId;
 }
 

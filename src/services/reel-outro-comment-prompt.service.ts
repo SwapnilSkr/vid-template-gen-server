@@ -9,6 +9,7 @@ import { deleteS3Urls } from "./s3.service";
 import { reportLlmUsage, type LlmUsageCallback } from "./reel-script.service";
 import { invalidateFinalDestinationRenders } from "./reel-outro.service";
 import { recordOperationLog } from "./operation-log.service";
+import { platformCopyRules } from "./platform-copy-rules.service";
 
 const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
 
@@ -99,7 +100,11 @@ Rules:
 - 7–18 natural words, 120 characters maximum, and exactly one provocative question.
 - Make the question specific to the decision, relationship, accusation, reveal, or consequence in this part. It must make viewers want to choose a side or explain what they would do.
 - Never use generic phrasing such as "Who was in the wrong?", "Drop your take", "What do you think?", or "Comment below".
-- Do not repeat four consecutive words from the source title, give a CTA, mention a part number, add hashtags/emojis, invent facts, or spoil future updates.`,
+- Do not repeat four consecutive words from the source title, give a CTA, mention a part number, add hashtags/emojis, invent facts, or spoil future updates.
+
+${platformCopyRules("youtube")}
+
+Use the story material and the platform defaults only. This one global outro question may be used on more than one platform, so do not import YouTube research or another platform's analytics into it.`,
     });
     reportLlmUsage(onLlmUsage, "Outro comment prompt", model, usage);
     const prompt = extractPrompt(text);

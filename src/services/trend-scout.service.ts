@@ -3,6 +3,7 @@ import { TrendReference, type TrendScanWindow } from "../models";
 import { REDDIT_GENRES } from "./story.service";
 import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
+import { TREND_RESEARCH_VERSION } from "./trend-research.constants";
 
 // ============================================
 // Trend scout — pulls top-performing YouTube Shorts per niche/genre via the
@@ -102,6 +103,24 @@ interface YouTubeVideoItem {
   contentDetails?: { duration?: string };
 }
 
+const MAX_SAMPLES_PER_GENRE = 25;
+const CAPTURE_DEDUP_MS = 30 * 60 * 1_000;
+
+function ageHours(postedAt: Date | undefined, now: Date): number {
+  return postedAt ? Math.max(1, (now.getTime() - postedAt.getTime()) / 3_600_000) : 24 * 30;
+}
+
+/** Public-data ranking only. It deliberately avoids claims about retention or
+ * recommendation impressions, which YouTube does not expose for competitors. */
+function publicResearchScore(item: YouTubeVideoItem, postedAt: Date | undefined, now: Date): number {
+  const views = Number(item.statistics?.viewCount) || 0;
+  const likes = Number(item.statistics?.likeCount) || 0;
+  const comments = Number(item.statistics?.commentCount) || 0;
+  const velocity = views / Math.max(12, ageHours(postedAt, now));
+  const engagement = (likes + comments * 3) / Math.max(1, views);
+  return velocity * (1 + Math.min(engagement, 0.25) * 4);
+}
+
 /** Parse an ISO 8601 duration (e.g. "PT1M5S") into whole seconds. */
 function parseIsoDuration(iso: string): number {
   const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
@@ -125,7 +144,7 @@ export async function scoutTarget(target: ScoutTarget, opts: ScoutOptions): Prom
     type: "video",
     videoDuration: "short",
     order: "viewCount",
-    maxResults: String(opts.maxResults ?? 15),
+    maxResults: String(Math.min(opts.maxResults ?? MAX_SAMPLES_PER_GENRE, 50)),
     q: target.query,
     publishedAfter: opts.publishedAfter.toISOString(),
     key: config.youtubeDataApiKey,
@@ -159,22 +178,39 @@ export async function scoutTarget(target: ScoutTarget, opts: ScoutOptions): Prom
   }
   const videosJson = (await videosRes.json()) as { items?: YouTubeVideoItem[] };
 
-  let upserted = 0;
-  for (const item of videosJson.items ?? []) {
-    const durationSec = parseIsoDuration(item.contentDetails?.duration ?? "");
-    if (durationSec > SHORTS_MAX_DURATION_SEC) continue; // search's filter is coarse — re-verify true Short
+  const now = new Date();
+  const ranked = (videosJson.items ?? [])
+    .map((item) => ({ item, postedAt: item.snippet?.publishedAt ? new Date(item.snippet.publishedAt) : undefined }))
+    .filter(({ item }) => parseIsoDuration(item.contentDetails?.duration ?? "") <= SHORTS_MAX_DURATION_SEC)
+    .sort((a, b) => publicResearchScore(b.item, b.postedAt, now) - publicResearchScore(a.item, a.postedAt, now))
+    .slice(0, opts.maxResults ?? MAX_SAMPLES_PER_GENRE);
 
-    const postedAt = item.snippet?.publishedAt ? new Date(item.snippet.publishedAt) : undefined;
+  let upserted = 0;
+  for (const { item, postedAt } of ranked) {
+    const durationSec = parseIsoDuration(item.contentDetails?.duration ?? "");
     const thumb =
       item.snippet?.thumbnails?.high?.url ??
       item.snippet?.thumbnails?.medium?.url ??
       item.snippet?.thumbnails?.default?.url;
 
+    const capture = {
+      views: Number(item.statistics?.viewCount) || undefined,
+      likes: Number(item.statistics?.likeCount) || undefined,
+      comments: Number(item.statistics?.commentCount) || undefined,
+      durationSec,
+      postedAt,
+      capturedAt: now,
+    };
+    const existing = await TrendReference.findOne({ externalId: item.id });
+    const latestCapture = existing?.metricHistory?.[existing.metricHistory.length - 1];
+    const shouldAppendCapture = !latestCapture || now.getTime() - new Date(latestCapture.capturedAt).getTime() >= CAPTURE_DEDUP_MS;
     await TrendReference.findOneAndUpdate(
       { externalId: item.id },
       {
+        $set: {
         niche: target.niche,
-        genre: target.genre,
+        researchVersion: TREND_RESEARCH_VERSION,
+        genre: existing?.genre ?? target.genre,
         sourceUrl: `https://youtube.com/shorts/${item.id}`,
         platform: "youtube_shorts",
         externalId: item.id,
@@ -186,21 +222,17 @@ export async function scoutTarget(target: ScoutTarget, opts: ScoutOptions): Prom
         dayOfWeek: postedAt?.getUTCDay(),
         hourUtc: postedAt?.getUTCHours(),
         scanWindow: opts.scanWindow,
-        metrics: {
-          views: Number(item.statistics?.viewCount) || undefined,
-          likes: Number(item.statistics?.likeCount) || undefined,
-          comments: Number(item.statistics?.commentCount) || undefined,
-          durationSec,
-          postedAt,
-          capturedAt: new Date(),
+        metrics: capture,
         },
+        $addToSet: { genreIds: target.genre },
+        ...(shouldAppendCapture ? { $push: { metricHistory: capture } } : {}),
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
     upserted++;
   }
 
-  return { niche: target.niche, genre: target.genre, found: videoIds.length, upserted };
+  return { niche: target.niche, genre: target.genre, found: ranked.length, upserted };
 }
 
 /** Scout every target in sequence (gentle pacing to avoid bursty quota errors).
@@ -277,10 +309,11 @@ export async function getTrendSummary(
   const out: TrendGenreSummary[] = [];
 
   for (const target of getScoutTargets(niche)) {
-    const totalSamples = await TrendReference.countDocuments({ niche, genre: target.genre });
+    const genreMatch = { niche, researchVersion: TREND_RESEARCH_VERSION, $or: [{ genreIds: target.genre }, { genre: target.genre }] };
+    const totalSamples = await TrendReference.countDocuments(genreMatch);
     if (!totalSamples) continue;
 
-    const refs = await TrendReference.find({ niche, genre: target.genre, scanWindow: { $in: scanWindow } })
+    const refs = await TrendReference.find({ ...genreMatch, scanWindow: { $in: scanWindow } })
       .sort({ "metrics.views": -1 })
       .limit(50);
     // Period filter may lag behind the latest scout tag (e.g. backfill used
@@ -288,7 +321,7 @@ export async function getTrendSummary(
     // genre card using totalSamples, and fall back to all refs for the leaderboard.
     const leaderboardRefs = refs.length
       ? refs
-      : await TrendReference.find({ niche, genre: target.genre })
+      : await TrendReference.find(genreMatch)
           .sort({ "metrics.views": -1 })
           .limit(50);
 

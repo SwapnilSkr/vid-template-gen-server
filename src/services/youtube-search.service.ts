@@ -13,6 +13,11 @@ export interface YoutubeSearchResult {
   viewCount?: number;
 }
 
+export interface YoutubeSearchPage {
+  items: YoutubeSearchResult[];
+  nextPageToken?: string;
+}
+
 function parseIsoDuration(iso?: string): number | undefined {
   if (!iso) return undefined;
   const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
@@ -25,8 +30,9 @@ function parseIsoDuration(iso?: string): number | undefined {
 
 export async function searchYoutubeVideos(
   query: string,
-  maxResults = 12
-): Promise<YoutubeSearchResult[]> {
+  maxResults = 12,
+  pageToken?: string,
+): Promise<YoutubeSearchPage> {
   if (!config.youtubeDataApiKey) {
     throw new Error("YOUTUBE_DATA_API_KEY is not configured");
   }
@@ -39,6 +45,7 @@ export async function searchYoutubeVideos(
     q: query,
     key: config.youtubeDataApiKey,
   });
+  if (pageToken) searchParams.set("pageToken", pageToken);
 
   const searchRes = await fetch(`${YT_API_BASE}/search?${searchParams}`);
   if (!searchRes.ok) {
@@ -56,11 +63,12 @@ export async function searchYoutubeVideos(
         thumbnails?: { medium?: { url?: string }; high?: { url?: string } };
       };
     }[];
+    nextPageToken?: string;
   };
 
   const items = (searchJson.items ?? []).filter((item) => item.id?.videoId);
   const videoIds = items.map((item) => item.id!.videoId as string);
-  if (videoIds.length === 0) return [];
+  if (videoIds.length === 0) return { items: [], nextPageToken: searchJson.nextPageToken };
 
   const videoParams = new URLSearchParams({
     part: "contentDetails,statistics",
@@ -83,7 +91,8 @@ export async function searchYoutubeVideos(
     (videoJson.items ?? []).map((item) => [item.id, item] as const)
   );
 
-  return items.map((item) => {
+  return {
+    items: items.map((item) => {
     const videoId = item.id!.videoId as string;
     const details = detailsById.get(videoId);
     return {
@@ -99,7 +108,9 @@ export async function searchYoutubeVideos(
         ? parseInt(details.statistics.viewCount, 10)
         : undefined,
     };
-  });
+    }),
+    nextPageToken: searchJson.nextPageToken,
+  };
 }
 
 export async function getYoutubeVideoMetadata(videoId: string): Promise<YoutubeSearchResult> {

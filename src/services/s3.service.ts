@@ -2,6 +2,7 @@ import {
   S3Client,
   GetObjectCommand,
   DeleteObjectCommand,
+  CopyObjectCommand,
   ListObjectsV2Command,
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
@@ -61,8 +62,8 @@ export async function listKeys(prefix: string): Promise<string[]> {
  * might belong to a render that's still in flight). */
 export async function listKeysWithMeta(
   prefix: string
-): Promise<{ key: string; lastModified?: Date }[]> {
-  const out: { key: string; lastModified?: Date }[] = [];
+): Promise<{ key: string; lastModified?: Date; sizeBytes?: number }[]> {
+  const out: { key: string; lastModified?: Date; sizeBytes?: number }[] = [];
   let token: string | undefined;
   do {
     const res = await s3Client.send(
@@ -73,7 +74,7 @@ export async function listKeysWithMeta(
       })
     );
     for (const o of res.Contents ?? []) {
-      if (o.Key) out.push({ key: o.Key, lastModified: o.LastModified });
+      if (o.Key) out.push({ key: o.Key, lastModified: o.LastModified, sizeBytes: o.Size });
     }
     token = res.IsTruncated ? res.NextContinuationToken : undefined;
   } while (token);
@@ -259,6 +260,17 @@ export async function deleteKey(key: string): Promise<void> {
   console.log(`🗑️  Deleted from S3: ${key}`);
 }
 
+/** Copy an object inside this bucket. Used for a safe S3-backed rename: the
+ * source is only deleted after the destination copy succeeds. */
+export async function copyKey(sourceKey: string, targetKey: string): Promise<void> {
+  await s3Client.send(new CopyObjectCommand({
+    Bucket: config.s3Bucket,
+    Key: targetKey,
+    CopySource: `${config.s3Bucket}/${encodeURIComponent(sourceKey).replace(/%2F/g, "/")}`,
+  }));
+  console.log(`☁️  Copied in S3: ${sourceKey} → ${targetKey}`);
+}
+
 /**
  * Delete a file from S3 given its full URL (CDN or direct S3).
  */
@@ -322,4 +334,16 @@ export function getS3KeyFromUrl(url: string): string | null {
     return url.slice(config.cdnUrl.length).replace(/^\/+/, "");
   }
   return null;
+}
+
+/**
+ * Prefer CloudFront for third-party fetchers (Instagram/Threads/Facebook).
+ * Direct regional S3 URLs are public, but Meta's downloaders are more reliable
+ * against a CDN edge than a single ap-south-1 origin.
+ */
+export function publicMediaUrl(url: string): string {
+  if (!config.cdnUrl) return url;
+  if (url.startsWith(config.cdnUrl)) return url;
+  const key = getS3KeyFromUrl(url);
+  return key ? cdnUrlFor(key) : url;
 }

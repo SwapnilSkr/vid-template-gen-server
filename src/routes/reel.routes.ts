@@ -38,6 +38,7 @@ import {
   RegenerateOutroCommentPromptBody,
   DraftAssetParams,
   SaveShortsCoverBody,
+  TrimFinalVideoBody,
 } from "../types/guards";
 import {
   createReelController,
@@ -45,6 +46,7 @@ import {
   listReelSeriesController,
   getReelStatusController,
   downloadReelController,
+  trimFinishedReelVideoController,
   deleteReelController,
   deleteSeriesPartController,
   publishReelController,
@@ -55,6 +57,7 @@ import {
   regenerateReelReviewCopyController,
   regenerateInstagramCaptionController,
   regenerateInstagramPollSuggestionController,
+  regenerateCrossPostCopyController,
   regenerateThumbnailTextController,
   regenerateOutroCommentPromptController,
   revoiceReelController,
@@ -148,6 +151,11 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
     params: IdParams,
   })
 
+  .post("/:id/final-video/trim", trimFinishedReelVideoController, {
+    params: IdParams,
+    body: TrimFinalVideoBody,
+  })
+
   // Review package for title, description, tags, thumbnail, and visibility notes
   .get("/:id/review", getReelReviewController, {
     params: IdParams,
@@ -172,6 +180,14 @@ export const reelRoutes = new Elysia({ prefix: "/api/reels" })
   })
 
   .post("/:id/instagram-poll", regenerateInstagramPollSuggestionController, {
+    params: IdParams,
+  })
+
+  .post("/:id/facebook-copy", regenerateCrossPostCopyController, {
+    params: IdParams,
+  })
+
+  .post("/:id/threads-copy", regenerateCrossPostCopyController, {
     params: IdParams,
   })
 

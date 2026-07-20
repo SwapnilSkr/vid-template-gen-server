@@ -31,6 +31,7 @@ import {
   cleanupReelLocalStaging,
 } from "./reel.service";
 import { assertFfmpegReady } from "./ffmpeg-capability.service";
+import { snapshotCreatorShortsCover, refreshAutomaticOpeningCoverIfStale } from "./reel-shorts-cover.service";
 import { deleteS3Urls } from "./s3.service";
 import {
   generateStorySeries,
@@ -347,6 +348,8 @@ export async function moveSeriesBoundary(
 
   await saveMovedPart(part);
   await saveMovedPart(next);
+  // Boundary edits change episode structure — require a fresh Keep/Use-AI choice.
+  await clearSeriesStructureDecision(sortSeriesReels(await listReelsBySeries(part.seriesId!)));
   return loadReel(partId);
 }
 
@@ -369,9 +372,14 @@ export async function mergePartIntoPrevious(partId: string): Promise<IReel> {
   await saveMovedPart(prev);
 
   const prevId = prev._id.toString();
+  const seriesId = part.seriesId;
   // Removes the now-absorbed part and renumbers the remaining parts (collapses
   // to a standalone reel when only the merged part is left).
   await deleteSeriesPart(partId);
+  if (seriesId) {
+    const remaining = await listReelsBySeries(seriesId);
+    if (remaining.length) await clearSeriesStructureDecision(sortSeriesReels(remaining));
+  }
   return loadReel(prevId);
 }
 
@@ -423,6 +431,10 @@ export async function updateRedditCard(
     story.comments = Number.isFinite(patch.comments) ? Math.max(0, Math.round(patch.comments)) : undefined;
   }
   reel.markModified("redditStory");
+  if (titleChanged) {
+    // Auto covers follow the spoken title; creator-owned covers stay untouched.
+    await refreshAutomaticOpeningCoverIfStale(reel);
+  }
   await reel.save();
   // Card is burned into the body video; title audio only invalidates when spoken.
   // Gameplay has no assemblyVideoUrl — clearing body is enough for composite rebuild.
@@ -648,7 +660,12 @@ export async function updateReelSettings(
   if (patch.imageModel !== undefined) reel.imageModelOverride = patch.imageModel;
   if (patch.horrorAudioKey !== undefined) reel.horrorAudioKey = patch.horrorAudioKey;
   if (patch.horrorReferenceId !== undefined) reel.horrorReferenceId = patch.horrorReferenceId;
-  if (patch.gameplayKey !== undefined) reel.gameplayKey = patch.gameplayKey || undefined;
+  if (patch.gameplayKey !== undefined) {
+    reel.gameplayKey = patch.gameplayKey || undefined;
+    // A deleted background cannot silently fall back to a random clip. Only a
+    // deliberate selection clears the replacement-required state.
+    if (patch.gameplayKey) reel.gameplayAssetMissing = false;
+  }
   const prevOutroChannel = reel.outroChannelId;
   const prevOutroInstagramChannel = reel.outroInstagramChannelId;
   const prevCommentPrompt = reel.outro?.commentPrompt;
@@ -1320,7 +1337,9 @@ export async function approvePlan(reelId: string): Promise<IReel> {
 
 /** Wipe scenes/plan state before attaching a new story. Returns stale S3 URLs. */
 async function resetReelForReplan(reel: IReel): Promise<string[]> {
-  const staleMedia = collectReelS3AssetUrls(reel);
+  const preservedCover = snapshotCreatorShortsCover(reel);
+  const preservedCoverUrl = preservedCover?.imageUrl;
+  const staleMedia = collectReelS3AssetUrls(reel).filter((url) => url !== preservedCoverUrl);
   await cleanupReelLocalStaging(reel);
 
   reel.scenes = [];
@@ -1342,12 +1361,20 @@ async function resetReelForReplan(reel: IReel): Promise<string[]> {
   reel.markModified("editDraft");
   reel.thumbnailDraft = undefined;
   reel.markModified("thumbnailDraft");
-  if (reel.review?.thumbnailUrl) {
-    reel.review.thumbnailUrl = undefined;
+  // Drop the whole review package so produce rebuilds title/thumbnail together.
+  // Partial clears left a title without a thumbnail after restructure.
+  if (reel.review) {
+    reel.review = undefined;
     reel.markModified("review");
   }
-  if (reel.shortsCover?.imageUrl) {
-    reel.shortsCover.imageUrl = undefined;
+  // Keep Thumbnail Studio covers across Keep/Use-AI restructure. Only drop
+  // automatic covers (they regenerate after the new plan). Never restore a
+  // cover snapshot that lost its imageUrl — that previously deleted S3 media.
+  if (preservedCover?.imageUrl) {
+    reel.shortsCover = preservedCover;
+    reel.markModified("shortsCover");
+  } else {
+    reel.shortsCover = undefined;
     reel.markModified("shortsCover");
   }
   if (reel.strategy === "gameplay_overlay") {
@@ -1403,10 +1430,26 @@ function cloneSeriesReelFromAnchor(anchor: IReel, part: { partNumber?: number; p
     gameplayKey: anchor.gameplayKey,
     horrorAudioKey: anchor.horrorAudioKey,
     outroChannelId: anchor.outroChannelId,
-    outro: anchor.outro,
+    outroInstagramChannelId: anchor.outroInstagramChannelId,
+    outro: anchor.outro ? { ...anchor.outro } : undefined,
+    destinations: anchor.destinations?.map((destination) => ({
+      ...destination,
+      // New parts share channel routing, not rendered media.
+      outputUrl: undefined,
+      outroAudioUrl: undefined,
+      outroAudioSignature: undefined,
+      durationAdded: undefined,
+      status: "pending" as const,
+      error: undefined,
+      createdAt: new Date(),
+    })),
+    skipPartOutro: anchor.skipPartOutro,
+    skipBrandedOutro: anchor.skipBrandedOutro,
     thumbnailMode: anchor.thumbnailMode,
+    thumbnailHook: anchor.thumbnailHook,
     imageModelOverride: anchor.imageModelOverride,
     voiceOverride: anchor.voiceOverride,
+    narrationVoice: anchor.narrationVoice,
     captionStyle: anchor.captionStyle,
     pipelineMode: anchor.pipelineMode,
     status: "planning",
@@ -1724,7 +1767,8 @@ function makePartDraft(
   body: string,
   partNumber: number,
   partCount: number,
-  discovery?: UpdateDiscovery
+  discovery?: UpdateDiscovery,
+  cardUsername?: string
 ): StoryPartDraft {
   return {
     title: partCount > 1 ? titleWithPart(baseTitle, partNumber) : baseTitle,
@@ -1732,6 +1776,7 @@ function makePartDraft(
     source: "verbatim",
     subreddit: post.subreddit,
     author: post.author,
+    cardUsername,
     upvotes: post.ups,
     comments: post.comments,
     ageHours: post.ageHours,
@@ -1887,7 +1932,15 @@ async function recutSeriesFromBody(
   const seriesId = partCount > 1 ? anchor.seriesId ?? randomUUID() : undefined;
 
   const drafts = bodies.map((partBody, i) =>
-    makePartDraft(original, baseTitle, partBody, i + 1, partCount, discovery)
+    makePartDraft(
+      original,
+      baseTitle,
+      partBody,
+      i + 1,
+      partCount,
+      discovery,
+      anchor.redditStory?.cardUsername
+    )
   );
   const rebuilt = await rebuildSeriesFromDrafts(anchor, seriesReels, drafts, seriesId);
   await recordSeriesStoryCosts(rebuilt, costs, "Update re-cut");
@@ -1906,11 +1959,25 @@ async function rebuildSeriesFromDrafts(
   seriesId: string | undefined
 ): Promise<IReel> {
   const partCount = drafts.length;
+  const donorCover = seriesReels.map((part) => snapshotCreatorShortsCover(part)).find((cover) => cover?.imageUrl);
+  const preservedCoverUrls = new Set(
+    seriesReels
+      .map((part) => snapshotCreatorShortsCover(part)?.imageUrl)
+      .filter((url): url is string => Boolean(url))
+  );
+  if (donorCover?.imageUrl) preservedCoverUrls.add(donorCover.imageUrl);
   const staleMedia: string[] = [];
   const updated: IReel[] = [];
   for (let i = 0; i < drafts.length; i++) {
     const reel = seriesReels[i] ?? cloneSeriesReelFromAnchor(anchor, { partNumber: i + 1, partCount });
-    if (seriesReels[i]) staleMedia.push(...(await resetReelForReplan(reel)));
+    if (seriesReels[i]) {
+      staleMedia.push(...(await resetReelForReplan(reel)));
+    }
+    // After reset (or for brand-new parts), restore the series vertical cover.
+    if (donorCover?.imageUrl && !reel.shortsCover?.imageUrl) {
+      reel.shortsCover = { ...donorCover, updatedAt: new Date() };
+      reel.markModified("shortsCover");
+    }
     reel.title = drafts[i].title;
     reel.hook = drafts[i].title;
     reel.redditStory = redditPayloadFromStoryPart(drafts[i]);
@@ -1927,12 +1994,19 @@ async function rebuildSeriesFromDrafts(
     await enqueueReelPlan(reel._id.toString());
   }
 
-  // Delete any parts beyond the new count.
+  // Delete any parts beyond the new count. Strip shared vertical-cover URLs
+  // first so reclaiming part 3 cannot delete the S3 object parts 1–2 still use.
   const keep = new Set(updated.map((r) => r._id.toString()));
   for (const reel of seriesReels) {
-    if (!keep.has(reel._id.toString())) await deleteReel(reel._id.toString());
+    if (keep.has(reel._id.toString())) continue;
+    if (reel.shortsCover?.imageUrl && preservedCoverUrls.has(reel.shortsCover.imageUrl)) {
+      reel.shortsCover = undefined;
+      reel.markModified("shortsCover");
+      await reel.save();
+    }
+    await deleteReel(reel._id.toString());
   }
-  await deleteS3Urls(staleMedia);
+  await deleteS3Urls(staleMedia.filter((url) => !preservedCoverUrls.has(url)));
 
   const returnId = keep.has(anchor._id.toString()) ? anchor._id.toString() : updated[0]._id.toString();
   return loadReel(returnId);
@@ -1943,10 +2017,15 @@ async function rebuildSeriesFromDrafts(
  * reel into several, add more parts, or re-balance — by concatenating the
  * current story across siblings and re-splitting. Works in plan_review or after
  * creation. Costs LLM cut-selection credits and re-plans each part.
+ *
+ * `honorRequested` applies an explicit AI/user part count as-is. Without it,
+ * the length floor can bump e.g. "2 parts" back up to 3 and silently ignore
+ * the choice the creator just confirmed.
  */
 export async function restructureSeriesParts(
   reelId: string,
-  parts: number | "auto"
+  parts: number | "auto",
+  opts: { honorRequested?: boolean } = {}
 ): Promise<IReel> {
   const anchor = await loadReel(reelId);
   assertEditable(anchor);
@@ -1960,10 +2039,16 @@ export async function restructureSeriesParts(
 
   const card = anchor.redditStory;
   const baseTitle = card.seedTitle ?? card.title;
-  const fullBody = cleanRedditBody(seriesReels.map((r) => r.redditStory?.body ?? "").join(" "));
+  // Prefer spoken scene text (same source as structure advice) so part math
+  // matches what the AI recommendation UI just showed.
+  const fullBody = seriesAssembledText(seriesReels, "spoken");
   if (!fullBody.trim()) throw new Error("No story text to restructure");
 
-  const targetParts = resolvePartCount(parts, wordCount(fullBody), { capLength: true });
+  const wordTotal = wordCount(fullBody);
+  const targetParts =
+    opts.honorRequested && typeof parts === "number"
+      ? Math.max(1, Math.min(12, Math.round(parts)))
+      : resolvePartCount(parts, wordTotal, { capLength: true });
   const costs: MeasuredCostInput[] = [];
   const bodies = await splitBodyIntoParts(baseTitle, fullBody, targetParts, anchor.tier as Tier, (usage) =>
     costs.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" })
@@ -1985,18 +2070,116 @@ export async function restructureSeriesParts(
     createdUtc: 0,
   };
   const discovery = card.updateDiscovery ? payloadToDiscovery(card.updateDiscovery) : undefined;
-  const drafts = bodies.map((b, i) => makePartDraft(pseudo, baseTitle, b, i + 1, partCount, discovery));
+  const drafts = bodies.map((b, i) =>
+    makePartDraft(pseudo, baseTitle, b, i + 1, partCount, discovery, card.cardUsername)
+  );
   const rebuilt = await rebuildSeriesFromDrafts(anchor, seriesReels, drafts, seriesId);
   await recordSeriesStoryCosts(rebuilt, costs, "Series restructure");
   return rebuilt;
 }
 
 /**
+ * Assembled series text for structure fingerprinting.
+ * Prefer spoken scene narration when present — produce syncs `redditStory.body`
+ * from scenes, so body-only hashes go stale after part 1 renders.
+ */
+function seriesAssembledText(series: IReel[], mode: "body" | "spoken"): string {
+  if (mode === "body") {
+    return cleanRedditBody(series.map((part) => part.redditStory?.body ?? "").join(" "));
+  }
+  return cleanRedditBody(
+    series
+      .map((part) =>
+        part.scenes?.length
+          ? part.scenes.map((scene) => scene.narration.trim()).filter(Boolean).join(" ")
+          : (part.redditStory?.body ?? "")
+      )
+      .join(" ")
+  );
+}
+
+function hashStructureFingerprint(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/** Current canonical fingerprint (spoken/scenes when available). */
+function canonicalStructureFingerprint(series: IReel[]): string {
+  return hashStructureFingerprint(seriesAssembledText(series, "spoken"));
+}
+
+/** Accept either body-era or spoken-era fingerprints so older decisions still match. */
+function structureContentFingerprints(series: IReel[]): string[] {
+  const texts = [seriesAssembledText(series, "body"), seriesAssembledText(series, "spoken")];
+  return [...new Set(texts.filter(Boolean).map((text) => hashStructureFingerprint(text)))];
+}
+
+function findSeriesStructureDecision(
+  series: IReel[]
+): NonNullable<IRedditStoryPayload["structureDecision"]> | undefined {
+  for (const part of series) {
+    const decision = part.redditStory?.structureDecision;
+    if (decision?.choice === "recommended" || decision?.choice === "manual") {
+      return decision;
+    }
+  }
+  return undefined;
+}
+
+function findSeriesStructureAdvice(
+  series: IReel[]
+): NonNullable<IRedditStoryPayload["structureAdvice"]> | undefined {
+  for (const part of series) {
+    const advice = part.redditStory?.structureAdvice;
+    if (advice?.fingerprint) return advice;
+  }
+  return undefined;
+}
+
+async function clearSeriesStructureDecision(series: IReel[]): Promise<void> {
+  let changed = false;
+  for (const part of series) {
+    if (!part.redditStory?.structureDecision) continue;
+    part.redditStory.structureDecision = undefined;
+    part.markModified("redditStory");
+    changed = true;
+  }
+  if (changed) await Promise.all(series.map((part) => part.save()));
+}
+
+/** Mirror advice/decision onto every part and refresh fingerprints after produce drift. */
+async function mirrorSeriesStructureState(
+  series: IReel[],
+  advice: NonNullable<IRedditStoryPayload["structureAdvice"]> | undefined,
+  decision: NonNullable<IRedditStoryPayload["structureDecision"]> | undefined,
+  fingerprint: string
+): Promise<void> {
+  const persistedAdvice = advice ? { ...advice, fingerprint } : undefined;
+  const persistedDecision = decision
+    ? { fingerprint, choice: decision.choice, decidedAt: decision.decidedAt ?? new Date() }
+    : undefined;
+  await Promise.all(
+    series.map(async (part) => {
+      if (!part.redditStory) return;
+      if (persistedAdvice) part.redditStory.structureAdvice = persistedAdvice;
+      if (persistedDecision) part.redditStory.structureDecision = persistedDecision;
+      part.markModified("redditStory");
+      await part.save();
+    })
+  );
+}
+
+export type SeriesStructureAdviceResult = SeriesStructureAdvice & {
+  currentParts: number;
+  /** True when the creator already accepted Keep current / Use AI for this series. */
+  decisionSatisfied: boolean;
+};
+
+/**
  * Paid, cached editorial advice for the current assembled story. It reads every
  * sibling body so an included follow-up/manual link is assessed as part of the
  * same narrative, not as an afterthought on the final episode.
  */
-export async function getSeriesStructureAdvice(reelId: string): Promise<SeriesStructureAdvice & { currentParts: number }> {
+export async function getSeriesStructureAdvice(reelId: string): Promise<SeriesStructureAdviceResult> {
   const anchor = await loadReel(reelId);
   if (anchor.strategy !== "gameplay_overlay" || !anchor.redditStory) {
     throw new Error("Series advice is only supported for Reddit gameplay reels");
@@ -2004,28 +2187,19 @@ export async function getSeriesStructureAdvice(reelId: string): Promise<SeriesSt
   const seriesReels = anchor.seriesId
     ? sortSeriesReels(await listReelsBySeries(anchor.seriesId))
     : [anchor];
-  const body = cleanRedditBody(seriesReels.map((reel) => reel.redditStory?.body ?? "").join(" "));
+  const body = seriesAssembledText(seriesReels, "spoken");
   if (!body) throw new Error("No story text is available to assess");
   const ledgerReel = seriesReels[0];
-  const fingerprint = createHash("sha256").update(body).digest("hex");
-  const cached = ledgerReel.redditStory?.structureAdvice;
-  if (cached?.fingerprint === fingerprint) {
-    // The assessment belongs to the assembled series, but each Studio route
-    // receives one part. Mirror the shared state so opening Part 2+ never
-    // appears to have skipped the assessment already recorded on Part 1.
-    const missingOnPart = seriesReels.filter(
-      (part) => part.redditStory?.structureAdvice?.fingerprint !== fingerprint
-    );
-    if (missingOnPart.length) {
-      await Promise.all(
-        missingOnPart.map(async (part) => {
-          if (!part.redditStory) return;
-          part.redditStory.structureAdvice = { ...cached, fingerprint };
-          part.markModified("redditStory");
-          await part.save();
-        })
-      );
-    }
+  const fingerprint = canonicalStructureFingerprint(seriesReels);
+  const acceptedFingerprints = new Set(structureContentFingerprints(seriesReels));
+  const cached = findSeriesStructureAdvice(seriesReels);
+  const existingDecision = findSeriesStructureDecision(seriesReels);
+
+  // Cache hit when the hash still matches, OR when a Keep/Use-AI choice already
+  // exists — produce sync can rewrite body from scenes and change the hash
+  // without invalidating that editorial decision.
+  if (cached && (acceptedFingerprints.has(cached.fingerprint) || existingDecision)) {
+    await mirrorSeriesStructureState(seriesReels, cached, existingDecision, fingerprint);
     return {
       wordCount: cached.wordCount,
       sentenceCount: cached.sentenceCount,
@@ -2036,6 +2210,25 @@ export async function getSeriesStructureAdvice(reelId: string): Promise<SeriesSt
       breaks: cached.breaks.map((item) => ({ ...item })),
       hasWeakBreaks: cached.hasWeakBreaks,
       currentParts: seriesReels.length,
+      decisionSatisfied: Boolean(existingDecision),
+    };
+  }
+
+  // Decision on file but advice missing from every part — honor the choice and
+  // skip a paid re-assessment; Generate does not need the recommendation UI.
+  if (existingDecision) {
+    await mirrorSeriesStructureState(seriesReels, undefined, existingDecision, fingerprint);
+    return {
+      wordCount: wordCount(body),
+      sentenceCount: 0,
+      estimatedDurationSeconds: 0,
+      minimumParts: 1,
+      recommendedParts: seriesReels.length,
+      reason: "Using your earlier series structure decision.",
+      breaks: [],
+      hasWeakBreaks: false,
+      currentParts: seriesReels.length,
+      decisionSatisfied: true,
     };
   }
 
@@ -2047,6 +2240,7 @@ export async function getSeriesStructureAdvice(reelId: string): Promise<SeriesSt
   for (const part of seriesReels) {
     if (!part.redditStory) continue;
     part.redditStory.structureAdvice = persistedAdvice;
+    part.redditStory.structureDecision = undefined;
     part.markModified("redditStory");
   }
   // The assessment is a real OpenRouter LLM request, so record it immediately
@@ -2056,6 +2250,7 @@ export async function getSeriesStructureAdvice(reelId: string): Promise<SeriesSt
   return {
     ...advice,
     currentParts: seriesReels.length,
+    decisionSatisfied: false,
   };
 }
 
@@ -2070,45 +2265,46 @@ export async function chooseSeriesStructure(reelId: string, choice: StructureCho
   }
   const series = anchor.seriesId ? sortSeriesReels(await listReelsBySeries(anchor.seriesId)) : [anchor];
   const ledger = series[0];
-  const body = cleanRedditBody(series.map((reel) => reel.redditStory?.body ?? "").join(" "));
-  const fingerprint = createHash("sha256").update(body).digest("hex");
-  const advice = ledger.redditStory?.structureAdvice;
-  if (advice?.fingerprint !== fingerprint) {
+  const fingerprint = canonicalStructureFingerprint(series);
+  const acceptedFingerprints = new Set(structureContentFingerprints(series));
+  const advice = findSeriesStructureAdvice(series) ?? ledger.redditStory?.structureAdvice;
+  if (!advice || !acceptedFingerprints.has(advice.fingerprint)) {
     throw new Error("Run the AI structure assessment for the current story before choosing a plan");
   }
 
   let result = anchor;
   if (choice === "recommended" && advice.recommendedParts !== series.length) {
-    result = await restructureSeriesParts(reelId, advice.recommendedParts);
+    // Honor the count shown in the confirm modal — do not let the length floor
+    // silently bump "2 parts" back to 3 after the creator accepted the AI plan.
+    result = await restructureSeriesParts(reelId, advice.recommendedParts, {
+      honorRequested: true,
+    });
   }
 
   const updatedSeries = result.seriesId ? sortSeriesReels(await listReelsBySeries(result.seriesId)) : [result];
   const updatedLedger = updatedSeries[0];
   if (!updatedLedger.redditStory) throw new Error("Story data disappeared while recording structure choice");
-  const updatedBody = cleanRedditBody(updatedSeries.map((part) => part.redditStory?.body ?? "").join(" "));
-  const updatedFingerprint = createHash("sha256").update(updatedBody).digest("hex");
+  const updatedFingerprint = canonicalStructureFingerprint(updatedSeries);
   const persistedAdvice = { ...advice, fingerprint: updatedFingerprint };
   const persistedDecision = { fingerprint: updatedFingerprint, choice, decidedAt: new Date() };
-  for (const part of updatedSeries) {
-    if (!part.redditStory) continue;
-    part.redditStory.structureAdvice = persistedAdvice;
-    part.redditStory.structureDecision = persistedDecision;
-    part.markModified("redditStory");
-  }
-  await Promise.all(updatedSeries.map((part) => part.save()));
+  await mirrorSeriesStructureState(updatedSeries, persistedAdvice, persistedDecision, updatedFingerprint);
   return loadReel(result._id.toString());
 }
 
 async function assertStructureChoice(reel: IReel): Promise<void> {
   if (reel.strategy !== "gameplay_overlay" || !reel.redditStory?.body) return;
   const series = reel.seriesId ? sortSeriesReels(await listReelsBySeries(reel.seriesId)) : [reel];
-  const ledger = series[0];
-  const body = cleanRedditBody(series.map((part) => part.redditStory?.body ?? "").join(" "));
-  const fingerprint = createHash("sha256").update(body).digest("hex");
-  const decision = ledger.redditStory?.structureDecision;
-  if (decision?.fingerprint !== fingerprint) {
-    throw new Error("Review Series structure and accept the AI recommendation or keep your manual plan before generating");
+  const decision = findSeriesStructureDecision(series);
+  if (!decision) {
+    throw new Error(
+      "Review series structure and accept the AI recommendation or keep your manual plan before generating"
+    );
   }
+  // A recorded Keep/Use-AI choice stays valid across produce-time body sync and
+  // Part 2+ routes. Refresh fingerprints + mirror so siblings stay consistent.
+  const fingerprint = canonicalStructureFingerprint(series);
+  const advice = findSeriesStructureAdvice(series);
+  await mirrorSeriesStructureState(series, advice, decision, fingerprint);
 }
 
 /** Append newly-included followups as new part(s); existing parts stay byte-stable. */
@@ -2156,12 +2352,14 @@ async function appendUpdatesAsParts(
   const newCount = oldCount + bodies.length;
 
   // Bump partCount on every existing part (numbering) — no body/asset changes.
+  // New episodes change series structure, so the prior Keep/Use-AI choice is void.
   for (const reel of seriesReels) {
     reel.partCount = newCount;
     if (reel.redditStory) {
       reel.redditStory.partCount = newCount;
       reel.redditStory.updateDiscovery = discoveryPayload;
       reel.redditStory.sourceSegment ??= "original";
+      reel.redditStory.structureDecision = undefined;
       reel.markModified("redditStory");
     }
   }
@@ -2170,7 +2368,15 @@ async function appendUpdatesAsParts(
   // Create the appended parts (each derives from a new followup segment).
   for (let j = 0; j < bodies.length; j++) {
     const partNumber = oldCount + j + 1;
-    const draft = makePartDraft(original, baseTitle, bodies[j], partNumber, newCount, discovery);
+    const draft = makePartDraft(
+      original,
+      baseTitle,
+      bodies[j],
+      partNumber,
+      newCount,
+      discovery,
+      anchor.redditStory?.cardUsername
+    );
     const reel = cloneSeriesReelFromAnchor(anchor, { partNumber, partCount: newCount });
     reel.seriesId = seriesId;
     reel.title = draft.title;

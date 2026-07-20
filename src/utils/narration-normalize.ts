@@ -100,7 +100,15 @@ const EXPANSIONS: Record<string, string> = {
   ffs: "for fuck's sake",
   wtf: "what the fuck",
   eli5: "explain like I'm five",
-  // Reddit relationship shorthand
+};
+
+/**
+ * Reddit relationship shorthand (keys lowercase). Most forms match
+ * case-insensitively so MiL / SiL / mil all expand. Keys in
+ * RELATIONSHIP_ALL_CAPS_ONLY also collide with English words and only expand
+ * when every letter is uppercase (SO yes, "so" / "So" no).
+ */
+const RELATIONSHIP_EXPANSIONS: Record<string, string> = {
   so: "significant other",
   dh: "dear husband",
   dw: "dear wife",
@@ -112,6 +120,20 @@ const EXPANSIONS: Record<string, string> = {
   sil: "sister in law",
   so2: "significant other",
 };
+
+/** Collides with English — require ALL-CAPS letters (SO, SO2). */
+const RELATIONSHIP_ALL_CAPS_ONLY = new Set(["so", "so2"]);
+
+function relationshipExpansion(alnum: string): string | undefined {
+  const key = alnum.toLowerCase();
+  const exp = RELATIONSHIP_EXPANSIONS[key];
+  if (!exp) return undefined;
+  if (RELATIONSHIP_ALL_CAPS_ONLY.has(key)) {
+    const letters = alnum.replace(/[^A-Za-z]/g, "");
+    if (!letters || letters !== letters.toUpperCase()) return undefined;
+  }
+  return exp;
+}
 
 /** Multi-word phrase replacements applied before tokenizing (order matters). */
 const PHRASE_EXPANSIONS: [RegExp, string][] = [
@@ -237,6 +259,12 @@ function normalizeToken(token: string): TokenForm {
   const exp = EXPANSIONS[alnum.toLowerCase()];
   if (exp) {
     return { speech: `${pre}${exp}${post}`, caption: `${pre}${exp}${post}` };
+  }
+
+  // 5. Relationship shorthand (MiL/SiL/mil ok; "so" stays English unless SO)
+  const rel = relationshipExpansion(alnum);
+  if (rel) {
+    return { speech: `${pre}${rel}${post}`, caption: `${pre}${rel}${post}` };
   }
 
   return { speech: token, caption: token };

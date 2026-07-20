@@ -513,6 +513,10 @@ export async function runCaptionTimingChecks(): Promise<CaptionSmokeCheck[]> {
       { in: "i left bc she lied", speech: "i left because she lied", caption: "i left because she lied" },
       { in: "what the f*ck", speech: "what the fuck", caption: "what the fuck" },
       { in: "my SO and MIL", speech: "my significant other and mother in law", caption: "my significant other and mother in law" },
+      { in: "my SiL and MiL", speech: "my sister in law and mother in law", caption: "my sister in law and mother in law" },
+      // lowercase "so" / sentence-case "So" are English, not "significant other"
+      { in: "so they can blame him", speech: "so they can blame him", caption: "so they can blame him" },
+      { in: "So they left", speech: "So they left", caption: "So they left" },
     ];
     const failures: string[] = [];
     for (const c of cases) {

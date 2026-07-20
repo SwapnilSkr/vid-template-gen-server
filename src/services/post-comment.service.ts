@@ -26,36 +26,39 @@ export interface FirstCommentCopy {
   hasSeriesLink: boolean;
 }
 
-/** Where the audience finds the next part, phrased per platform. */
-function seriesLinkLine(reel: IReel, platform: CommentPlatform): string | undefined {
-  const part = reel.partNumber;
-  const count = reel.partCount;
-  if (!part || !count || count <= 1) return undefined;
+export type SeriesNavigationKind = "next_part" | "series_complete";
 
-  // A non-final part points forward to the next one; the final part invites a
-  // catch-up from the start. Both use a genuine follow/subscribe reason, not
-  // an engagement demand.
-  const isFinal = part >= count;
-  switch (platform) {
-    case "youtube":
-      return isFinal
-        ? `That was the finale — the earlier parts are on the channel. Subscribe if you want the next story like this.`
-        : `Part ${part + 1} is up next on the channel 👉 subscribe so it finds you.`;
-    case "instagram":
-      return isFinal
-        ? `Start from Part 1 on my profile 👆 follow so the next series doesn't pass you by.`
-        : `Part ${part + 1} is on my profile 👆 follow so you don't lose it.`;
-    case "facebook":
-      return isFinal
-        ? `The earlier parts are on the Page — follow for the next story.`
-        : `Part ${part + 1} is on the Page 👆 follow so you catch it.`;
-    case "threads":
-      return isFinal
-        ? `Part 1 is on my profile if you want the whole thread — follow for the next one.`
-        : `Part ${part + 1} is on my profile 👆 follow so you don't miss it.`;
-    default:
-      return undefined;
+/** Instagram comments render bare URLs as plain text, so link copy both looks
+ * cluttered and fails its navigation job. Keep the instruction actionable
+ * without pretending a URL can be tapped. */
+function stripUrls(text: string): string {
+  return text
+    .replace(/(?:https?:\/\/|www\.)\S+/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** This is called only after the target post is verified as published on the
+ * same platform/account. The direct URL keeps the navigation claim honest. */
+export function buildVerifiedSeriesNavigationText(
+  platform: CommentPlatform,
+  targetPart: number,
+  targetUrl: string | undefined,
+  kind: SeriesNavigationKind = "next_part",
+): string {
+  if (platform === "instagram") {
+    return kind === "series_complete"
+      ? "The full story is now live — open this profile and start with Part 1."
+      : `Part ${targetPart} is live — open this profile to watch it.`;
   }
+  if (kind === "series_complete") {
+    return targetUrl
+      ? `The full story is now live — start with Part 1: ${targetUrl}`
+      : "The full story is now live — start with Part 1 on this profile.";
+  }
+  return targetUrl
+    ? `Part ${targetPart} is live: ${targetUrl}`
+    : `Part ${targetPart} is live on this profile.`;
 }
 
 function curiosityQuestion(reel: IReel): { text: string; source: FirstCommentCopy["source"] } {
@@ -65,12 +68,9 @@ function curiosityQuestion(reel: IReel): { text: string; source: FirstCommentCop
 }
 
 /**
- * Compose the first-comment text for an own post: the story-specific curiosity
- * question, then (for multi-part stories) a platform-native series link.
- *
- * `maxLength` guards against a platform comment cap (YouTube/IG/FB ~ generous;
- * Threads replies are short). The question is always preserved; the series
- * line is dropped first if the whole thing would overflow.
+ * Compose only the discussion comment. Series navigation is intentionally a
+ * second comment, posted by the reconciliation service after it verifies the
+ * referenced destination is live.
  */
 export function buildFirstCommentText(
   reel: IReel,
@@ -78,14 +78,9 @@ export function buildFirstCommentText(
   maxLength = 900,
 ): FirstCommentCopy {
   const question = curiosityQuestion(reel);
-  const link = seriesLinkLine(reel, platform);
-
-  const withLink = [question.text, link].filter(Boolean).join("\n\n");
-  if (link && withLink.length <= maxLength) {
-    return { text: withLink, source: question.source, hasSeriesLink: true };
-  }
-  const bounded = question.text.length <= maxLength
-    ? question.text
-    : question.text.slice(0, maxLength).replace(/\s+\S*$/, "").trim();
+  const text = platform === "instagram" ? stripUrls(question.text) : question.text;
+  const bounded = text.length <= maxLength
+    ? text
+    : text.slice(0, maxLength).replace(/\s+\S*$/, "").trim();
   return { text: bounded, source: question.source, hasSeriesLink: false };
 }

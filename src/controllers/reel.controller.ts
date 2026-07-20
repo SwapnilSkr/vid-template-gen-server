@@ -12,6 +12,7 @@ import {
   regenerateReelThumbnail,
   regenerateInstagramCaption,
   regenerateInstagramPollSuggestion,
+  regenerateCrossPostCopy,
   regenerateThumbnailText,
   regenerateReelOutroCommentPrompt,
   regenerateReelReviewCopy,
@@ -57,6 +58,7 @@ import {
   updateReelDestinationOutro,
   setReelPrimaryDestination,
   resolveInstagramPublishCaption,
+  trimFinishedReelVideo,
 } from "../services";
 import { enqueuePublish } from "../queue/queues";
 import { resolveRenderedPublishDestination } from "../services/reel-outro.service";
@@ -104,6 +106,7 @@ import type {
   TSeriesParams,
   TDraftAssetParams,
   TSaveShortsCoverBody,
+  TTrimFinalVideoBody,
 } from "../types/guards";
 import { getErrorMessage } from "../types";
 import { httpErrorFromUnknown } from "../services/ffmpeg-capability.service";
@@ -476,6 +479,32 @@ export async function regenerateInstagramPollSuggestionController({ params, set 
   }
 }
 
+/** Generate a current, platform-specific Facebook or Threads draft for an
+ * existing completed reel. This is metadata-only: no narration/video rerender
+ * and no post is published as a side effect. */
+export async function regenerateCrossPostCopyController({
+  params,
+  set,
+  request,
+}: GetReelContext & { request: Request }) {
+  const reel = await getReel(params.id);
+  if (!reel) {
+    set.status = 404;
+    return { success: false, error: "Reel not found" };
+  }
+  if (reel.status !== "completed") {
+    set.status = 400;
+    return { success: false, error: `Cross-post copy generation requires a completed reel. Current status: ${reel.status}` };
+  }
+  const platform = new URL(request.url).pathname.endsWith("/facebook-copy") ? "facebook" : "threads";
+  try {
+    return { success: true, data: await regenerateCrossPostCopy(params.id, platform) };
+  } catch (error: unknown) {
+    set.status = 500;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
 /** Generate only the short text hook used by the thumbnail renderer/editor. */
 export async function regenerateThumbnailTextController({ params, set }: GetReelContext) {
   const reel = await getReel(params.id);
@@ -629,29 +658,16 @@ export async function distributeReelController({ params, body, set }: PublishRee
   reel.instagram = [
     ...reel.instagram.filter((p) => !instagramIds.includes(p.channelId)),
     ...instagramIds.map((id) => {
-      const previous = reel.instagram.find((publish) => publish.channelId === id);
-      // A processing timeout means Meta accepted the container but did not
-      // finish within our wait window. Retain it so the next publish action
-      // resumes that container instead of uploading a duplicate Reel.
-      const resumeTimedOutContainer =
-        previous?.status === "failed" &&
-        Boolean(previous.containerId) &&
-        previous.error === "Instagram media processing timed out";
-      return resumeTimedOutContainer
-        ? {
-            ...previous,
-            status: "pending" as const,
-            error: undefined,
-            message: "Queued to resume Instagram processing…",
-            updatedAt: new Date(),
-          }
-        : {
-            channelId: id,
-            channelLabel: instagram.find((c) => c.id === id)?.label,
-            status: "pending" as const,
-            message: "Queued for Instagram publishing…",
-            updatedAt: new Date(),
-          };
+      // Do not resume timed-out containers. Meta often leaves those stuck in
+      // IN_PROGRESS forever; retrying the same creation_id just times out again.
+      // A fresh container is the reliable recovery path after a processing timeout.
+      return {
+        channelId: id,
+        channelLabel: instagram.find((c) => c.id === id)?.label,
+        status: "pending" as const,
+        message: "Queued for Instagram publishing…",
+        updatedAt: new Date(),
+      };
     }),
   ];
   await reel.save();
@@ -691,6 +707,22 @@ export async function downloadReelController({ params, set }: GetReelContext) {
       subtitlesUrl: reel.subtitlesUrl,
     },
   };
+}
+
+/** Cut unwanted intervals from the canonical finished render. This is a media
+ * edit only: it retains narration/story caches and never mutates an already
+ * published social post. */
+export async function trimFinishedReelVideoController({
+  params,
+  body,
+  set,
+}: GetReelContext & { body: TTrimFinalVideoBody }) {
+  try {
+    return { success: true, data: await trimFinishedReelVideo(params.id, body.removeRanges) };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
 }
 
 /** Request 1-5 re-narrated voice variants of a completed gameplay reel. */

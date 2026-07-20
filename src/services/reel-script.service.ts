@@ -7,6 +7,7 @@ import { getRecipe, type NicheRecipe } from "../config/niche-styles";
 import { getErrorMessage } from "../types";
 import type { IHorrorReferencePayload, IStoryBible } from "../models/reel.model";
 import { getTrendInsight } from "./trend-insight.service";
+import { getOwnedAnalyticsGuidance } from "./owned-analytics.service";
 import { pickHorrorReferenceSeed } from "./horror-reference.service";
 
 const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
@@ -15,11 +16,16 @@ const openrouter = createOpenRouter({ apiKey: config.openRouterApiKey });
  * block (undefined/empty pieces are omitted, e.g. no genre or no data yet). */
 async function buildTrendBlock(niche: string, genre?: string): Promise<string> {
   const insight = await getTrendInsight(niche, genre);
-  if (!insight) return "";
-  const hookBlock = insight.hooks.length
+  const externalEvidence = insight && insight.sampleSize >= 6 && insight.evidence?.confidence !== "low";
+  const hookBlock = externalEvidence && insight.hooks.length
     ? `\nPROVEN HOOK-LINE TEMPLATES (adapt one to this topic, don't reuse verbatim):\n${insight.hooks.map((h) => `- ${h}`).join("\n")}\n`
     : "";
-  return `\nCURRENT WINNING PATTERNS (from trending videos in this genre this week):\n${insight.digest}\n${hookBlock}`;
+  const owned = await getOwnedAnalyticsGuidance("youtube", genre);
+  const ownedBlock = owned ? `\n${owned}\n` : "";
+  const externalBlock = externalEvidence
+    ? `\nEXTERNAL YOUTUBE RESEARCH (lower priority; public packaging observations only):\n${insight.digest}\n${hookBlock}`
+    : "";
+  return `${ownedBlock}${externalBlock}`;
 }
 
 // Per-token prices (USD/token) for the planners we actually use, so the cost

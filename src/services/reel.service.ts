@@ -49,6 +49,7 @@ import {
   buildReelReviewPackage,
   ensureReelThumbnailHook,
   generateInstagramCaptionForReel,
+  generateFacebookAndThreadsCopyForReel,
   generateInstagramPollSuggestionForReel,
 } from "./reel-review.service";
 import {
@@ -109,6 +110,14 @@ interface CreateReelOptions {
   fetchUpdates?: boolean;
   /** User-pasted canonical followup URLs, sourced directly (force-included). */
   manualUpdateUrls?: string[];
+}
+
+/** A force-deleted gameplay object must never be replaced silently during a
+ * rerender; the creator needs to make that editorial choice in Studio. */
+function assertGameplayAssetAvailable(reel: IReel): void {
+  if (reel.gameplayAssetMissing) {
+    throw new Error("This reel's gameplay clip was deleted. Choose a replacement in Studio before rerendering.");
+  }
 }
 
 /** Build the initial destinations[] for a new reel from create-flow input. */
@@ -610,6 +619,7 @@ function toRedditStoryPayload(part: StoryPartDraft): NonNullable<IReel["redditSt
     genre: part.genre,
     subreddit: part.subreddit,
     author: part.author,
+    cardUsername: part.cardUsername,
     upvotes: part.upvotes,
     comments: part.comments,
     ageHours: part.ageHours,
@@ -630,6 +640,7 @@ function toSingleRedditStoryPayload(story: StoryDraft & { source: StorySource })
     genre: story.genre,
     subreddit: story.subreddit,
     author: story.author,
+    cardUsername: story.cardUsername,
     upvotes: story.upvotes,
     comments: story.comments,
     ageHours: story.ageHours,
@@ -1286,6 +1297,7 @@ async function processOutroOnlyReel(
 
     let gameplayPath: string | undefined;
     if (recipe.strategy === "gameplay_overlay") {
+      assertGameplayAssetAvailable(reel);
       const picked = await pickGameplay(reel.gameplayKey);
       gameplayPath = picked.path;
       reel.gameplayKey = picked.key;
@@ -1431,6 +1443,7 @@ async function planGameplayReel(
   const canReusePlan =
     reel.scenes.length > 0 && Boolean(reel.redditStory?.title && reel.redditStory?.body);
   if (canReusePlan) {
+    assertGameplayAssetAvailable(reel);
     const stabilized = stabilizeRedditCard(reel.redditStory!);
     reel.redditStory = stabilized;
     if (!reel.captionStyle) reel.captionStyle = DEFAULT_BOUNCE_CAPTION_STYLE;
@@ -1438,7 +1451,9 @@ async function planGameplayReel(
       title: stabilized.title,
       body: stabilized.body,
     });
-    reel.narrationVoice = tts;
+    if (reel.voiceOverride?.voice || !reel.narrationVoice?.voice) {
+      reel.narrationVoice = tts;
+    }
     if (!reel.gameplayKey) reel.gameplayKey = (await pickGameplay()).key;
     await ensureReelThumbnailHook(reel, (usage) => {
       measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
@@ -1519,6 +1534,7 @@ async function planGameplayReel(
     body: story.body,
   });
   reel.narrationVoice = tts;
+  assertGameplayAssetAvailable(reel);
   if (!reel.gameplayKey) reel.gameplayKey = (await pickGameplay()).key;
   await ensureReelThumbnailHook(reel, (usage) => {
     measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
@@ -1905,6 +1921,9 @@ async function produceImageReel(
         reviewPackageUsageHandlers(measuredCosts).onInstagramCaptionUsage,
       );
     }
+    if (typeof reel.facebookSettings?.description !== "string" || typeof reel.threadsSettings?.text !== "string") {
+      await generateFacebookAndThreadsCopyForReel(reel, reviewPackageUsageHandlers(measuredCosts).onReviewCopyUsage);
+    }
     if (!reel.instagramSettings?.poll) {
       await generateInstagramPollSuggestionForReel(
         reel,
@@ -1988,6 +2007,7 @@ async function processGameplayReel(
     const story = reel.redditStory!;
     story.partNumber = reel.partNumber ?? story.partNumber;
     story.partCount = reel.partCount ?? story.partCount;
+    assertGameplayAssetAvailable(reel);
     const { path: gameplayPath, key: gameplayKey } = await pickGameplay(reel.gameplayKey);
     reel.gameplayKey = gameplayKey;
     localFiles.push(gameplayPath);
@@ -1999,7 +2019,10 @@ async function processGameplayReel(
       title: story.title,
       body: bodySentences.join(" ") || story.body,
     });
-    reel.narrationVoice = tts;
+    // Freeze the matched voice after plan review unless the creator set an override.
+    if (reel.voiceOverride?.voice || !reel.narrationVoice?.voice) {
+      reel.narrationVoice = tts;
+    }
     if (!reel.captionStyle) reel.captionStyle = DEFAULT_BOUNCE_CAPTION_STYLE;
     await reel.save();
 
@@ -2013,10 +2036,14 @@ async function processGameplayReel(
         reel.shortsCover.imageUrl,
         `${reelId}_shorts_cover.png`
       );
-      if (coverPath) {
-        shortsCoverPath = coverPath;
-        localFiles.push(coverPath);
+      if (!coverPath) {
+        // Silent omit used to ship videos without the creator's vertical cover.
+        throw new Error(
+          "Saved shorts cover could not be downloaded for render. Re-save it in Thumbnail Studio, then Generate again."
+        );
       }
+      shortsCoverPath = coverPath;
+      localFiles.push(coverPath);
       const editorState = reel.shortsCover.editorState as { background?: GameplayRenderOpts["shortsCoverBackground"] } | undefined;
       shortsCoverBackground = editorState?.background;
     }

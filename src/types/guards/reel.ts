@@ -404,6 +404,15 @@ export const PublishReelBody = t.Object({
 
 export type TPublishReelBody = typeof PublishReelBody.static;
 
+/** Remove any number of intervals from the canonical finished video. */
+export const TrimFinalVideoBody = t.Object({
+  removeRanges: t.Array(t.Object({
+    startSec: t.Number({ minimum: 0 }),
+    endSec: t.Number({ minimum: 0 }),
+  }), { minItems: 1, maxItems: 20 }),
+});
+export type TTrimFinalVideoBody = typeof TrimFinalVideoBody.static;
+
 export const DistributeReelBody = t.Object({
   youtubeChannelIds: t.Optional(t.Array(t.String(), { maxItems: 20 })),
   instagramChannelIds: t.Optional(t.Array(t.String(), { maxItems: 20 })),

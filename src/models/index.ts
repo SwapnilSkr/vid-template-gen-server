@@ -23,6 +23,8 @@ export {
   type IFacebookPublish,
   type IThreadsPublish,
   type IInstagramPublishSettings,
+  type IFacebookPublishSettings,
+  type IThreadsPublishSettings,
   type IInstagramPollSuggestion,
   type IReelReviewPackage,
   type ICostBreakdown,
@@ -61,14 +63,41 @@ export {
   TrendReference,
   type ITrendReference,
   type ITrendMetrics,
+  type ITrendMetricCapture,
+  type ITrendCreativeAnalysis,
   type TrendPlatform,
   type TrendReferenceStatus,
   type TrendScanWindow,
 } from "./trend-reference.model";
 export { TrendInsight, type ITrendInsight } from "./trend-insight.model";
+export {
+  OwnedMetricSnapshot,
+  PerformanceEvidenceCard,
+  type IOwnedMetricSnapshot,
+  type IOwnedMetricSnapshotReel,
+  type IOwnedMetricSnapshotAccount,
+  type IOwnedMetricSnapshotMedia,
+  type IOwnedMetricSnapshotPublish,
+  type IOwnedMetricSnapshotFetch,
+  type IOwnedMetricSnapshotRaw,
+  type IOwnedMetricSnapshotAvailable,
+  type IOwnedMetricSnapshotFeatures,
+  type IPerformanceEvidenceCard,
+  type IPerformanceEvidenceCardAccount,
+  type IPerformanceEvidenceCardWindow,
+  type IPerformanceEvidenceCardGuidance,
+  type IPerformanceEvidenceCardConfidence,
+  type OwnedAnalyticsPlatform,
+  type OwnedAnalyticsFetchSource,
+  type PerformanceEvidenceConfidence,
+} from "./owned-analytics.model";
 export { YouTubeChannel, type IYouTubeChannel } from "./youtube-channel.model";
 export { InstagramChannel, type IInstagramChannel } from "./instagram-channel.model";
 export { FacebookPage, type IFacebookPage } from "./facebook-page.model";
+export {
+  FacebookDataDeletionRequest,
+  type IFacebookDataDeletionRequest,
+} from "./facebook-data-deletion.model";
 export { ThreadsChannel, type IThreadsChannel } from "./threads-channel.model";
 export {
   ThreadsDataDeletionRequest,
@@ -79,6 +108,7 @@ export {
   YtImport,
   type IYtImport,
   type IYtImportCaptionCue,
+  type IGameplayMixSource,
   type YtImportStatus,
   type YtImportStorage,
 } from "./yt-import.model";

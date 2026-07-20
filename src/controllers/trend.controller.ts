@@ -4,6 +4,7 @@ import {
   getTrendSummary,
   scoutAllGenres,
   refreshAllTrendInsights,
+  getTrendInsight,
   getScoutTargets,
   listHorrorReferences,
   scoutHorrorReferences,
@@ -61,8 +62,14 @@ export async function getTrendSummaryController({ query, set }: TrendSummaryCont
   }
 }
 
-/** Manually trigger a scout scan + insight-digest refresh (same logic as the
- * daily/weekly cron script) — lets the dashboard kick off a run on demand. */
+/** Evidence boundary for a genre's current YouTube research. */
+export async function getTrendInsightController({ params, query }: Context & { params: { genre: string }; query: { niche?: string } }) {
+  const insight = await getTrendInsight(query.niche ?? "reddit", params.genre);
+  return { success: true, data: insight ?? null };
+}
+
+/** Explicit on-demand scan. A local/home server may be offline between runs,
+ * so there is deliberately no server-side cron dependency here. */
 export async function triggerTrendScoutController({ body, set }: TriggerScoutContext) {
   try {
     const mode = body.window ?? "week";

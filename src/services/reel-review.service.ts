@@ -8,6 +8,8 @@ import {
   Reel,
   type IInstagramPublishSettings,
   type IInstagramPollSuggestion,
+  type IFacebookPublishSettings,
+  type IThreadsPublishSettings,
   type IReel,
   type IReelReviewPackage,
 } from "../models";
@@ -26,9 +28,12 @@ import { deleteS3Urls, uploadImage } from "./s3.service";
 import { renderRedditCard } from "./reddit-card.service";
 import { pickGameplay } from "./reel-gameplay.service";
 import { listTrendReferences } from "./trend-reference.service";
-import { getTrendDigest } from "./trend-insight.service";
+import { getTrendCopyGuidance, getTrendDigest } from "./trend-insight.service";
+import { getOwnedAnalyticsGuidance } from "./owned-analytics.service";
 import { getRecipe } from "../config/niche-styles";
 import { fontFilePathByFamily, DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
+import { platformCopyRules } from "./platform-copy-rules.service";
+import { refreshAutomaticOpeningCoverIfStale } from "./reel-shorts-cover.service";
 
 export interface UpdateReelReviewInput {
   title?: string;
@@ -378,6 +383,10 @@ async function buildInstagramCaption(
 ): Promise<InstagramCaptionResult> {
   const fallback = instagramFallbackCaption(reel, tags);
   const source = storySeed(reel).slice(0, 2_600);
+  const model = resolveModels("cheap").llm;
+  // Meta copy is informed only by its own first-party results. External
+  // YouTube research must never be presented as Instagram evidence.
+  const ownedEvidence = await getOwnedAnalyticsGuidance("instagram", reel.genre);
   if (!source || !config.openRouterApiKey) {
     recordOperationLog({
       scope: "system",
@@ -397,7 +406,7 @@ async function buildInstagramCaption(
       : "This is a standalone/final Reel; use a natural follow CTA only if it fits.";
   try {
     const { text, usage } = await generateText({
-      model: openrouter(config.openRouterModel),
+      model: openrouter(model),
       prompt: `Write the caption that appears under an Instagram Reel for this ${nicheLabel}.
 
 SOURCE STORY:
@@ -410,13 +419,17 @@ Rules:
 - Do not invent facts, use spoiler language beyond this part, or use generic engagement bait such as "wait for it".
 - Put exactly 3–5 relevant Instagram hashtags on their own final line. Each must be lower-case, start with #, contain no spaces, and be story/niche-specific. Never use #fyp, #viral, #reels, #explorepage, #instagram, or #shorts.
 - Keep all prose and hashtags under 700 characters.
-- ${partInstruction}`,
+- ${partInstruction}
+
+${platformCopyRules("instagram")}
+
+${ownedEvidence ?? "OWNED INSTAGRAM PERFORMANCE: insufficient comparable posts. Follow the platform defaults only."}`,
     });
-    reportLlmUsage(onLlmUsage, "Instagram caption", config.openRouterModel, usage);
+    reportLlmUsage(onLlmUsage, "Instagram caption", model, usage);
     const generatedCaption = extractInstagramCaption(text);
     if (!generatedCaption) throw new Error("Instagram caption model returned no caption");
     const caption = cleanInstagramCaption(generatedCaption, fallback, tags);
-    return { caption, source: "ai", model: config.openRouterModel };
+    return { caption, source: "ai", model };
   } catch (error: unknown) {
     console.warn(`Instagram caption generation failed, using fallback: ${getErrorMessage(error)}`);
     recordOperationLog({
@@ -463,6 +476,82 @@ export async function generateInstagramCaptionForReel(
     },
   });
   return settings;
+}
+
+/** Generate the two non-Instagram Meta surfaces together, but keep their
+ * saved fields separate so editing/publishing remains platform-native. */
+export async function generateFacebookAndThreadsCopyForReel(
+  reel: IReel,
+  onLlmUsage?: LlmUsageCallback,
+  options: { platforms?: ("facebook" | "threads")[] } = {},
+): Promise<{ facebook: IFacebookPublishSettings; threads: IThreadsPublishSettings }> {
+  const platforms = options.platforms?.length
+    ? [...new Set(options.platforms)]
+    : ["facebook", "threads"] as const;
+  const generateFacebook = platforms.includes("facebook");
+  const generateThreads = platforms.includes("threads");
+  const model = resolveModels("cheap").llm;
+  const source = storySeed(reel).slice(0, 2_600);
+  const [facebookEvidence, threadsEvidence] = await Promise.all([
+    getOwnedAnalyticsGuidance("facebook", reel.genre),
+    getOwnedAnalyticsGuidance("threads", reel.genre),
+  ]);
+  const contentLabel = reel.niche === "reddit"
+    ? "Reddit-story video"
+    : isHorrorNiche(reel.niche)
+      ? "horror story video"
+      : `${getRecipe(reel.niche).displayName} video`;
+  const fallbackFacebook = reel.review?.description ?? buildDescription(reel, reel.review?.title ?? buildTitle(reel));
+  const fallbackThreads = reel.review?.title ?? buildTitle(reel);
+  if (!source || !config.openRouterApiKey) {
+    if (generateFacebook) {
+      reel.facebookSettings = { ...(reel.facebookSettings ?? {}), description: fallbackFacebook, source: "fallback", generatedAt: new Date() };
+      reel.markModified("facebookSettings");
+    }
+    if (generateThreads) {
+      reel.threadsSettings = { ...(reel.threadsSettings ?? {}), text: fallbackThreads.slice(0, 500), source: "fallback", generatedAt: new Date() };
+      reel.markModified("threadsSettings");
+    }
+    return { facebook: reel.facebookSettings ?? {}, threads: reel.threadsSettings ?? {} };
+  }
+  try {
+    const { text, usage } = await generateText({
+      model: openrouter(model),
+      prompt: `Write ${generateFacebook && generateThreads ? "distinct Facebook Reels and Threads" : generateFacebook ? "Facebook Reels" : "Threads"} copy for this ${contentLabel}.
+
+SOURCE STORY:
+${source}
+
+Output JSON only: ${generateFacebook && generateThreads ? '{"facebookDescription":"...","threadsText":"..."}' : generateFacebook ? '{"facebookDescription":"..."}' : '{"threadsText":"..."}'}.
+${generateFacebook ? "- Facebook description: 1–2 concise, readable sentences of accurate context plus at most one real story question. Maximum 700 characters." : ""}
+${generateThreads ? `- Threads text: independently understandable, opinionated premise plus one specific question. Maximum 500 characters.${generateFacebook ? " Do not copy the Facebook text." : ""}` : ""}
+- Never invent facts, claim a part is live, use keyword/hashtag dumps, or use vote/like/comment bait.
+
+${platformCopyRules("facebook")}
+
+${platformCopyRules("threads")}
+
+OWNED FACEBOOK PERFORMANCE (first-party, Facebook only):
+${facebookEvidence ?? "Insufficient comparable Facebook posts. Follow the platform defaults only."}
+
+OWNED THREADS PERFORMANCE (first-party, Threads only):
+${threadsEvidence ?? "Insufficient comparable Threads posts. Follow the platform defaults only."}`,
+    });
+    reportLlmUsage(onLlmUsage, "Facebook & Threads copy", model, usage);
+    const json = text.match(/\{[\s\S]*\}/)?.[0];
+    const parsed = json ? JSON.parse(json) as Record<string, unknown> : {};
+    const facebookDescription = typeof parsed.facebookDescription === "string" ? trimCaptionBody(parsed.facebookDescription, 700) : fallbackFacebook;
+    const threadsText = typeof parsed.threadsText === "string" ? trimCaptionBody(parsed.threadsText, 500) : fallbackThreads.slice(0, 500);
+    if (generateFacebook) reel.facebookSettings = { ...(reel.facebookSettings ?? {}), description: facebookDescription || fallbackFacebook, source: "ai", generatedAt: new Date(), model };
+    if (generateThreads) reel.threadsSettings = { ...(reel.threadsSettings ?? {}), text: threadsText || fallbackThreads.slice(0, 500), source: "ai", generatedAt: new Date(), model };
+  } catch (error) {
+    recordOperationLog({ scope: "external", level: "warn", event: "crosspost.copy_ai_fallback", message: "Facebook/Threads copy generation failed; saved guarded fallbacks", reelId: reel._id.toString(), error });
+    if (generateFacebook) reel.facebookSettings = { ...(reel.facebookSettings ?? {}), description: fallbackFacebook, source: "fallback", generatedAt: new Date() };
+    if (generateThreads) reel.threadsSettings = { ...(reel.threadsSettings ?? {}), text: fallbackThreads.slice(0, 500), source: "fallback", generatedAt: new Date() };
+  }
+  if (generateFacebook) reel.markModified("facebookSettings");
+  if (generateThreads) reel.markModified("threadsSettings");
+  return { facebook: reel.facebookSettings ?? {}, threads: reel.threadsSettings ?? {} };
 }
 
 export interface InstagramPollSuggestionResult {
@@ -598,6 +687,10 @@ async function buildReviewCopy(
   const fallbackTitle = baseFallbackTitle;
   const fallbackDescription = withDescriptionHashtags(buildDescription(reel, baseFallbackTitle), hashtagStrings);
   const source = storySeed(reel).slice(0, 2600);
+  const [research, ownedEvidence] = await Promise.all([
+    getTrendCopyGuidance(reel.niche, reel.genre),
+    getOwnedAnalyticsGuidance("youtube", reel.genre),
+  ]);
   if (!source || !config.openRouterApiKey) {
     return { title: fallbackTitle, description: fallbackDescription };
   }
@@ -610,8 +703,9 @@ async function buildReviewCopy(
         : getRecipe(reel.niche).displayName;
 
   try {
+    const model = resolveModels("cheap").llm;
     const { text, usage } = await generateText({
-      model: openrouter(config.openRouterModel),
+      model: openrouter(model),
       prompt: `Write the YouTube Shorts metadata for this ${nicheLabel}.
 
 SOURCE STORY:
@@ -624,9 +718,17 @@ Rules:
 - Avoid generic format words such as gameplay, AI, video generation, horror video, short-form, content, captions, thumbnail, Instagram, Reel, or "watch now".
 - Do not invent facts not present in the source.
 - Include accurate part context when this is one part of a series.
-- Make it punchy, human, searchable, and platform-native — never templated filler.`,
+- Make it punchy, human, searchable, and platform-native — never templated filler.
+
+${platformCopyRules("youtube")}
+
+OWNED YOUTUBE PERFORMANCE — higher priority because this is our audience:
+${ownedEvidence ?? "Insufficient comparable owned YouTube posts. Follow the platform defaults."}
+
+EXTERNAL YOUTUBE RESEARCH — lower-priority cold-start packaging inspiration only:
+${research}`,
     });
-    reportLlmUsage(onLlmUsage, "Review copy", config.openRouterModel, usage);
+    reportLlmUsage(onLlmUsage, "Review copy", model, usage);
 
     const parsed = extractReviewJson(text);
     const baseTitle = parsed.title ? stripHashtagsFromText(cleanTitle(parsed.title)) : baseFallbackTitle;
@@ -739,6 +841,8 @@ export async function ensureReelThumbnailHook(
 
   const thumbnailHook = await buildThumbnailText(reel, onLlmUsage);
   reel.thumbnailHook = thumbnailHook;
+  // First-time hook fill may stale an automatic opening cover headline.
+  await refreshAutomaticOpeningCoverIfStale(reel);
   return thumbnailHook;
 }
 
@@ -1123,6 +1227,30 @@ export async function regenerateInstagramPollSuggestion(reelId: string): Promise
     measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
   });
   applyMeasuredCostsToReel(reel, measuredCosts, "Instagram poll suggestion");
+  await reel.save();
+  return reel;
+}
+
+/** Paid, explicit re-generation for one Meta cross-post surface. It never
+ * changes the other platform's saved draft, YouTube metadata, or media. */
+export async function regenerateCrossPostCopy(
+  reelId: string,
+  platform: "facebook" | "threads",
+): Promise<IReel> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const measuredCosts: MeasuredCostInput[] = [];
+  await generateFacebookAndThreadsCopyForReel(reel, (usage) => {
+    measuredCosts.push({ label: usage.label, model: usage.model, costUsd: usage.costUsd, source: "actual" });
+  }, { platforms: [platform] });
+  applyMeasuredCostsToReel(reel, measuredCosts, `${platform === "facebook" ? "Facebook" : "Threads"} copy`);
+  recordOperationLog({
+    scope: "system",
+    event: `${platform}.copy_generated`,
+    message: `Generated ${platform === "facebook" ? "Facebook Reels description" : "Threads post text"}`,
+    reelId: reel._id.toString(),
+    metadata: { model: resolveModels("cheap").llm },
+  });
   await reel.save();
   return reel;
 }

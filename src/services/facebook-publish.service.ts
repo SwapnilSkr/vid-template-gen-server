@@ -1,6 +1,21 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 import { config } from "../config";
-import { FacebookPage, OAuthState, Reel, type IReel } from "../models";
+import {
+  FacebookDataDeletionRequest,
+  FacebookPage,
+  OAuthState,
+  OwnedMetricSnapshot,
+  PerformanceEvidenceCard,
+  Reel,
+  type IReel,
+} from "../models";
 import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { buildFirstCommentText } from "./post-comment.service";
@@ -27,7 +42,126 @@ import { assertDailyPublishLimit } from "./publish-guard.service";
 
 const graphBase = () => `https://graph.facebook.com/${config.facebookApiVersion}`;
 const ruploadBase = () => `https://rupload.facebook.com/video-upload/${config.facebookApiVersion}`;
-const scopes = ["pages_show_list", "pages_read_engagement", "pages_manage_posts", "pages_manage_engagement"];
+const scopes = ["pages_show_list", "pages_read_engagement", "pages_manage_posts", "pages_manage_engagement", "read_insights", "business_management"];
+
+interface FacebookSignedRequestPayload {
+  algorithm?: string;
+  user_id?: string | number;
+}
+
+/** Verifies the signed request Meta sends to the Facebook Login for Business
+ * deauthorize and data-deletion callbacks. Never accept an unsigned identity
+ * because these endpoints authorize removal of encrypted Page tokens. */
+function facebookUserIdFromSignedRequest(signedRequest: string): string {
+  if (!config.facebookAppSecret) {
+    throw new Error("FACEBOOK_APP_SECRET is required to verify Facebook lifecycle callbacks");
+  }
+  const [encodedSignature, encodedPayload] = signedRequest.split(".");
+  if (!encodedSignature || !encodedPayload) throw new Error("Invalid Facebook signed request");
+
+  const suppliedSignature = Buffer.from(encodedSignature, "base64url");
+  const expectedSignature = createHmac("sha256", config.facebookAppSecret)
+    .update(encodedPayload)
+    .digest();
+  if (
+    suppliedSignature.length !== expectedSignature.length
+    || !timingSafeEqual(suppliedSignature, expectedSignature)
+  ) {
+    throw new Error("Invalid Facebook callback signature");
+  }
+
+  let payload: FacebookSignedRequestPayload;
+  try {
+    payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as FacebookSignedRequestPayload;
+  } catch {
+    throw new Error("Invalid Facebook callback payload");
+  }
+  if (payload.algorithm && payload.algorithm.toUpperCase() !== "HMAC-SHA256") {
+    throw new Error("Unsupported Facebook callback signature algorithm");
+  }
+  if (typeof payload.user_id !== "string" && typeof payload.user_id !== "number") {
+    throw new Error("Facebook callback did not include a user id");
+  }
+  return String(payload.user_id);
+}
+
+/** Delete the locally-held Page OAuth data tied to a Facebook user. Published
+ * Facebook content itself stays on Facebook; only this app's credentials,
+ * Page metadata, and local routing records are removed. */
+async function deleteLocalFacebookUserData(facebookUserId: string): Promise<number> {
+  const pages = await FacebookPage.find({ userId: facebookUserId }).select({ channelKey: 1 }).lean();
+  const channelKeys = pages.map((page) => page.channelKey);
+  await FacebookPage.deleteMany({ userId: facebookUserId });
+  if (channelKeys.length) {
+    await Reel.updateMany(
+      {
+        $or: [
+          { "facebook.channelId": { $in: channelKeys } },
+          { destinations: { $elemMatch: { platform: "facebook", channelId: { $in: channelKeys } } } },
+        ],
+      },
+      {
+        $pull: {
+          facebook: { channelId: { $in: channelKeys } },
+          destinations: { platform: "facebook", channelId: { $in: channelKeys } },
+        },
+      },
+    );
+    await OwnedMetricSnapshot.deleteMany({ platform: "facebook", "account.key": { $in: channelKeys } });
+    // Aggregate cards may contain samples from several Pages. Remove the
+    // Facebook cache wholesale; the next explicit Performance sync rebuilds
+    // it only from the Pages the app still holds authorization for.
+    await PerformanceEvidenceCard.deleteMany({ platform: "facebook" });
+  }
+  return channelKeys.length;
+}
+
+/** Meta's Facebook Login deauthorization callback. Safe to retry. */
+export async function handleFacebookUninstall(signedRequest: string): Promise<void> {
+  const facebookUserId = facebookUserIdFromSignedRequest(signedRequest);
+  const deletedPageCount = await deleteLocalFacebookUserData(facebookUserId);
+  recordOperationLog({
+    scope: "external",
+    event: "facebook.app_deauthorized",
+    message: "Removed local Facebook Page authorization data after deauthorization",
+    metadata: { deletedPageCount },
+  });
+}
+
+/** Meta's Facebook Login data-deletion callback. It returns a receipt that
+ * Meta and the account owner can open after the deletion is complete. */
+export async function handleFacebookDataDeletion(signedRequest: string): Promise<{
+  confirmationCode: string;
+  deletedPageCount: number;
+}> {
+  const facebookUserId = facebookUserIdFromSignedRequest(signedRequest);
+  const deletedPageCount = await deleteLocalFacebookUserData(facebookUserId);
+  const confirmationCode = randomBytes(24).toString("hex");
+  await FacebookDataDeletionRequest.create({
+    confirmationCode,
+    facebookUserId,
+    deletedPageCount,
+    completedAt: new Date(),
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1_000),
+  });
+  recordOperationLog({
+    scope: "external",
+    event: "facebook.data_deletion_completed",
+    message: "Removed local Facebook data after a signed deletion request",
+    metadata: { deletedPageCount },
+  });
+  return { confirmationCode, deletedPageCount };
+}
+
+export async function getFacebookDataDeletionRequest(confirmationCode: string) {
+  return FacebookDataDeletionRequest.findOne({ confirmationCode }).lean();
+}
+
+/** Lifecycle callback URLs share the configured OAuth callback's origin. */
+export function facebookCallbackUrl(path: string): string {
+  const redirect = new URL(config.facebookRedirectUri);
+  return new URL(path, redirect.origin).toString();
+}
 
 function tokenKey(): Buffer {
   const material = config.youtubeTokenEncryptionKey || config.facebookAppSecret;
@@ -48,7 +182,8 @@ function decryptToken(value: string): string {
 }
 function slug(input: string) { return input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || `facebook-${Date.now()}`; }
 function requireMetaConfig() {
-  if (!config.facebookAppId || !config.facebookAppSecret) throw new Error("Set FACEBOOK_APP_ID and FACEBOOK_APP_SECRET (or the shared INSTAGRAM_APP_* values) before connecting a Facebook Page");
+  if (!config.facebookAppId || !config.facebookAppSecret) throw new Error("Set FACEBOOK_APP_ID and FACEBOOK_APP_SECRET from the parent Meta app that owns your Facebook Login for Business configuration before connecting a Facebook Page");
+  if (!config.facebookLoginConfigId) throw new Error("Set FACEBOOK_LOGIN_CONFIG_ID from Facebook Login for Business → Configurations before connecting a Facebook Page");
 }
 function requireEnabled() {
   if (!config.facebookReelsEnabled) throw new Error("Facebook Reels publishing is disabled. Set FACEBOOK_REELS_ENABLED=true after finishing Meta app setup.");
@@ -79,7 +214,18 @@ export async function startFacebookConnect(input: StartFacebookConnectInput) {
   if (!input.label.trim()) throw new Error("Account label is required");
   const state = randomBytes(24).toString("base64url");
   await OAuthState.create({ state, provider: "facebook", payload: { label: input.label.trim(), channelKey: input.channelKey?.trim() || slug(input.label), niches: input.niches ?? [], privacyStatus: "public", categoryId: "22" }, expiresAt: new Date(Date.now() + 15 * 60 * 1000) });
-  const params = new URLSearchParams({ client_id: config.facebookAppId, redirect_uri: config.facebookRedirectUri, response_type: "code", scope: scopes.join(","), state });
+  const params = new URLSearchParams({
+    client_id: config.facebookAppId,
+    redirect_uri: config.facebookRedirectUri,
+    response_type: "code",
+    // Business Login selects assets/permissions through its saved
+    // configuration. Keep the explicit scopes too, so the requested Page
+    // permissions remain transparent and work with Meta's code flow.
+    scope: scopes.join(","),
+    config_id: config.facebookLoginConfigId,
+    override_default_response_type: "true",
+    state,
+  });
   return { authUrl: `https://www.facebook.com/${config.facebookApiVersion}/dialog/oauth?${params}` };
 }
 
@@ -96,11 +242,40 @@ export async function completeFacebookConnect(code: string, state: string): Prom
   const long = await longRes.json() as { access_token?: string; expires_in?: number; error?: { message?: string } };
   if (!longRes.ok || !long.access_token) throw new Error(long.error?.message || "Could not exchange Facebook token");
   const me = await graph<{ id: string }>(`/me?fields=id`, long.access_token);
-  const pagesRes = await graph<{ data?: { id: string; name?: string; access_token: string; category?: string; picture?: { data?: { url?: string } } }[] }>(`/me/accounts?fields=id,name,access_token,category,picture`, long.access_token);
-  const pages = pagesRes.data ?? [];
-  if (!pages.length) throw new Error("This Facebook account administers no Pages. Create/assign a Page, then reconnect.");
+  interface FacebookPageToken {
+    id: string;
+    name?: string;
+    access_token?: string;
+    category?: string;
+    picture?: { data?: { url?: string } };
+  }
+  const pagesRes = await graph<{ data?: FacebookPageToken[] }>(`/me/accounts?fields=id,name,access_token,category,picture`, long.access_token);
+  let pages = (pagesRes.data ?? []).filter((page) => Boolean(page.access_token));
+  // Pages owned through a Meta Business Portfolio can be omitted from
+  // /me/accounts even when the user has task access. Business Login with
+  // business_management exposes those through this assigned-page edge.
+  if (!pages.length) {
+    const assigned = await graph<{ data?: FacebookPageToken[] }>(`/me/assigned_pages?fields=id,name,access_token,category,picture`, long.access_token)
+      .then((response) => response.data ?? [])
+      .catch(() => []);
+    pages = assigned.filter((page) => Boolean(page.access_token));
+  }
+  if (!pages.length) {
+    const permissions = await graph<{ data?: { permission?: string; status?: string }[] }>("/me/permissions", long.access_token)
+      .then((response) => (response.data ?? [])
+        .filter((entry) => entry.status === "granted")
+        .map((entry) => entry.permission)
+        .filter((permission): permission is string => Boolean(permission)))
+      .catch(() => []);
+    const granted = permissions.length ? ` Meta granted: ${permissions.join(", ")}.` : "";
+    throw new Error(
+      "Meta returned no Pages for this Facebook login. In Facebook Login for Business → Configurations, add Facebook Pages plus business_management, pages_show_list, pages_read_engagement, and pages_manage_posts. Then log in with the Facebook profile that has full control of the Page and reconnect."
+      + granted,
+    );
+  }
   const expiresAt = long.expires_in ? new Date(Date.now() + long.expires_in * 1000) : undefined;
   for (const page of pages) {
+    if (!page.access_token) continue;
     const channelKey = slug(page.name || `page-${page.id}`);
     await FacebookPage.findOneAndUpdate(
       { pageId: page.id },
@@ -128,6 +303,59 @@ async function resolveFacebookPage(id: string) {
   const page = await FacebookPage.findOne({ channelKey: id, status: "active" });
   if (!page) throw new Error(`Unknown or inactive Facebook Page: ${id}`);
   return page;
+}
+
+function facebookInsightNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value === "object" && "value" in value) return facebookInsightNumber((value as { value?: unknown }).value);
+  return undefined;
+}
+
+/**
+ * Facebook's Page Reel insight catalogue differs by Page, API version and
+ * rollout. Keep this capability-based: a rejected metric does not turn into a
+ * fake zero or fail analytics for the rest of the user's destinations.
+ */
+export async function fetchOwnedFacebookReelMetrics(channelId: string, videoId: string): Promise<{
+  accountLabel: string;
+  platformAccountId: string;
+  metrics: Record<string, number>;
+  available: string[];
+  limitations: string[];
+  provider: Record<string, unknown>;
+}> {
+  const page = await resolveFacebookPage(channelId);
+  const token = decryptToken(page.encryptedAccessToken);
+  const requested = (Bun.env.FACEBOOK_REELS_INSIGHT_METRICS ?? "post_video_views,post_video_view_time,post_video_avg_time_watched")
+    .split(",").map((value) => value.trim()).filter(Boolean);
+  try {
+    const response = await graph<{ data?: { name?: string; value?: unknown; values?: { value?: unknown }[] }[] }>(
+      `/${videoId}/video_insights?metric=${requested.join(",")}`,
+      token,
+    );
+    const metrics: Record<string, number> = {};
+    for (const item of response.data ?? []) {
+      const value = facebookInsightNumber(item.value ?? item.values?.[0]?.value);
+      if (item.name && value !== undefined) metrics[item.name] = value;
+    }
+    return {
+      accountLabel: page.label,
+      platformAccountId: page.pageId,
+      metrics,
+      available: Object.keys(metrics),
+      limitations: requested.filter((name) => metrics[name] === undefined).map((name) => `Facebook did not return ${name} for this Reel.`),
+      provider: { returnedMetrics: response.data ?? [], requestedMetrics: requested },
+    };
+  } catch (error) {
+    return {
+      accountLabel: page.label,
+      platformAccountId: page.pageId,
+      metrics: {},
+      available: [],
+      limitations: [`Facebook insight capability could not be verified: ${getErrorMessage(error)}`],
+      provider: { requestedMetrics: requested },
+    };
+  }
 }
 
 /** Prefer a Page-specific branded render when the creator explicitly added
@@ -180,10 +408,11 @@ export async function publishReelToFacebook(reelId: string, channelId: string): 
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ upload_phase: "start" }),
     });
     if (!start.video_id) throw new Error("Facebook did not return a video_id for the Reel upload");
-    await setStatus("uploading", { videoId: start.video_id, message: "Facebook accepted the upload — transferring media…" });
+    const videoId = start.video_id;
+    await setStatus("uploading", { videoId, message: "Facebook accepted the upload — transferring media…" });
 
     // Phase 2: hosted-URL upload (Facebook pulls the public render).
-    const uploadRes = await fetch(`${ruploadBase()}/${start.video_id}`, {
+    const uploadRes = await fetch(`${ruploadBase()}/${videoId}`, {
       method: "POST",
       headers: { Authorization: `OAuth ${token}`, file_url: videoUrl },
     });
@@ -195,24 +424,37 @@ export async function publishReelToFacebook(reelId: string, channelId: string): 
     // Phase 3: finish + publish
     const finish = await graph<{ success?: boolean; post_id?: string }>(`/${page.pageId}/video_reels`, token, {
       method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ upload_phase: "finish", video_id: start.video_id, video_state: "PUBLISHED", description }),
+      body: new URLSearchParams({ upload_phase: "finish", video_id: videoId, video_state: "PUBLISHED", description }),
     });
     void finish;
-    const url = `https://www.facebook.com/reel/${start.video_id}`;
-    await setStatus("published", { videoId: start.video_id, url, error: undefined, message: "Published.", publishedAt: new Date() });
+    const url = `https://www.facebook.com/reel/${videoId}`;
+    const publishedAt = new Date();
+    await setStatus("published", { videoId, url, error: undefined, message: "Published.", publishedAt });
     await FacebookPage.updateOne({ _id: page._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
+    void import("./owned-analytics.service")
+      .then(({ registerOwnedPublication }) => registerOwnedPublication(reel, {
+        platform: "facebook", accountKey: page.channelKey, accountLabel: page.label,
+        mediaId: videoId, url, publishedAt, firstCommentKind: "none",
+      }))
+      .catch((error) => console.warn(`Could not freeze Facebook publication analytics context: ${getErrorMessage(error)}`));
 
     if (config.facebookAutoFirstComment) {
       try {
         const comment = buildFirstCommentText(reel, "facebook", 8_000);
-        const commentId = await createFacebookComment(start.video_id, comment.text, token);
+        const commentId = await createFacebookComment(videoId, comment.text, token);
         await setStatus("published", { firstCommentStatus: "posted", firstCommentId: commentId, firstCommentError: undefined });
-        recordOperationLog({ scope: "external", event: "facebook.first_comment_posted", message: "Posted the own-post first comment on the published Reel", reelId, metadata: { channelId: page.channelKey, videoId: start.video_id, source: comment.source } });
+        recordOperationLog({ scope: "external", event: "facebook.first_comment_posted", message: "Posted the own-post first comment on the published Reel", reelId, metadata: { channelId: page.channelKey, videoId, source: comment.source } });
       } catch (commentError) {
         await setStatus("published", { firstCommentStatus: "failed", firstCommentError: getErrorMessage(commentError) });
         recordOperationLog({ scope: "external", level: "warn", event: "facebook.first_comment_failed", message: "Facebook Reel published, but the own-post first comment could not be posted", reelId, metadata: { channelId: page.channelKey, videoId: start.video_id }, error: commentError });
       }
     }
+    // A verified Part 1/Part 2 link is useful independently of the optional
+    // discussion question. Never make the series-navigation layer disappear
+    // merely because a creator turns automatic first comments off.
+    void import("./series-navigation-comment.service")
+      .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "facebook", page.channelKey))
+      .catch((error) => console.warn(`Could not reconcile Facebook series-navigation comments: ${getErrorMessage(error)}`));
   } catch (error) {
     const message = getErrorMessage(error);
     await setStatus("failed", { error: message, message: `Failed: ${message}` });
@@ -228,6 +470,11 @@ async function createFacebookComment(objectId: string, message: string, token: s
   return res.id;
 }
 
+export async function postFacebookSeriesNavigationComment(channelId: string, videoId: string, text: string): Promise<string> {
+  const page = await resolveFacebookPage(channelId);
+  return createFacebookComment(videoId, text, decryptToken(page.encryptedAccessToken));
+}
+
 /** Manually (re)post the own-post first comment for a published Facebook Reel. */
 export async function postFacebookFirstComment(reelId: string, channelId: string): Promise<string> {
   const reel = await Reel.findById(reelId);
@@ -239,5 +486,8 @@ export async function postFacebookFirstComment(reelId: string, channelId: string
   const comment = buildFirstCommentText(reel, "facebook", 8_000);
   const commentId = await createFacebookComment(publish.videoId, comment.text, token);
   await Reel.updateOne({ _id: reelId, "facebook.channelId": channelId }, { $set: { "facebook.$.firstCommentStatus": "posted", "facebook.$.firstCommentId": commentId, "facebook.$.firstCommentError": undefined } });
+  void import("./series-navigation-comment.service")
+    .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "facebook", channelId))
+    .catch((error) => console.warn(`Could not reconcile Facebook series-navigation comments: ${getErrorMessage(error)}`));
   return commentId;
 }

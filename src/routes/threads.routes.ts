@@ -13,6 +13,7 @@ import {
   deleteThreadsChannelController,
   listThreadsChannelsController,
   publishThreadsController,
+  postThreadsFirstReplyController,
   startThreadsConnectController,
   threadsDataDeletionController,
   threadsDataDeletionStatusController,
@@ -31,4 +32,5 @@ export const threadsRoutes = new Elysia({ prefix: "/api/threads" })
   .get("/data-deletion/status/:confirmationCode", threadsDataDeletionStatusController, { params: ThreadsDeletionStatusParams })
   .delete("/channels/:id", deleteThreadsChannelController, { params: IdParams })
   .put("/channels/:id", updateThreadsChannelController, { params: IdParams, body: UpdateThreadsChannelBody })
+  .post("/reels/:reelId/channels/:channelId/first-reply", postThreadsFirstReplyController, { params: ReelChannelParams })
   .post("/reels/:reelId/channels/:channelId/publish", publishThreadsController, { params: ReelChannelParams });

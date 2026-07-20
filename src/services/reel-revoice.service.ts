@@ -70,6 +70,9 @@ export async function requestRevoice(
 export async function processRevoice(reelId: string, variantIds: string[]): Promise<void> {
   const reel = await Reel.findById(reelId);
   if (!reel || !reel.redditStory) return;
+  if (reel.gameplayAssetMissing) {
+    throw new Error("This reel's gameplay clip was deleted. Choose a replacement in Studio before revoicing.");
+  }
 
   const { path: gameplayPath, key: gameplayKey } = await pickGameplay(reel.gameplayKey);
   if (!reel.gameplayKey) {

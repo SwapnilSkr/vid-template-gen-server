@@ -453,6 +453,9 @@ export async function startYouTubeChannelConnect(input: StartYouTubeConnectInput
     scope: [
       "https://www.googleapis.com/auth/youtube.upload",
       "https://www.googleapis.com/auth/youtube.readonly",
+      // Owned-channel retention / engaged-view reporting. Existing channels
+      // must reconnect once to grant this separate Analytics API scope.
+      "https://www.googleapis.com/auth/yt-analytics.readonly",
       // Required for the own-post first comment + assisted read/reply layer
       // (commentThreads.insert / comments.insert). Channels connected before
       // this scope was added must reconnect once to grant it.
@@ -532,6 +535,50 @@ export async function updateYouTubeChannel(
   if (input.niches !== undefined) channel.niches = input.niches;
   await channel.save();
   return channel;
+}
+
+/**
+ * First-party reporting for a Short we published. This is deliberately kept
+ * separate from the public search/scout path: the Analytics API only exposes
+ * data for the connected owner's channel.
+ */
+export async function fetchOwnedYouTubeVideoMetrics(channelId: string, videoId: string): Promise<{
+  accountLabel: string;
+  platformAccountId?: string;
+  metrics: Record<string, number>;
+  available: string[];
+  limitations: string[];
+}> {
+  const channel = await resolveYouTubePublishChannel(channelId);
+  const auth = getYouTubeOAuthClientForRefreshToken(
+    channel.refreshToken,
+    channel.clientId,
+    channel.clientSecret,
+    channel.redirectUri,
+  );
+  const analytics = google.youtubeAnalytics({ version: "v2", auth });
+  const endDate = new Date().toISOString().slice(0, 10);
+  const startDate = new Date(Date.now() - 92 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const response = await analytics.reports.query({
+    ids: "channel==MINE",
+    startDate,
+    endDate,
+    filters: `video==${videoId}`,
+    metrics: "views,engagedViews,likes,comments,shares,estimatedMinutesWatched,averageViewDuration,averageViewPercentage,subscribersGained,subscribersLost",
+  });
+  const headers = response.data.columnHeaders?.map((header) => header.name ?? "") ?? [];
+  const row = response.data.rows?.[0] ?? [];
+  const metrics: Record<string, number> = {};
+  headers.forEach((name, index) => {
+    const value = row[index];
+    if (name && typeof value === "number" && Number.isFinite(value)) metrics[name] = value;
+  });
+  return {
+    accountLabel: channel.label,
+    metrics,
+    available: Object.keys(metrics),
+    limitations: Object.keys(metrics).length ? [] : ["YouTube returned no report row for this video/date range yet."],
+  };
 }
 
 /** Publish an already-rendered reel to YouTube as a Short. Updates `reel.youtube`. */
@@ -679,6 +726,18 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
     };
     await reel.save();
     console.log(`📤 Published reel ${reelId} to YouTube: ${reel.youtube.url}`);
+    // Freeze the exact creative used at publish before later Studio edits. The
+    // analytics service is dynamically loaded to keep the publish adapter
+    // independent from its metric-provider imports.
+    if (videoId) {
+      void import("./owned-analytics.service")
+        .then(({ registerOwnedPublication }) => registerOwnedPublication(reel, {
+          platform: "youtube", accountKey: channel.id, accountLabel: channel.label,
+          mediaId: videoId, url: reel.youtube?.url, publishedAt: reel.youtube?.publishedAt,
+          firstCommentKind: "none",
+        }))
+        .catch((error) => console.warn(`Could not freeze YouTube publication analytics context: ${getErrorMessage(error)}`));
+    }
 
     // Own-post pinned-style first comment (curiosity prompt + series link).
     // Best-effort: never flip a successful publish to failed. Requires the
@@ -710,6 +769,9 @@ export async function publishReelToYouTube(reelId: string, channelId?: string): 
           error: commentError,
         });
       }
+      void import("./series-navigation-comment.service")
+        .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "youtube", channel.id))
+        .catch((error) => console.warn(`Could not reconcile YouTube series-navigation comments: ${getErrorMessage(error)}`));
     }
   } catch (error: unknown) {
     reel.youtube = {
@@ -758,6 +820,12 @@ async function insertYouTubeTopComment(youtube: youtube_v3.Youtube, videoId: str
   return id;
 }
 
+/** A separate comment used only after a linked series part is confirmed live. */
+export async function postYouTubeSeriesNavigationComment(channelId: string, videoId: string, text: string): Promise<string> {
+  const { youtube } = await youtubeClientForChannel(channelId);
+  return insertYouTubeTopComment(youtube, videoId, text);
+}
+
 export interface YouTubeCommentView {
   id: string;
   text: string;
@@ -778,6 +846,9 @@ export async function postYouTubeFirstComment(reelId: string, channelId?: string
   const commentId = await insertYouTubeTopComment(youtube, videoId, comment.text);
   reel.youtube = { ...reel.youtube, firstCommentStatus: "posted", firstCommentId: commentId, firstCommentError: undefined };
   await reel.save();
+  void import("./series-navigation-comment.service")
+    .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "youtube", channelId ?? reel.youtube?.channelId ?? ""))
+    .catch((error) => console.warn(`Could not reconcile YouTube series-navigation comments: ${getErrorMessage(error)}`));
   recordOperationLog({ scope: "external", event: "youtube.first_comment_posted", message: "Manually posted the own-post first comment", reelId, metadata: { videoId, source: comment.source } });
   return commentId;
 }

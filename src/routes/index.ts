@@ -14,3 +14,4 @@ export { facebookRoutes } from "./facebook.routes";
 export { threadsRoutes } from "./threads.routes";
 export { storyRoutes } from "./story.routes";
 export { operationLogRoutes } from "./operation-log.routes";
+export { ownedAnalyticsRoutes } from "./owned-analytics.routes";

@@ -7,6 +7,7 @@ import {
   handleThreadsDataDeletion,
   handleThreadsUninstall,
   listThreadsChannels,
+  postThreadsFirstReply,
   threadsCallbackUrl,
   startThreadsConnect,
   updateThreadsChannel,
@@ -42,6 +43,11 @@ export async function deleteThreadsChannelController({ params }: Context & { par
 }
 export async function updateThreadsChannelController({ params, body }: Context & { params: TIdParams; body: TUpdateThreadsChannelBody }) {
   return { success: true, data: await updateThreadsChannel(params.id, body) };
+}
+
+export async function postThreadsFirstReplyController({ params, set }: Context & { params: TReelChannelParams }) {
+  try { return { success: true, data: { replyId: await postThreadsFirstReply(params.reelId, params.channelId) } }; }
+  catch (error) { set.status = 400; return { success: false, error: getErrorMessage(error) }; }
 }
 
 /** Meta calls this when an account deauthorizes the Threads app. */
@@ -88,13 +94,16 @@ export async function publishThreadsController({ params, set }: Context & { para
     if (!reel) { set.status = 404; return { success: false, error: "Reel not found" }; }
     if (reel.status !== "completed") { set.status = 400; return { success: false, error: `Reel not completed. Current status: ${reel.status}` }; }
     if (!reel.outputUrl) { set.status = 409; return { success: false, error: "This reel has no rendered output to cross-post yet" }; }
-    reel.threads = [
+    const pendingThreads = [
       ...reel.threads.filter((p) => p.channelId !== params.channelId),
       { channelId: params.channelId, status: "pending", message: "Queued for Threads publishing…", updatedAt: new Date() },
     ];
-    await reel.save();
+    // Keep this update isolated from Facebook's concurrent queue request.
+    // A four-platform Studio submission must not lose a destination because
+    // two controllers happened to save the same Reel document at once.
+    await Reel.updateOne({ _id: reel._id }, { $set: { threads: pendingThreads } });
     await enqueuePublish(params.reelId, "threads", params.channelId);
-    return { success: true, data: { threads: reel.threads }, message: "Threads publish job queued" };
+    return { success: true, data: { threads: pendingThreads }, message: "Threads publish job queued" };
   } catch (error) { set.status = 400; return { success: false, error: getErrorMessage(error) }; }
 }
 

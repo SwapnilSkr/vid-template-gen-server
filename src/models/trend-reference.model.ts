@@ -30,10 +30,30 @@ export interface ITrendMetrics {
   capturedAt?: Date;
 }
 
+/** Immutable public-metric observation. Repeated captures reveal public view
+ * velocity without pretending we can see a competitor's private retention. */
+export interface ITrendMetricCapture extends ITrendMetrics {
+  capturedAt: Date;
+}
+
+export interface ITrendCreativeAnalysis {
+  hookType?: "accusation" | "consequence" | "question" | "reversal" | "confession" | "reveal" | "other";
+  titlePattern?: string;
+  keywordPhrases?: string[];
+  narrativeFormat?: "standalone" | "series" | "update" | "unknown";
+  notes?: string;
+  model?: string;
+  analyzedAt?: Date;
+}
+
 export interface ITrendReference extends Document {
   _id: Types.ObjectId;
   niche: string;
+  researchVersion?: string;
   genre?: string;
+  /** A public Short may match several genre queries. `genre` is legacy/display
+   * primary; it must not overwrite the complete match set. */
+  genreIds: string[];
   sourceUrl: string;
   platform: TrendPlatform;
   metrics: ITrendMetrics;
@@ -52,6 +72,8 @@ export interface ITrendReference extends Document {
   dayOfWeek?: number; // 0 (Sun) - 6 (Sat)
   hourUtc?: number; // 0-23
   scanWindow?: TrendScanWindow;
+  metricHistory: ITrendMetricCapture[];
+  analysis?: ITrendCreativeAnalysis;
 
   createdAt: Date;
   updatedAt: Date;
@@ -71,10 +93,25 @@ const trendMetricsSchema = new Schema<ITrendMetrics>(
   { _id: false }
 );
 
+const trendCreativeAnalysisSchema = new Schema<ITrendCreativeAnalysis>(
+  {
+    hookType: { type: String, enum: ["accusation", "consequence", "question", "reversal", "confession", "reveal", "other"] },
+    titlePattern: String,
+    keywordPhrases: { type: [String], default: [] },
+    narrativeFormat: { type: String, enum: ["standalone", "series", "update", "unknown"] },
+    notes: String,
+    model: String,
+    analyzedAt: Date,
+  },
+  { _id: false }
+);
+
 const trendReferenceSchema = new Schema<ITrendReference>(
   {
     niche: { type: String, required: true, trim: true, index: true },
+    researchVersion: { type: String, trim: true, index: true },
     genre: { type: String, trim: true, index: true },
+    genreIds: { type: [String], default: [], index: true },
     sourceUrl: { type: String, required: true, trim: true, unique: true },
     platform: {
       type: String,
@@ -102,11 +139,14 @@ const trendReferenceSchema = new Schema<ITrendReference>(
       type: String,
       enum: ["last_48h", "last_30d", "weekly_scan", "monthly_scan"],
     },
+    metricHistory: { type: [trendMetricsSchema], default: [] },
+    analysis: trendCreativeAnalysisSchema,
   },
   { timestamps: true }
 );
 
 trendReferenceSchema.index({ niche: 1, genre: 1, platform: 1, status: 1 });
+trendReferenceSchema.index({ niche: 1, genreIds: 1, platform: 1, status: 1 });
 trendReferenceSchema.index({ "metrics.views": -1, "metrics.likes": -1 });
 trendReferenceSchema.index({ niche: 1, genre: 1, dayOfWeek: 1, hourUtc: 1 });
 

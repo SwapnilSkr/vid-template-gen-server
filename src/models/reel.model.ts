@@ -219,6 +219,14 @@ export interface IReelEditDraft {
   baseline?: IEditDraftBaseline;
 }
 
+/** History of a post-render cut edit. The replacement is the only retained
+ * editable output; its superseded S3 object is reclaimed after a safe swap. */
+export interface IFinalVideoTrim {
+  sourceOutputUrl: string;
+  removedRanges: { startSec: number; endSec: number }[];
+  appliedAt: Date;
+}
+
 /** A locally staged thumbnail composition (Thumbnail Studio). The composed PNG
  *  lives under `rootDir` on this server only — nothing touches S3 until the
  *  draft is saved (upload + delete superseded thumbnail) or it is wiped on
@@ -274,6 +282,12 @@ export interface IYouTubePublish {
   firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
   firstCommentId?: string;
   firstCommentError?: string;
+  /** A separate, verified series-navigation comment. Never used to combine
+   * a discussion question with an unverified “Part N is live” claim. */
+  seriesNavigationStatus?: "pending" | "posted" | "failed" | "skipped";
+  seriesNavigationCommentId?: string;
+  seriesNavigationCommentError?: string;
+  seriesNavigationTargetReelId?: string;
 }
 
 /** A reel may go to several Instagram creator/business accounts. */
@@ -294,6 +308,10 @@ export interface IInstagramPublish {
   firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
   firstCommentId?: string;
   firstCommentError?: string;
+  seriesNavigationStatus?: "pending" | "posted" | "failed" | "skipped";
+  seriesNavigationCommentId?: string;
+  seriesNavigationCommentError?: string;
+  seriesNavigationTargetReelId?: string;
 }
 
 /** Facebook Reels publish state (Page publishing). One reel may fan out to
@@ -310,6 +328,10 @@ export interface IFacebookPublish {
   firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
   firstCommentId?: string;
   firstCommentError?: string;
+  seriesNavigationStatus?: "pending" | "posted" | "failed" | "skipped";
+  seriesNavigationCommentId?: string;
+  seriesNavigationCommentError?: string;
+  seriesNavigationTargetReelId?: string;
   updatedAt?: Date;
   publishedAt?: Date;
 }
@@ -329,6 +351,10 @@ export interface IThreadsPublish {
   firstCommentStatus?: "pending" | "posted" | "failed" | "skipped";
   firstCommentId?: string;
   firstCommentError?: string;
+  seriesNavigationStatus?: "pending" | "posted" | "failed" | "skipped";
+  seriesNavigationCommentId?: string;
+  seriesNavigationCommentError?: string;
+  seriesNavigationTargetReelId?: string;
   updatedAt?: Date;
   publishedAt?: Date;
 }
@@ -348,11 +374,17 @@ export interface IInstagramPublishSettings {
  * each Meta surface can carry genuinely platform-specific copy. */
 export interface IFacebookPublishSettings {
   description?: string;
+  source?: "ai" | "manual" | "fallback";
+  generatedAt?: Date;
+  model?: string;
 }
 
 /** Creator-edited body text for a Threads video post. */
 export interface IThreadsPublishSettings {
   text?: string;
+  source?: "ai" | "manual" | "fallback";
+  generatedAt?: Date;
+  model?: string;
 }
 
 export interface IInstagramPollSuggestion {
@@ -530,6 +562,9 @@ export interface IReel extends Document {
    *  either chosen at creation or picked randomly and recorded so revoice
    *  reuses the exact same background instead of swapping it. */
   gameplayKey?: string;
+  /** Set only when its selected gameplay object was force-deleted from the
+   * library. A creator must choose a replacement before another render. */
+  gameplayAssetMissing?: boolean;
   horrorAudioKey?: string;
   /** Connected YouTube channel id used for rendered outro branding. */
   outroChannelId?: string;
@@ -565,6 +600,7 @@ export interface IReel extends Document {
   /** Human-readable pipeline step for UI polling (e.g. "Image 3/9"). */
   currentStep?: string;
   outputUrl?: string;
+  finalVideoTrim?: IFinalVideoTrim;
   /** Pre-outro assembled body video — enables outro-only re-renders. */
   bodyVideoUrl?: string;
   /**
@@ -722,6 +758,18 @@ const reelDestinationSchema = new Schema<IReelDestination>(
     },
     error: String,
     createdAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+const finalVideoTrimSchema = new Schema<IFinalVideoTrim>(
+  {
+    sourceOutputUrl: { type: String, required: true },
+    removedRanges: [{
+      startSec: { type: Number, required: true, min: 0 },
+      endSec: { type: Number, required: true, min: 0 },
+    }],
+    appliedAt: { type: Date, required: true },
   },
   { _id: false }
 );
@@ -950,6 +998,10 @@ const youtubePublishSchema = new Schema<IYouTubePublish>(
     firstCommentStatus: { type: String, enum: ["pending", "posted", "failed", "skipped"] },
     firstCommentId: String,
     firstCommentError: String,
+    seriesNavigationStatus: { type: String, enum: ["pending", "posted", "failed", "skipped"] },
+    seriesNavigationCommentId: String,
+    seriesNavigationCommentError: String,
+    seriesNavigationTargetReelId: String,
   },
   { _id: false }
 );
@@ -971,6 +1023,10 @@ const instagramPublishSchema = new Schema<IInstagramPublish>(
     firstCommentStatus: firstCommentStatusEnum,
     firstCommentId: String,
     firstCommentError: String,
+    seriesNavigationStatus: firstCommentStatusEnum,
+    seriesNavigationCommentId: String,
+    seriesNavigationCommentError: String,
+    seriesNavigationTargetReelId: String,
   },
   { _id: false }
 );
@@ -987,6 +1043,10 @@ const facebookPublishSchema = new Schema<IFacebookPublish>(
     firstCommentStatus: firstCommentStatusEnum,
     firstCommentId: String,
     firstCommentError: String,
+    seriesNavigationStatus: firstCommentStatusEnum,
+    seriesNavigationCommentId: String,
+    seriesNavigationCommentError: String,
+    seriesNavigationTargetReelId: String,
     updatedAt: Date,
     publishedAt: Date,
   },
@@ -1006,6 +1066,10 @@ const threadsPublishSchema = new Schema<IThreadsPublish>(
     firstCommentStatus: firstCommentStatusEnum,
     firstCommentId: String,
     firstCommentError: String,
+    seriesNavigationStatus: firstCommentStatusEnum,
+    seriesNavigationCommentId: String,
+    seriesNavigationCommentError: String,
+    seriesNavigationTargetReelId: String,
     updatedAt: Date,
     publishedAt: Date,
   },
@@ -1031,12 +1095,12 @@ const instagramSettingsSchema = new Schema<IInstagramPublishSettings>(
 );
 
 const facebookSettingsSchema = new Schema<IFacebookPublishSettings>(
-  { description: String },
+  { description: String, source: String, generatedAt: Date, model: String },
   { _id: false },
 );
 
 const threadsSettingsSchema = new Schema<IThreadsPublishSettings>(
-  { text: String },
+  { text: String, source: String, generatedAt: Date, model: String },
   { _id: false },
 );
 
@@ -1137,6 +1201,7 @@ const reelSchema = new Schema<IReel>(
     partNumber: Number,
     partCount: Number,
     gameplayKey: String,
+    gameplayAssetMissing: { type: Boolean, default: false },
     horrorAudioKey: String,
     outroChannelId: String,
     outroInstagramChannelId: String,
@@ -1173,6 +1238,7 @@ const reelSchema = new Schema<IReel>(
     progress: { type: Number, default: 0, min: 0, max: 100 },
     currentStep: String,
     outputUrl: String,
+    finalVideoTrim: finalVideoTrimSchema,
     bodyVideoUrl: String,
     assemblyVideoUrl: String,
     subtitlesUrl: String,

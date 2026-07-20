@@ -7,6 +7,7 @@ import { TrendInsight, type ITrendInsight } from "../models";
 import { listTrendReferences } from "./trend-reference.service";
 import { getErrorMessage } from "../types";
 import { isEnglishText } from "../utils";
+import { TREND_RESEARCH_VERSION } from "./trend-research.constants";
 
 // ============================================
 // Distills raw TrendReference rows into a short cached per-genre "winning
@@ -39,6 +40,13 @@ const trendInsightSchema = z.object({
     .array(z.string())
     .max(MAX_HOOKS)
     .describe("Reusable hook-line templates with [placeholder] slots"),
+  evidence: z.object({
+    titlePatterns: z.array(z.string()).max(5),
+    hookTypes: z.array(z.string()).max(5),
+    keywordPhrases: z.array(z.string()).max(8),
+    cautions: z.array(z.string()).max(4),
+    confidence: z.enum(["low", "medium", "high"]),
+  }),
 });
 
 /** Flatten YouTube title/channel text so quotes and line breaks don't break the prompt. */
@@ -61,12 +69,16 @@ export async function refreshTrendInsight(
   const refs = rawRefs.filter((r) => isEnglishText(r.title ?? "")).slice(0, SAMPLE_SIZE);
   if (refs.length < MIN_SAMPLE) return null;
 
+  const now = Date.now();
   const sample = refs
     .map((r, i) => {
       const views = r.metrics?.views ?? 0;
       const title = sanitizeTrendSampleText(r.title ?? "untitled");
       const channel = r.channelTitle ? ` (${sanitizeTrendSampleText(r.channelTitle)})` : "";
-      return `${i + 1}. ${title} — ${views.toLocaleString()} views${channel}`;
+      const ageHours = r.metrics?.postedAt ? Math.max(1, Math.round((now - r.metrics.postedAt.getTime()) / 3_600_000)) : undefined;
+      const duration = r.metrics?.durationSec ? `, ${r.metrics.durationSec}s` : "";
+      const velocity = ageHours ? `, ~${Math.round(views / Math.max(ageHours, 12))} views/hour observed` : "";
+      return `${i + 1}. ${title} — ${views.toLocaleString()} views${velocity}${duration}${channel}`;
     })
     .join("\n");
 
@@ -78,6 +90,8 @@ ${sample}
 1. Distill 4-6 short bullet points describing the WINNING PATTERNS across these titles — hook structure, curiosity-gap technique, wording style, length, punctuation. Be concrete and specific (e.g. "opens with a question the viewer must judge", not "engaging titles").
 
 2. Write ${MAX_HOOKS} REUSABLE HOOK-LINE TEMPLATES inspired by (not copied from) these titles — generic, topic-agnostic openers a scriptwriter could adapt to a brand-new story in this niche. Use a "[placeholder]" for the specific subject (e.g. "The [object] in my [place] was never supposed to [action]..."). Do not quote or closely paraphrase any single title verbatim.
+
+3. Return evidence from this exact sample only. List observed title patterns, hook types, and natural keyword phrases. Add cautions whenever the sample is too small, overly repetitive, or its public view data cannot establish causation. Set confidence to low below 6 samples, medium for 6–14, and high only for 15+ varied samples. Do not claim to know retention, impressions, followers, or the creator's intent.
 
 Everything you write MUST be in English, regardless of the language any source title happens to be in.`;
 
@@ -98,9 +112,17 @@ Everything you write MUST be in English, regardless of the language any source t
       .slice(0, MAX_HOOKS);
     if (!digest) throw new Error("Empty digest in model response");
 
+    const evidence = {
+      titlePatterns: (output.evidence?.titlePatterns ?? []).map((item) => item.trim().slice(0, 180)).filter(Boolean),
+      hookTypes: (output.evidence?.hookTypes ?? []).map((item) => item.trim().slice(0, 80)).filter(Boolean),
+      keywordPhrases: (output.evidence?.keywordPhrases ?? []).map((item) => item.trim().slice(0, 80)).filter(Boolean),
+      cautions: (output.evidence?.cautions ?? []).map((item) => item.trim().slice(0, 180)).filter(Boolean),
+      confidence: output.evidence?.confidence ?? "low",
+      generatedAt: new Date(),
+    };
     return await TrendInsight.findOneAndUpdate(
-      { niche, genre },
-      { digest, hooks, sampleSize: refs.length },
+      { niche, genre, researchVersion: TREND_RESEARCH_VERSION },
+      { digest, hooks, sampleSize: refs.length, evidence, researchVersion: TREND_RESEARCH_VERSION },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
   } catch (error: unknown) {
@@ -124,17 +146,32 @@ export async function refreshAllTrendInsights(
 export interface TrendInsightData {
   digest: string;
   hooks: string[];
+  sampleSize: number;
+  evidence?: ITrendInsight["evidence"];
 }
 
 /** Cheap cached read for script/thumbnail prompts — no LLM call. */
 export async function getTrendInsight(niche: string, genre?: string): Promise<TrendInsightData | undefined> {
   if (!genre) return undefined;
-  const insight = await TrendInsight.findOne({ niche, genre });
+  const insight = await TrendInsight.findOne({ niche, genre, researchVersion: TREND_RESEARCH_VERSION });
   if (!insight) return undefined;
-  return { digest: insight.digest, hooks: insight.hooks ?? [] };
+  return { digest: insight.digest, hooks: insight.hooks ?? [], sampleSize: insight.sampleSize, evidence: insight.evidence };
+}
+
+/** Returns only evidence the current sample size can support. Platform default
+ * rules remain authoritative when the external corpus is sparse. */
+export async function getTrendCopyGuidance(niche: string, genre?: string): Promise<string> {
+  const insight = await getTrendInsight(niche, genre);
+  if (!insight || insight.sampleSize < 6 || insight.evidence?.confidence === "low") {
+    return "EXTERNAL RESEARCH: insufficient comparable samples. Follow the default platform rules only; do not infer a genre-specific winning style.";
+  }
+  const highConfidence = insight.sampleSize >= 15 && insight.evidence?.confidence === "high";
+  return `${highConfidence ? "HIGH" : "MEDIUM"}-CONFIDENCE EXTERNAL RESEARCH (${insight.sampleSize} comparable public samples):\n${insight.digest}\n${highConfidence ? "Adapt these observed patterns without copying any source wording." : "Treat these as optional prompts; platform defaults and story truth outrank them."}`;
 }
 
 /** Cheap cached read for thumbnail prompts — no LLM call. */
 export async function getTrendDigest(niche: string, genre?: string): Promise<string | undefined> {
-  return (await getTrendInsight(niche, genre))?.digest;
+  const insight = await getTrendInsight(niche, genre);
+  if (!insight || insight.sampleSize < 6 || insight.evidence?.confidence === "low") return undefined;
+  return insight.digest;
 }

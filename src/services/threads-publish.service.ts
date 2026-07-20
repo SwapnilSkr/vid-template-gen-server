@@ -18,6 +18,7 @@ import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { buildFirstCommentText } from "./post-comment.service";
 import { assertDailyPublishLimit } from "./publish-guard.service";
+import { publicMediaUrl } from "./s3.service";
 
 // ============================================================
 // Threads publishing (owned profiles).
@@ -39,7 +40,7 @@ import { assertDailyPublishLimit } from "./publish-guard.service";
 
 const OAUTH_HOST = "https://graph.threads.net";
 const graphBase = () => `https://graph.threads.net/${config.threadsApiVersion}`;
-const scopes = ["threads_basic", "threads_content_publish", "threads_manage_replies", "threads_read_replies"];
+const scopes = ["threads_basic", "threads_content_publish", "threads_manage_replies", "threads_read_replies", "threads_manage_insights"];
 const THREADS_TEXT_MAX = 500;
 
 interface ThreadsSignedRequestPayload {
@@ -258,6 +259,43 @@ async function accessTokenFor(channel: InstanceType<typeof ThreadsChannel>): Pro
   return token;
 }
 
+function threadsInsightNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value && typeof value === "object" && "value" in value) return threadsInsightNumber((value as { value?: unknown }).value);
+  return undefined;
+}
+
+/** Reads only insights for a media id owned by the connected Threads profile. */
+export async function fetchOwnedThreadsMediaMetrics(channelId: string, mediaId: string): Promise<{
+  accountLabel: string;
+  platformAccountId: string;
+  metrics: Record<string, number>;
+  available: string[];
+  limitations: string[];
+  provider: Record<string, unknown>;
+}> {
+  const channel = await resolveThreadsChannel(channelId);
+  const token = await accessTokenFor(channel);
+  const metricNames = ["views", "likes", "replies", "reposts", "quotes"];
+  const response = await graph<{ data?: { name?: string; value?: unknown; values?: { value?: unknown }[] }[] }>(
+    `/${mediaId}/insights?metric=${metricNames.join(",")}`,
+    token,
+  );
+  const metrics: Record<string, number> = {};
+  for (const item of response.data ?? []) {
+    const value = threadsInsightNumber(item.value ?? item.values?.[0]?.value);
+    if (item.name && value !== undefined) metrics[item.name] = value;
+  }
+  return {
+    accountLabel: channel.label,
+    platformAccountId: channel.threadsUserId,
+    metrics,
+    available: Object.keys(metrics),
+    limitations: metricNames.filter((name) => metrics[name] === undefined).map((name) => `Threads did not return ${name} for this post.`),
+    provider: { returnedMetrics: response.data ?? [] },
+  };
+}
+
 /** Prefer a profile-specific branded render when configured; otherwise retain
  * the cheap primary-render cross-post behavior. */
 function crosspostVideoUrl(reel: IReel, threadsChannelId: string): string {
@@ -297,10 +335,16 @@ async function publishThreadsContainer(userId: string, creationId: string, token
   });
   return res.id;
 }
-async function waitForThreadsContainer(containerId: string, token: string): Promise<void> {
+async function waitForThreadsContainer(
+  containerId: string,
+  token: string,
+  initialDelayMs = 30_000,
+): Promise<void> {
   const deadline = Date.now() + config.threadsProcessingTimeoutMs;
-  // Threads recommends waiting ~30s before publishing a video container.
-  await new Promise((r) => setTimeout(r, Math.min(30_000, config.threadsProcessingTimeoutMs)));
+  // Video containers need time for Meta's media processing. Text reply
+  // containers are much faster, but still have to become FINISHED before
+  // /threads_publish accepts them.
+  await new Promise((r) => setTimeout(r, Math.min(initialDelayMs, config.threadsProcessingTimeoutMs)));
   while (Date.now() < deadline) {
     const status = await graph<{ status?: string }>(`/${containerId}?fields=status`, token);
     if (status.status === "FINISHED") return;
@@ -330,14 +374,25 @@ export async function publishReelToThreads(reelId: string, channelId: string): P
   await setStatus("uploading", { message: "Sending video to Threads…", error: undefined });
   try {
     const token = await accessTokenFor(channel);
-    const containerId = await createThreadsContainer(channel.threadsUserId, { media_type: "VIDEO", video_url: videoUrl, text }, token);
+    const containerId = await createThreadsContainer(
+      channel.threadsUserId,
+      { media_type: "VIDEO", video_url: publicMediaUrl(videoUrl), text },
+      token,
+    );
     await setStatus("uploading", { containerId, message: "Threads is processing the video…" });
     await waitForThreadsContainer(containerId, token);
     const mediaId = await publishThreadsContainer(channel.threadsUserId, containerId, token);
     let permalink: string | undefined;
     try { permalink = (await graph<{ permalink?: string }>(`/${mediaId}?fields=permalink`, token)).permalink; } catch { /* permalink may lag */ }
-    await setStatus("published", { containerId, mediaId, url: permalink, error: undefined, message: "Published.", publishedAt: new Date() });
+    const publishedAt = new Date();
+    await setStatus("published", { containerId, mediaId, url: permalink, error: undefined, message: "Published.", publishedAt });
     await ThreadsChannel.updateOne({ _id: channel._id }, { $set: { lastPublishedAt: new Date(), lastError: undefined } });
+    void import("./owned-analytics.service")
+      .then(({ registerOwnedPublication }) => registerOwnedPublication(reel, {
+        platform: "threads", accountKey: channel.channelKey, accountLabel: channel.label,
+        mediaId, url: permalink, publishedAt, firstCommentKind: "none",
+      }))
+      .catch((error) => console.warn(`Could not freeze Threads publication analytics context: ${getErrorMessage(error)}`));
 
     // Threaded "Part N" reply (own-media). Replies don't count toward the daily
     // publish cap. Best-effort.
@@ -345,6 +400,7 @@ export async function publishReelToThreads(reelId: string, channelId: string): P
       try {
         const reply = buildFirstCommentText(reel, "threads", THREADS_TEXT_MAX);
         const replyContainer = await createThreadsContainer(channel.threadsUserId, { media_type: "TEXT", text: reply.text, reply_to_id: mediaId }, token);
+        await waitForThreadsContainer(replyContainer, token, 1_000);
         const replyId = await publishThreadsContainer(channel.threadsUserId, replyContainer, token);
         await setStatus("published", { firstCommentStatus: "posted", firstCommentId: replyId, firstCommentError: undefined });
         recordOperationLog({ scope: "external", event: "threads.first_reply_posted", message: "Posted the own-post first reply on the published Thread", reelId, metadata: { channelId: channel.channelKey, mediaId, source: reply.source } });
@@ -353,10 +409,43 @@ export async function publishReelToThreads(reelId: string, channelId: string): P
         recordOperationLog({ scope: "external", level: "warn", event: "threads.first_reply_failed", message: "Thread published, but the own-post first reply could not be posted", reelId, metadata: { channelId: channel.channelKey, mediaId }, error: replyError });
       }
     }
+    // Live-part navigation is separate from the optional discussion prompt.
+    // A series should still link its verified published parts when that prompt
+    // is disabled or when its one-off reply fails.
+    void import("./series-navigation-comment.service")
+      .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "threads", channel.channelKey))
+      .catch((error) => console.warn(`Could not reconcile Threads series-navigation replies: ${getErrorMessage(error)}`));
   } catch (error) {
     const message = getErrorMessage(error);
     await setStatus("failed", { error: message, message: `Failed: ${message}` });
     await ThreadsChannel.updateOne({ _id: channel._id }, { $set: { lastError: message, status: /token|access|oauth/i.test(message) ? "needs_reauth" : channel.status } });
     throw error;
   }
+}
+
+/** Threads navigation is a separate own-post reply, after the target part is live. */
+export async function postThreadsSeriesNavigationReply(channelId: string, mediaId: string, text: string): Promise<string> {
+  const channel = await resolveThreadsChannel(channelId);
+  const token = await accessTokenFor(channel);
+  const containerId = await createThreadsContainer(channel.threadsUserId, { media_type: "TEXT", text, reply_to_id: mediaId }, token);
+  await waitForThreadsContainer(containerId, token, 1_000);
+  return publishThreadsContainer(channel.threadsUserId, containerId, token);
+}
+
+/** Manually post the separate discussion reply on an own published Thread. */
+export async function postThreadsFirstReply(reelId: string, channelId: string): Promise<string> {
+  const reel = await Reel.findById(reelId);
+  if (!reel) throw new Error("Reel not found");
+  const publish = reel.threads.find((item) => item.channelId === channelId && item.status === "published");
+  if (!publish?.mediaId) throw new Error("This reel has no published Thread on that profile yet");
+  const reply = buildFirstCommentText(reel, "threads", THREADS_TEXT_MAX);
+  const replyId = await postThreadsSeriesNavigationReply(channelId, publish.mediaId, reply.text);
+  await Reel.updateOne(
+    { _id: reelId, "threads.channelId": channelId },
+    { $set: { "threads.$.firstCommentStatus": "posted", "threads.$.firstCommentId": replyId, "threads.$.firstCommentError": undefined } },
+  );
+  void import("./series-navigation-comment.service")
+    .then(({ reconcileSeriesNavigationComments }) => reconcileSeriesNavigationComments(reelId, "threads", channelId))
+    .catch((error) => console.warn(`Could not reconcile Threads series-navigation replies: ${getErrorMessage(error)}`));
+  return replyId;
 }

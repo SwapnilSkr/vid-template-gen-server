@@ -7,6 +7,7 @@ import { Reel } from "../models/reel.model";
 import { getErrorMessage } from "../types";
 import { recordOperationLog } from "./operation-log.service";
 import { getTrendDigest } from "./trend-insight.service";
+import { redditStoryHookRules } from "./platform-copy-rules.service";
 import { reportLlmUsage, type LlmUsageCallback } from "./reel-script.service";
 import {
   discoverStoryUpdates,
@@ -31,6 +32,8 @@ export interface StoryDraft {
   genre?: string;
   subreddit?: string;
   author?: string;
+  /** Stabilized title-card handle; survives restructure/re-cut when set. */
+  cardUsername?: string;
   upvotes?: number;
   comments?: number;
   ageHours?: number;
@@ -945,7 +948,9 @@ async function llmStory(
   seed?: RedditPost,
   onLlmUsage?: LlmUsageCallback,
 ): Promise<StoryDraft> {
-  const llm = resolveModels(tier).llm;
+  // Story title and hook are distribution copy. Keep this inexpensive,
+  // deterministic in model choice, and aligned with the platform-copy layer.
+  const llm = resolveModels("cheap").llm;
   const seedBlock = seed
     ? `\nINSPIRATION (real post — use only as loose inspiration, do NOT copy specifics, names, or wording):\nTitle: ${seed.title}\nExcerpt: ${seed.body.slice(0, 600)}\n`
     : "";
@@ -960,6 +965,8 @@ RULES:
 - BODY: first person, conversational, 90-160 words, 5-10 short punchy sentences. Escalating tension, satisfying twist/payoff in the last sentence.
 - Read naturally aloud: spell out numbers, no markdown, no headings, no emojis, no "edit:"/"update:".
 - Must be ORIGINAL — invented people and details.
+
+${redditStoryHookRules()}
 
 OUTPUT JSON ONLY: { "title": "...", "body": "..." }`;
 
@@ -978,7 +985,7 @@ async function llmStorySeries(
   seed?: RedditPost,
   onLlmUsage?: LlmUsageCallback
 ): Promise<StoryDraft[]> {
-  const llm = resolveModels(tier).llm;
+  const llm = resolveModels("cheap").llm;
   const seedBlock = seed
     ? `\nINSPIRATION (real post — use only as loose inspiration, do NOT copy specifics, names, or wording):\nTitle: ${seed.title}\nExcerpt: ${seed.body.slice(0, 1000)}\n`
     : "";
@@ -1003,6 +1010,8 @@ RULES:
 - Final part gives the reveal/payoff.
 - Read naturally aloud: spell out numbers, no markdown, no headings, no emojis, no "edit:"/"update:".
 - Must be ORIGINAL — invented people and details.
+
+${redditStoryHookRules()}
 
 ${cliffhangerSpec}
 

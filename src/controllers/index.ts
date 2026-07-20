@@ -36,6 +36,7 @@ export {
   listReelSeriesController,
   getReelStatusController,
   downloadReelController,
+  trimFinishedReelVideoController,
   deleteReelController,
   deleteSeriesPartController,
   publishReelController,
@@ -46,6 +47,7 @@ export {
   regenerateReelReviewCopyController,
   regenerateInstagramCaptionController,
   regenerateInstagramPollSuggestionController,
+  regenerateCrossPostCopyController,
   regenerateThumbnailTextController,
   regenerateOutroCommentPromptController,
   revoiceReelController,
@@ -110,16 +112,23 @@ export {
 export {
   listTrendsController,
   getTrendSummaryController,
+  getTrendInsightController,
   triggerTrendScoutController,
   listHorrorReferencesController,
   triggerHorrorReferenceScoutController,
 } from "./trend.controller";
 
 export {
+  getOwnedAnalyticsOverviewController,
+  syncOwnedAnalyticsController,
+} from "./owned-analytics.controller";
+
+export {
   searchYoutubeController,
   listYtImportsController,
   getYtImportController,
   createYtImportController,
+  createGameplayMixController,
   extractFramesController,
   captionAtController,
   deleteYtImportController,
@@ -129,6 +138,13 @@ export {
   streamFrameController,
   streamAudioClipController,
 } from "./yt-import.controller";
+
+export {
+  deleteGameplayLibraryController,
+  renameGameplayLibraryController,
+  trimGameplayLibraryController,
+  speedGameplayLibraryController,
+} from "./gameplay-library.controller";
 
 // Maintenance controllers
 export {
@@ -168,6 +184,9 @@ export {
   completeFacebookConnectController,
   deleteFacebookPageController,
   updateFacebookPageController,
+  facebookUninstallController,
+  facebookDataDeletionController,
+  facebookDataDeletionStatusController,
   publishFacebookController,
   postFacebookFirstCommentController,
 } from "./facebook.controller";
@@ -177,6 +196,7 @@ export {
   completeThreadsConnectController,
   deleteThreadsChannelController,
   updateThreadsChannelController,
+  postThreadsFirstReplyController,
   threadsUninstallController,
   threadsDataDeletionController,
   threadsDataDeletionStatusController,

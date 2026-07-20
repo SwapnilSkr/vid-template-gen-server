@@ -10,6 +10,7 @@ import {
   listHorrorReferencesController,
   listTrendsController,
   getTrendSummaryController,
+  getTrendInsightController,
   triggerHorrorReferenceScoutController,
   triggerTrendScoutController,
 } from "../controllers";
@@ -22,6 +23,7 @@ import {
 export const trendRoutes = new Elysia({ prefix: "/api/trends" })
   .get("/", listTrendsController, { query: ListTrendsQuery })
   .get("/summary", getTrendSummaryController, { query: TrendSummaryQuery })
+  .get("/insights/:genre", getTrendInsightController)
   .post("/scout", triggerTrendScoutController, { body: TriggerScoutBody })
   .get("/horror-references", listHorrorReferencesController, {
     query: ListHorrorReferencesQuery,

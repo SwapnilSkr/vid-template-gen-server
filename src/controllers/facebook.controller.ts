@@ -3,6 +3,10 @@ import {
   cancelFacebookConnect,
   completeFacebookConnect,
   disableFacebookPage,
+  facebookCallbackUrl,
+  getFacebookDataDeletionRequest,
+  handleFacebookDataDeletion,
+  handleFacebookUninstall,
   listFacebookPages,
   postFacebookFirstComment,
   startFacebookConnect,
@@ -41,6 +45,43 @@ export async function updateFacebookPageController({ params, body }: Context & {
   return { success: true, data: await updateFacebookPage(params.id, body) };
 }
 
+/** Meta calls this when the Facebook user removes the app. */
+export async function facebookUninstallController({ body, set }: Context & { body: { signed_request: string } }) {
+  try {
+    await handleFacebookUninstall(body.signed_request);
+    return { success: true };
+  } catch (error) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+/** Facebook's data-deletion callback requires this exact top-level receipt,
+ * not the Studio API success envelope. */
+export async function facebookDataDeletionController({ body, set }: Context & { body: { signed_request: string } }) {
+  try {
+    const result = await handleFacebookDataDeletion(body.signed_request);
+    return {
+      url: facebookCallbackUrl(`/api/facebook/data-deletion/status/${result.confirmationCode}`),
+      confirmation_code: result.confirmationCode,
+    };
+  } catch (error) {
+    set.status = 400;
+    return { error: getErrorMessage(error) };
+  }
+}
+
+/** A short-lived human-readable confirmation URL returned to Meta. */
+export async function facebookDataDeletionStatusController({ params, set }: Context & { params: { confirmationCode: string } }) {
+  const request = await getFacebookDataDeletionRequest(params.confirmationCode);
+  if (!request) {
+    set.status = 404;
+    return "<!doctype html><title>Deletion request not found</title><p>Deletion request not found or expired.</p>";
+  }
+  set.headers["content-type"] = "text/html; charset=utf-8";
+  return "<!doctype html><title>Data deletion completed</title><body style=\"font-family:system-ui;padding:48px\"><h1>Data deletion completed</h1><p>The local Facebook Page authorization data for this app was deleted.</p></body>";
+}
+
 /** Fan a completed reel's shared 9:16 render out to one owned Page. */
 export async function publishFacebookController({ params, set }: Context & { params: TReelChannelParams }) {
   try {
@@ -48,13 +89,18 @@ export async function publishFacebookController({ params, set }: Context & { par
     if (!reel) { set.status = 404; return { success: false, error: "Reel not found" }; }
     if (reel.status !== "completed") { set.status = 400; return { success: false, error: `Reel not completed. Current status: ${reel.status}` }; }
     if (!reel.outputUrl) { set.status = 409; return { success: false, error: "This reel has no rendered output to cross-post yet" }; }
-    reel.facebook = [
+    const pendingFacebook = [
       ...reel.facebook.filter((p) => p.channelId !== params.channelId),
       { channelId: params.channelId, status: "pending", message: "Queued for Facebook publishing…", updatedAt: new Date() },
     ];
-    await reel.save();
+    // Facebook, Threads, and the YouTube/Instagram distribute endpoint can be
+    // selected in one Studio submission. Saving this stale document races the
+    // other platform controller and trips Mongoose's optimistic concurrency
+    // check, causing one otherwise-valid destination to disappear before it
+    // reaches BullMQ. Update only Facebook's field atomically instead.
+    await Reel.updateOne({ _id: reel._id }, { $set: { facebook: pendingFacebook } });
     await enqueuePublish(params.reelId, "facebook", params.channelId);
-    return { success: true, data: { facebook: reel.facebook }, message: "Facebook publish job queued" };
+    return { success: true, data: { facebook: pendingFacebook }, message: "Facebook publish job queued" };
   } catch (error) { set.status = 400; return { success: false, error: getErrorMessage(error) }; }
 }
 
