@@ -1,5 +1,12 @@
 import { Elysia } from "elysia";
-import { ReelDefaultsQuery, VoiceSampleQuery } from "../types/guards";
+import {
+  GameplayLibraryDeleteBody,
+  GameplayLibraryRenameBody,
+  GameplayLibrarySpeedBody,
+  GameplayLibraryTrimBody,
+  ReelDefaultsQuery,
+  VoiceSampleQuery,
+} from "../types/guards";
 import {
   listGameplayController,
   listTtsVoicesController,
@@ -11,6 +18,10 @@ import {
   listStylePresetsController,
   listFontsController,
   getFontFileController,
+  deleteGameplayLibraryController,
+  renameGameplayLibraryController,
+  trimGameplayLibraryController,
+  speedGameplayLibraryController,
 } from "../controllers";
 import { checkFfmpegCapability } from "../services/ffmpeg-capability.service";
 
@@ -21,6 +32,10 @@ import { checkFfmpegCapability } from "../services/ffmpeg-capability.service";
 
 export const metaRoutes = new Elysia({ prefix: "/api" })
   .get("/gameplay", listGameplayController)
+  .delete("/gameplay", deleteGameplayLibraryController, { body: GameplayLibraryDeleteBody })
+  .patch("/gameplay", renameGameplayLibraryController, { body: GameplayLibraryRenameBody })
+  .post("/gameplay/trim", trimGameplayLibraryController, { body: GameplayLibraryTrimBody })
+  .post("/gameplay/speed", speedGameplayLibraryController, { body: GameplayLibrarySpeedBody })
   .get("/horror-audio", listHorrorAudioController)
   .get("/art-styles", listArtStylesController)
   .get("/style-presets", listStylePresetsController)

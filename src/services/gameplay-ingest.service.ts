@@ -1,8 +1,9 @@
 import ffmpeg from "fluent-ffmpeg";
-import { readdir, mkdir, copyFile, readFile, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { readdir, mkdir, copyFile, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, basename, extname } from "node:path";
 import { config } from "../config";
-import { ensureDir } from "../utils";
+import { concatDemuxerEntry, ensureDir } from "../utils";
 import { uploadToS3, cdnUrlFor } from "./s3.service";
 
 // ============================================
@@ -32,9 +33,9 @@ export interface IngestedClip {
  * Process one raw source video into clean 9:16 no-audio loop segments,
  * upload each to S3/gameplay, and cache locally.
  */
-export async function ingestGameplaySource(sourcePath: string): Promise<IngestedClip[]> {
+export async function ingestGameplaySource(sourcePath: string, nameHint?: string): Promise<IngestedClip[]> {
   await ensureDir(config.gameplayDir);
-  const base = basename(sourcePath, extname(sourcePath)).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const base = (nameHint || basename(sourcePath, extname(sourcePath))).replace(/[^a-zA-Z0-9_-]/g, "_");
   const workDir = join(config.processingPath, `gp_${base}_${Date.now()}`);
   await mkdir(workDir, { recursive: true });
 
@@ -63,6 +64,36 @@ export async function ingestGameplaySource(sourcePath: string): Promise<Ingested
       console.log(`🎮 Ingested gameplay: ${key}`);
     }
     return out;
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Make one independent gameplay asset from several source videos. Sources are
+ * individually normalised first, then concatenated before the final 75-second
+ * segmentation. No source video or audio is retained in S3. */
+export async function ingestGameplayMixSources(sourcePaths: string[], nameHint: string): Promise<IngestedClip[]> {
+  if (sourcePaths.length < 2) throw new Error("Choose at least two YouTube videos for a gameplay mix");
+  const base = nameHint.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const workDir = join(config.processingPath, `gp_mix_${base}_${Date.now()}`);
+  await mkdir(workDir, { recursive: true });
+  try {
+    const normalised: string[] = [];
+    for (let index = 0; index < sourcePaths.length; index++) {
+      const output = join(workDir, `source_${String(index).padStart(2, "0")}.mp4`);
+      await normalizeGameplaySource(sourcePaths[index], output);
+      normalised.push(output);
+    }
+    const listPath = join(workDir, "sources.txt");
+    await writeFile(listPath, normalised.map(concatDemuxerEntry).join("\n"));
+    const mixedPath = join(workDir, `${base}.mp4`);
+    await concatNormalisedSources(listPath, mixedPath);
+    const mixedSize = await stat(mixedPath).then((file) => file.size).catch(() => 0);
+    if (!mixedSize) throw new Error("Gameplay mix concatenation produced no combined video");
+    // Await here: returning the promise directly would run this function's
+    // finally block immediately and delete mixedPath while FFmpeg is still
+    // reading it in ingestGameplaySource().
+    return await ingestGameplaySource(mixedPath, base);
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -97,5 +128,37 @@ function segmentClean(source: string, outPattern: string): Promise<void> {
       .on("end", () => resolve())
       .on("error", (err) => reject(new Error(`Gameplay processing failed: ${err.message}`)))
       .run();
+  });
+}
+
+function normalizeGameplaySource(source: string, output: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(source)
+      .outputOptions([
+        "-an",
+        "-vf", `scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},fps=${FPS}`,
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-pix_fmt", "yuv420p", "-g", String(FPS * 2),
+      ])
+      .output(output)
+      .on("end", () => resolve())
+      .on("error", (err) => reject(new Error(`Gameplay mix normalisation failed: ${err.message}`)))
+      .run();
+  });
+}
+
+function concatNormalisedSources(listPath: string, output: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(config.ffmpegPath, [
+      "-y", "-f", "concat", "-safe", "0", "-i", listPath,
+      "-map", "0:v:0", "-c:v", "copy", "-an", output,
+    ]);
+    let stderr = "";
+    proc.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    proc.on("error", (error) => reject(new Error(`Gameplay mix concatenation could not start: ${error.message}`)));
+    proc.on("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Gameplay mix concatenation failed (ffmpeg ${code}): ${stderr.slice(-800)}`));
+    });
   });
 }

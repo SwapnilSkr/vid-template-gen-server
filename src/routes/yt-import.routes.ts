@@ -4,6 +4,7 @@ import {
   AudioClipQuery,
   CaptionAtQuery,
   CreateYtImportBody,
+  CreateGameplayMixBody,
   ExtractFramesBody,
   ListYtImportsQuery,
   SearchYoutubeQuery,
@@ -12,6 +13,7 @@ import {
 import {
   captionAtController,
   createYtImportController,
+  createGameplayMixController,
   deleteYtImportController,
   extractFramesController,
   getYtImportController,
@@ -28,6 +30,7 @@ export const ytImportRoutes = new Elysia({ prefix: "/api/yt-imports" })
   .get("/search", searchYoutubeController, { query: SearchYoutubeQuery })
   .get("/", listYtImportsController, { query: ListYtImportsQuery })
   .post("/", createYtImportController, { body: CreateYtImportBody })
+  .post("/gameplay-mix", createGameplayMixController, { body: CreateGameplayMixBody })
   .get("/:id", getYtImportController, { params: IdParams })
   .delete("/:id", deleteYtImportController, { params: IdParams })
   .post("/:id/extract-frames", extractFramesController, {

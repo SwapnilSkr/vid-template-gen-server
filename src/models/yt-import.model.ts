@@ -23,6 +23,14 @@ export interface IYtImportFrameMeta {
   url: string;
 }
 
+/** A non-destructive source window used while building a gameplay mix. The raw
+ * YouTube file exists only in the worker's temporary directory. */
+export interface IGameplayMixSource {
+  videoId: string;
+  startSec?: number;
+  endSec?: number;
+}
+
 export interface IYtImport extends Document {
   _id: Types.ObjectId;
   /** Clean folder prefix, e.g. dQw4w9WgXcQ_never-gonna-give-you-up */
@@ -35,6 +43,19 @@ export interface IYtImport extends Document {
   durationSec?: number;
 
   storage: YtImportStorage;
+  /** Reference downloads retain their source media. Gameplay imports only retain
+   * the cleaned, muted clips under the S3 gameplay/ prefix. */
+  purpose: "reference" | "gameplay" | "gameplay_mix";
+  /** Ordered YouTube source ids used only by a gameplay mix import. */
+  sourceVideoIds?: string[];
+  /** Ordered source windows for gameplay mixes. `sourceVideoIds` remains for
+   * older mixes created before in/out trimming existed. */
+  gameplayMixSources?: IGameplayMixSource[];
+  /** Optional in/out window for a one-video gameplay import. */
+  sourceTrimStartSec?: number;
+  sourceTrimEndSec?: number;
+  /** Playback rate baked into muted gameplay segments (1 = native). */
+  gameplaySpeed?: number;
   downloadCaptions: boolean;
   extractFrames: boolean;
   /** Inclusive range for frame extraction (seconds). end unset = video end. */
@@ -59,6 +80,8 @@ export interface IYtImport extends Document {
   frameCount: number;
   fps?: number;
   framesExtracted: boolean;
+  /** S3 gameplay keys created by a gameplay-only YouTube import. */
+  gameplayClipKeys?: string[];
 
   createdAt: Date;
   updatedAt: Date;
@@ -69,6 +92,15 @@ const captionCueSchema = new Schema<IYtImportCaptionCue>(
     startSec: { type: Number, required: true },
     endSec: { type: Number, required: true },
     text: { type: String, required: true },
+  },
+  { _id: false }
+);
+
+const gameplayMixSourceSchema = new Schema<IGameplayMixSource>(
+  {
+    videoId: { type: String, required: true, trim: true },
+    startSec: { type: Number, min: 0 },
+    endSec: { type: Number, min: 0 },
   },
   { _id: false }
 );
@@ -84,6 +116,12 @@ const ytImportSchema = new Schema<IYtImport>(
     durationSec: { type: Number, min: 0 },
 
     storage: { type: String, enum: ["local", "s3"], required: true },
+    purpose: { type: String, enum: ["reference", "gameplay", "gameplay_mix"], default: "reference", index: true },
+    sourceVideoIds: [{ type: String, trim: true }],
+    gameplayMixSources: [gameplayMixSourceSchema],
+    sourceTrimStartSec: { type: Number, min: 0 },
+    sourceTrimEndSec: { type: Number, min: 0 },
+    gameplaySpeed: { type: Number, min: 0.25, max: 2 },
     downloadCaptions: { type: Boolean, default: true },
     extractFrames: { type: Boolean, default: false },
     frameRangeStartSec: { type: Number, min: 0 },
@@ -109,6 +147,7 @@ const ytImportSchema = new Schema<IYtImport>(
     frameCount: { type: Number, default: 0, min: 0 },
     fps: { type: Number, min: 0 },
     framesExtracted: { type: Boolean, default: false },
+    gameplayClipKeys: [{ type: String, trim: true }],
   },
   { timestamps: true }
 );

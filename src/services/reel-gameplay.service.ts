@@ -9,6 +9,7 @@ import {
   type MediaUsageCallback,
 } from "./openrouter-media.service";
 import { listKeys, cdnUrlFor } from "./s3.service";
+import { listGameplayLibraryWithMeta } from "./gameplay-library.service";
 import { renderPartOutroCard, renderRedditCard } from "./reddit-card.service";
 import type { RedditStory } from "./reel-script.service";
 import { DEFAULT_BUNDLED_FONT_FAMILY } from "../config/fonts";
@@ -111,10 +112,9 @@ export async function pickGameplay(preferredKey?: string): Promise<PickedGamepla
 
 /** List available gameplay clips in the S3 pool for the picker UI. */
 export async function listGameplayLibrary(): Promise<
-  { key: string; url: string; filename: string }[]
+  { key: string; url: string; filename: string; sizeBytes?: number; lastModified?: Date; reelReferenceCount: number }[]
 > {
-  const keys = (await listKeys("gameplay/")).filter((k) => /\.(mp4|mov|webm)$/i.test(k));
-  return keys.map((key) => ({ key, url: cdnUrlFor(key), filename: basename(key) }));
+  return listGameplayLibraryWithMeta();
 }
 
 /** Download an S3 object (via CDN, falling back to direct S3) into the cache. */

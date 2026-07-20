@@ -713,3 +713,56 @@ export async function removeAudioFromVideo(
 ): Promise<string> {
   return trimVideo(inputPath, { removeAudio: true }, outputPath);
 }
+
+/**
+ * Re-time a video. `speed > 1` is faster (shorter); `speed < 1` is slower.
+ * Gameplay backgrounds are muted — audio is dropped by default.
+ */
+export async function changeVideoSpeed(
+  inputPath: string,
+  speed: number,
+  outputPath: string,
+  opts: { removeAudio?: boolean; fps?: number } = {}
+): Promise<string> {
+  if (!(speed > 0) || !Number.isFinite(speed)) {
+    throw new Error("Video speed must be a positive number");
+  }
+  if (Math.abs(speed - 1) < 1e-6) {
+    // Caller should no-op before invoking, but keep a safe identity path.
+    const { copyFile } = await import("node:fs/promises");
+    await copyFile(inputPath, outputPath);
+    return outputPath;
+  }
+  await ensureDir(config.processingPath);
+  const fps = opts.fps ?? 30;
+  const removeAudio = opts.removeAudio !== false;
+  // setpts=PTS/N advances the clock by N — N=2 plays twice as fast.
+  const vf = `setpts=PTS/${speed.toFixed(4)},fps=${fps}`;
+
+  return new Promise((resolve, reject) => {
+    const outputOptions = [
+      "-vf",
+      vf,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "fast",
+      "-movflags",
+      "+faststart",
+    ];
+    if (removeAudio) outputOptions.push("-an");
+    else outputOptions.push("-af", `atempo=${Math.min(2, Math.max(0.5, speed)).toFixed(3)}`, "-c:a", "aac");
+
+    ffmpeg(inputPath)
+      .outputOptions(outputOptions)
+      .output(outputPath)
+      .on("end", () => {
+        console.log(`⏩ Video speed ${speed}x → ${outputPath}`);
+        resolve(outputPath);
+      })
+      .on("error", (err) => {
+        reject(new Error(`Video speed change failed: ${err.message}`));
+      })
+      .run();
+  });
+}

@@ -1,12 +1,15 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import ffmpeg from "fluent-ffmpeg";
 import { config } from "../config";
-import { YtImport, type IYtImport, type IYtImportCaptionCue } from "../models";
-import { getVideoMetadata } from "./ffmpeg.service";
+import { YtImport, type IGameplayMixSource, type IYtImport, type IYtImportCaptionCue } from "../models";
+import { changeVideoSpeed, getVideoMetadata, trimVideo } from "./ffmpeg.service";
 import { getYoutubeVideoMetadata } from "./youtube-search.service";
+import { ingestGameplayMixSources, ingestGameplaySource } from "./gameplay-ingest.service";
+import { assertGameplaySpeed } from "./gameplay-library.service";
 import {
   cdnUrlFor,
   deleteKey,
@@ -29,6 +32,15 @@ export interface CreateYtImportInput {
   extractFrames?: boolean;
   frameRangeStartSec?: number;
   frameRangeEndSec?: number;
+  asGameplay?: boolean;
+  sourceTrimStartSec?: number;
+  sourceTrimEndSec?: number;
+  gameplaySpeed?: number;
+}
+
+export interface CreateGameplayMixInput {
+  sources: IGameplayMixSource[];
+  title?: string;
 }
 
 export interface FrameExtractRange {
@@ -122,11 +134,13 @@ function runCommand(bin: string, args: string[]): Promise<void> {
   });
 }
 
-async function downloadVideo(videoId: string, outPath: string): Promise<void> {
+async function downloadVideo(videoId: string, outPath: string, videoOnly = false): Promise<void> {
   await ensureDir(join(outPath, ".."));
   await runCommand(YT_DLP_BIN, [
     "-f",
-    "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
+    videoOnly
+      ? "bv*[height<=1080][ext=mp4]/bv*[height<=1080]/b[height<=1080][ext=mp4]/b"
+      : "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
     "--merge-output-format",
     "mp4",
     "-o",
@@ -268,12 +282,35 @@ async function updateImport(
   id: string,
   patch: Partial<IYtImport> & { progress?: number }
 ): Promise<void> {
+  // Mongoose omits `undefined` fields in ordinary updates. Treat an explicit
+  // `error: undefined` as an instruction to clear an error left by a retry.
+  if (Object.prototype.hasOwnProperty.call(patch, "error") && patch.error === undefined) {
+    const { error: _error, ...set } = patch;
+    await YtImport.findByIdAndUpdate(id, { $set: set, $unset: { error: 1 } });
+    return;
+  }
   await YtImport.findByIdAndUpdate(id, patch);
 }
 
 export async function createYtImport(input: CreateYtImportInput): Promise<IYtImport> {
   const meta = await getYoutubeVideoMetadata(input.videoId);
-  const assetId = buildAssetId(meta.videoId, meta.title);
+  const asGameplay = input.asGameplay === true;
+  if (asGameplay && input.sourceTrimEndSec != null && input.sourceTrimEndSec <= (input.sourceTrimStartSec ?? 0)) {
+    throw new Error("Gameplay clip end must be after its start");
+  }
+  const gameplaySpeed = asGameplay
+    ? assertGameplaySpeed(input.gameplaySpeed ?? 1)
+    : undefined;
+  // Keep reference and gameplay imports separate: one video can be used for
+  // frame/caption research and also become a disposable gameplay source.
+  const trimIdentity = asGameplay && (input.sourceTrimStartSec || input.sourceTrimEndSec != null)
+    ? `_clip_${Math.round((input.sourceTrimStartSec ?? 0) * 10)}_${input.sourceTrimEndSec == null ? "end" : Math.round(input.sourceTrimEndSec * 10)}`
+    : "";
+  const speedIdentity =
+    asGameplay && gameplaySpeed && gameplaySpeed !== 1
+      ? `_spd_${String(gameplaySpeed).replace(".", "p")}`
+      : "";
+  const assetId = `${buildAssetId(meta.videoId, meta.title)}${asGameplay ? `_gameplay${trimIdentity}${speedIdentity}` : ""}`;
 
   const existing = await YtImport.findOne({ assetId });
   if (existing && existing.status !== "failed") {
@@ -301,8 +338,11 @@ export async function createYtImport(input: CreateYtImportInput): Promise<IYtImp
       thumbnailUrl: meta.thumbnailUrl,
       durationSec: meta.durationSec,
       storage: input.storage,
-      downloadCaptions: input.downloadCaptions ?? true,
-      extractFrames: input.extractFrames ?? false,
+      purpose: asGameplay ? "gameplay" : "reference",
+      // Gameplay is an opaque background; captions, frames and source audio
+      // are needless storage and processing.
+      downloadCaptions: asGameplay ? false : input.downloadCaptions ?? true,
+      extractFrames: asGameplay ? false : input.extractFrames ?? false,
       frameRangeStartSec: input.extractFrames ? frameRange?.startSec ?? 0 : undefined,
       frameRangeEndSec: input.extractFrames
         ? frameRange?.endSec ?? meta.durationSec
@@ -314,11 +354,55 @@ export async function createYtImport(input: CreateYtImportInput): Promise<IYtImp
       s3Prefix: input.storage === "s3" ? paths.s3Prefix : undefined,
       frameCount: 0,
       framesExtracted: false,
+      gameplayClipKeys: asGameplay ? [] : undefined,
+      sourceTrimStartSec: asGameplay && input.sourceTrimStartSec && input.sourceTrimStartSec > 0 ? input.sourceTrimStartSec : undefined,
+      sourceTrimEndSec: asGameplay ? input.sourceTrimEndSec : undefined,
+      gameplaySpeed: asGameplay ? gameplaySpeed : undefined,
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
   return doc!;
+}
+
+/** Queue a gameplay-only mix. Source videos are downloaded into a temporary
+ * processing folder, normalised/muted/concatenated, then discarded. */
+export async function createGameplayMix(input: CreateGameplayMixInput): Promise<IYtImport> {
+  const sources: IGameplayMixSource[] = input.sources.map((source) => ({
+    videoId: source.videoId.trim(),
+    startSec: source.startSec && source.startSec > 0 ? source.startSec : undefined,
+    endSec: source.endSec,
+  }));
+  if (sources.length < 2) throw new Error("Choose at least two YouTube videos for a gameplay mix");
+  if (sources.length > 8) throw new Error("A gameplay mix can contain at most eight YouTube videos");
+  for (const source of sources) {
+    if (!source.videoId) throw new Error("Every gameplay mix source needs a YouTube video id");
+    if (source.endSec != null && source.endSec <= (source.startSec ?? 0)) {
+      throw new Error("Each gameplay clip's end must be after its start");
+    }
+  }
+  const videoIds = sources.map((source) => source.videoId);
+  const assetId = `gameplay_mix_${randomUUID().replace(/-/g, "").slice(0, 14)}`;
+  const title = input.title?.trim() || `Gameplay mix · ${videoIds.length} YouTube videos`;
+  const doc = await YtImport.create({
+    assetId,
+    youtubeVideoId: videoIds[0],
+    sourceVideoIds: videoIds,
+    gameplayMixSources: sources,
+    sourceUrl: `https://www.youtube.com/watch?v=${videoIds[0]}`,
+    title,
+    channelTitle: "YouTube gameplay mix",
+    storage: "s3",
+    purpose: "gameplay_mix",
+    downloadCaptions: false,
+    extractFrames: false,
+    status: "pending",
+    progress: 0,
+    frameCount: 0,
+    framesExtracted: false,
+    gameplayClipKeys: [],
+  });
+  return doc;
 }
 
 export async function processYtImport(importId: string): Promise<void> {
@@ -333,9 +417,82 @@ export async function processYtImport(importId: string): Promise<void> {
     await updateImport(importId, { status: "downloading", progress: 5, error: undefined });
     await ensureDir(workDir);
 
+    if (doc.purpose === "gameplay_mix") {
+      const sources: IGameplayMixSource[] = doc.gameplayMixSources?.length
+        ? doc.gameplayMixSources
+        : (doc.sourceVideoIds?.length ? doc.sourceVideoIds : [doc.youtubeVideoId]).map((videoId) => ({ videoId }));
+      if (sources.length < 2) throw new Error("Gameplay mix has fewer than two source videos");
+      const sourcePaths: string[] = [];
+      for (let index = 0; index < sources.length; index++) {
+        const source = sources[index]!;
+        const sourcePath = join(workDir, `source_${String(index).padStart(2, "0")}.mp4`);
+        await downloadVideo(source.videoId, sourcePath, true);
+        if (source.startSec || source.endSec != null) {
+          const clippedPath = join(workDir, `source_${String(index).padStart(2, "0")}_trimmed.mp4`);
+          await trimVideo(sourcePath, {
+            trimStart: source.startSec ?? 0,
+            keepDuration: source.endSec != null
+              ? source.endSec - (source.startSec ?? 0)
+              : undefined,
+          }, clippedPath);
+          await rm(sourcePath, { force: true });
+          sourcePaths.push(clippedPath);
+        } else {
+          sourcePaths.push(sourcePath);
+        }
+        await updateImport(importId, { progress: 5 + Math.round(((index + 1) / sources.length) * 40) });
+      }
+      await updateImport(importId, { status: "uploading", progress: 50 });
+      const clips = await ingestGameplayMixSources(sourcePaths, doc.assetId);
+      await rm(workDir, { recursive: true, force: true });
+      await updateImport(importId, {
+        status: "completed", progress: 100, gameplayClipKeys: clips.map((clip) => clip.key),
+        localDir: undefined, s3Prefix: undefined,
+      });
+      return;
+    }
+
     const videoPath = join(workDir, paths.videoFile);
-    await downloadVideo(doc.youtubeVideoId, videoPath);
+    await downloadVideo(doc.youtubeVideoId, videoPath, doc.purpose === "gameplay");
     await updateImport(importId, { progress: 35 });
+
+    if (doc.purpose === "gameplay") {
+      const trimmedPath = (doc.sourceTrimStartSec || doc.sourceTrimEndSec != null)
+        ? join(workDir, "gameplay_trimmed.mp4")
+        : undefined;
+      if (trimmedPath) {
+        await trimVideo(videoPath, {
+          trimStart: doc.sourceTrimStartSec ?? 0,
+          keepDuration: doc.sourceTrimEndSec != null
+            ? doc.sourceTrimEndSec - (doc.sourceTrimStartSec ?? 0)
+            : undefined,
+        }, trimmedPath);
+        await rm(videoPath, { force: true });
+      }
+      let gameplaySource = trimmedPath ?? videoPath;
+      const speed = doc.gameplaySpeed != null ? assertGameplaySpeed(doc.gameplaySpeed) : 1;
+      if (speed !== 1) {
+        const spedPath = join(workDir, "gameplay_sped.mp4");
+        await changeVideoSpeed(gameplaySource, speed, spedPath, { removeAudio: true, fps: 30 });
+        if (gameplaySource !== videoPath) await rm(gameplaySource, { force: true }).catch(() => {});
+        gameplaySource = spedPath;
+      }
+      const videoMeta = await getVideoMetadata(gameplaySource);
+      await updateImport(importId, { status: "uploading", progress: 45 });
+      const clips = await ingestGameplaySource(gameplaySource, doc.assetId);
+      // Discard the raw YT download + any intermediate trim/speed files. Only
+      // the muted 9:16 segments under gameplay/ remain in S3.
+      await rm(workDir, { recursive: true, force: true });
+      await updateImport(importId, {
+        status: "completed",
+        progress: 100,
+        fps: videoMeta.frameRate,
+        gameplayClipKeys: clips.map((clip) => clip.key),
+        localDir: undefined,
+        s3Prefix: undefined,
+      });
+      return;
+    }
 
     let captionsPath: string | undefined;
     let captions: IYtImportCaptionCue[] = [];

@@ -4,6 +4,7 @@ import type {
   TAudioClipQuery,
   TCaptionAtQuery,
   TCreateYtImportBody,
+  TCreateGameplayMixBody,
   TExtractFramesBody,
   TListYtImportsQuery,
   TSearchYoutubeQuery,
@@ -14,6 +15,7 @@ import { searchYoutubeVideos } from "../services/youtube-search.service";
 import {
   captionAtTime,
   createYtImport,
+  createGameplayMix,
   deleteYtImport,
   extractAudioClip,
   getLocalAssetPath,
@@ -34,6 +36,10 @@ interface SearchContext extends Context {
 
 interface CreateContext extends Context {
   body: TCreateYtImportBody;
+}
+
+interface CreateGameplayMixContext extends Context {
+  body: TCreateGameplayMixBody;
 }
 
 interface IdContext extends Context {
@@ -76,7 +82,7 @@ function serializeImport(doc: IYtImport | null) {
 export async function searchYoutubeController({ query, set }: SearchContext) {
   try {
     const maxResults = query.maxResults ? parseInt(query.maxResults, 10) : 12;
-    const results = await searchYoutubeVideos(query.q, maxResults);
+    const results = await searchYoutubeVideos(query.q, maxResults, query.pageToken);
     return { success: true, data: results };
   } catch (error: unknown) {
     set.status = 400;
@@ -117,6 +123,17 @@ export async function createYtImportController({ body, set }: CreateContext) {
       data: serializeImport(doc),
       message: doc.status === "pending" ? "Download queued" : "Import already exists",
     };
+  } catch (error: unknown) {
+    set.status = 400;
+    return { success: false, error: getErrorMessage(error) };
+  }
+}
+
+export async function createGameplayMixController({ body, set }: CreateGameplayMixContext) {
+  try {
+    const doc = await createGameplayMix(body);
+    await enqueueYtImport(String(doc._id));
+    return { success: true, data: serializeImport(doc), message: "Gameplay mix queued" };
   } catch (error: unknown) {
     set.status = 400;
     return { success: false, error: getErrorMessage(error) };
